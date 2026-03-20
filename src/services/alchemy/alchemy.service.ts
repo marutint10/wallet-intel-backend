@@ -8,17 +8,20 @@ export class AlchemyService {
 
   async getTransactions(address: string) {
     const payload = {
-      jsonrpc: '2.0',
-      method: 'alchemy_getAssetTransfers',
-      params: [
-        {
-          fromBlock: '0x0',
-          toAddress: address,
-          category: ['external', 'erc20'],
-        },
-      ],
-      id: 1,
-    };
+  jsonrpc: '2.0',
+  method: 'alchemy_getAssetTransfers',
+  params: [
+    {
+      fromBlock: '0x0',
+      toAddress: address,
+      category: ['external', 'erc20'],
+      withMetadata: true, // ✅ ADD THIS
+    },
+  ],
+  id: 1,
+};
+
+    
 
     const response = await axios.post(this.url, payload);
     return response.data;
