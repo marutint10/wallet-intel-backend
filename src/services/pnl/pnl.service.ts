@@ -1,42 +1,48 @@
 import { Injectable } from '@nestjs/common';
 
+type TokenPnL = {
+  token: string;
+  buy: number;
+  sell: number;
+  pnl: number;
+};
+
 @Injectable()
 export class PnlService {
   calculatePnL(trades: any[]) {
-    let totalBuy = 0;
-    let totalSell = 0;
-    let winTrades = 0;
-    let totalTrades = 0;
+    const tokenStats: Record<string, { buy: number; sell: number }> = {};
 
     for (const trade of trades) {
-      if (!trade.value) continue;
+      const token = trade.asset;
+
+      if (!tokenStats[token]) {
+        tokenStats[token] = { buy: 0, sell: 0 };
+      }
 
       if (trade.type === 'BUY') {
-        totalBuy += Number(trade.value);
-        totalTrades++;
+        tokenStats[token].buy += Number(trade.value);
       }
 
       if (trade.type === 'SELL') {
-        totalSell += Number(trade.value);
-        totalTrades++;
-
-        if (trade.value > 0) {
-          winTrades++; // simple assumption for now
-        }
+        tokenStats[token].sell += Number(trade.value);
       }
     }
 
-    const pnl = totalSell - totalBuy;
-    const winRate = totalTrades
-      ? (winTrades / totalTrades) * 100
-      : 0;
+    const results: TokenPnL[] = [];
+
+    for (const token in tokenStats) {
+      const { buy, sell } = tokenStats[token];
+
+      results.push({
+        token,
+        buy,
+        sell,
+        pnl: sell - buy,
+      });
+    }
 
     return {
-      total_pnl: pnl,
-      total_buy: totalBuy,
-      total_sell: totalSell,
-      total_trades: totalTrades,
-      win_rate: winRate.toFixed(2),
+      token_pnl: results,
     };
   }
 }
