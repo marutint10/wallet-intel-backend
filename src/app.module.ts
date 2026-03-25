@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { WalletModule } from './wallet/wallet.module';
 import { AlchemyService } from './services/alchemy/alchemy.service';
@@ -11,6 +13,16 @@ import { WalletClassifierService } from './services/wallet-classifier/wallet-cla
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    TypeOrmModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        type: 'postgres',
+        url: configService.get<string>('DATABASE_URL'),
+        entities: [__dirname + '/**/*.entity{.ts,.js}'],
+        synchronize: true,
+        ssl: { rejectUnauthorized: false },
+      }),
+    }),
     BlockchainModule,
     WalletModule,
   ],
