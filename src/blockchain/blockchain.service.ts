@@ -21,6 +21,10 @@ export class BlockchainService {
     private readonly heliusService: HeliusService,
   ) {}
 
+  async fetchAndStore(address: string, limit = 25): Promise<FetchResult> {
+    return this.syncWallet(address, limit);
+  }
+
   async syncWallet(address: string, limit = 25): Promise<FetchResult> {
     const network = detectBlockchainNetwork(address);
     const options: FetchTransactionsOptions = { address, network, limit };
