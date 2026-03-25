@@ -1,13 +1,18 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Moralis from 'moralis';
-import { EvmChain } from '@moralisweb3/common-evm-utils';
 import { FetchTransactionsOptions, ProviderFetchResult } from '../interfaces/transaction.interface';
-import { withBackoff } from '../utils/backoff.util';
+import { withBackoff as withExponentialBackoff } from '../utils/backoff.util';
 import { normalizeTransaction } from '../utils/normalizer.util';
+
+type MoralisJsonResponse = {
+  result: Record<string, unknown>[];
+  cursor?: string | null;
+};
 
 @Injectable()
 export class MoralisService implements OnModuleInit {
+  private readonly logger = new Logger(MoralisService.name);
   private started = false;
 
   constructor(private readonly configService: ConfigService) {}
@@ -41,15 +46,24 @@ export class MoralisService implements OnModuleInit {
     return true;
   }
 
-  private async fetchAllNativeTransactions(options: FetchTransactionsOptions) {
+  private async fetchAllNativeTransactions(walletAddress: string): Promise<Record<string, unknown>[]> {
+    const all: Record<string, unknown>[] = [];
+
     try {
-      return await withBackoff(() =>
-        Moralis.EvmApi.transaction.getWalletTransactions({
-          address: options.address,
-          chain: EvmChain.ETHEREUM,
-          limit: options.limit,
-        }),
-      );
+      let cursor: string | undefined;
+      do {
+        const response = await withExponentialBackoff(() =>
+          Moralis.EvmApi.transaction.getWalletTransactions({
+            address: walletAddress,
+            chain: '0x1',
+            cursor,
+            limit: 100,
+          }),
+        );
+        const json = response.toJSON() as MoralisJsonResponse;
+        all.push(...json.result);
+        cursor = json.cursor ?? undefined;
+      } while (cursor);
     } catch (error) {
       const typedError = error as { message?: string; details?: { status?: number }; status?: number };
       console.error('Moralis native transaction fetch failed:', typedError.message ?? error);
@@ -57,17 +71,28 @@ export class MoralisService implements OnModuleInit {
       console.log('Moralis API Key present:', !!process.env.MORALIS_API_KEY);
       throw error;
     }
+
+    return all;
   }
 
-  private async fetchAllTokenTransfers(options: FetchTransactionsOptions) {
+  private async fetchAllTokenTransfers(walletAddress: string): Promise<Record<string, unknown>[]> {
+    const all: Record<string, unknown>[] = [];
+
     try {
-      return await withBackoff(() =>
-        Moralis.EvmApi.token.getWalletTokenTransfers({
-          address: options.address,
-          chain: EvmChain.ETHEREUM,
-          limit: options.limit,
-        }),
-      );
+      let cursor: string | undefined;
+      do {
+        const response = await withExponentialBackoff(() =>
+          Moralis.EvmApi.token.getWalletTokenTransfers({
+            address: walletAddress,
+            chain: '0x1',
+            cursor,
+            limit: 100,
+          }),
+        );
+        const json = response.toJSON() as MoralisJsonResponse;
+        all.push(...json.result);
+        cursor = json.cursor ?? undefined;
+      } while (cursor);
     } catch (error) {
       const typedError = error as { message?: string; details?: { status?: number }; status?: number };
       console.error('Moralis token transfer fetch failed:', typedError.message ?? error);
@@ -75,6 +100,47 @@ export class MoralisService implements OnModuleInit {
       console.log('Moralis API Key present:', !!process.env.MORALIS_API_KEY);
       throw error;
     }
+
+    return all;
+  }
+
+  private async getAllTransactions(walletAddress: string): Promise<Record<string, unknown>[]> {
+    const [nativeTxns, tokenTransfers] = await Promise.all([
+      this.fetchAllNativeTransactions(walletAddress),
+      this.fetchAllTokenTransfers(walletAddress),
+    ]);
+
+    this.logger.log(`Native txns total: ${nativeTxns.length}`);
+    this.logger.log(`Token transfers total: ${tokenTransfers.length}`);
+
+    const transfersByHash = new Map<string, Record<string, unknown>[]>();
+
+    for (const transfer of tokenTransfers) {
+      const transactionHash =
+        typeof transfer.transactionHash === 'string'
+          ? transfer.transactionHash
+          : typeof transfer.hash === 'string'
+            ? transfer.hash
+            : undefined;
+
+      if (!transactionHash) {
+        continue;
+      }
+
+      const existingTransfers = transfersByHash.get(transactionHash) ?? [];
+      existingTransfers.push(transfer);
+      transfersByHash.set(transactionHash, existingTransfers);
+    }
+
+    return nativeTxns.map((transaction) => {
+      const transactionHash = typeof transaction.hash === 'string' ? transaction.hash : undefined;
+      const attachedTransfers = transactionHash ? transfersByHash.get(transactionHash) ?? [] : [];
+
+      return {
+        ...transaction,
+        tokenTransfers: attachedTransfers,
+      };
+    });
   }
 
   async fetchTransactions(options: FetchTransactionsOptions): Promise<ProviderFetchResult> {
@@ -87,12 +153,11 @@ export class MoralisService implements OnModuleInit {
       return { provider: 'moralis', transactions: [] };
     }
 
-    const response = await this.fetchAllNativeTransactions(options);
-    await this.fetchAllTokenTransfers(options);
+    const transactions = await this.getAllTransactions(options.address);
 
     return {
       provider: 'moralis',
-      transactions: response.raw.result.map((transaction) =>
+      transactions: transactions.map((transaction) =>
         normalizeTransaction('moralis', 'evm', transaction as Record<string, unknown>),
       ),
     };
