@@ -3,7 +3,7 @@ import type { BlockchainNetwork, BlockchainProvider } from '../interfaces/transa
 
 @Entity({ name: 'transactions' })
 @Index(['network', 'address'])
-@Index(['txHash', 'provider'], { unique: true })
+@Index(['hash'], { unique: true })
 export class TransactionEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -18,7 +18,7 @@ export class TransactionEntity {
   address: string;
 
   @Column({ type: 'varchar', length: 128 })
-  txHash: string;
+  hash: string;
 
   @Column({ type: 'varchar', length: 128, nullable: true })
   blockNumber?: string;
@@ -37,6 +37,49 @@ export class TransactionEntity {
 
   @Column({ type: 'numeric', nullable: true })
   amount?: string;
+
+  @Column({ type: 'jsonb' })
+  raw: Record<string, unknown>;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ type: 'timestamptz' })
+  updatedAt: Date;
+}
+
+@Entity({ name: 'token_transfers' })
+@Index(['transactionHash'])
+export class TokenTransferEntity {
+  @Column({ type: 'varchar', length: 160, primary: true })
+  id: string;
+
+  @Column({ type: 'varchar', length: 128 })
+  transactionHash: string;
+
+  @Column({ type: 'varchar', length: 128 })
+  walletAddress: string;
+
+  @Column({ type: 'varchar', length: 16 })
+  network: BlockchainNetwork;
+
+  @Column({ type: 'varchar', length: 32 })
+  provider: BlockchainProvider;
+
+  @Column({ type: 'varchar', length: 128 })
+  fromAddress: string;
+
+  @Column({ type: 'varchar', length: 128 })
+  toAddress: string;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  assetSymbol?: string;
+
+  @Column({ type: 'numeric', nullable: true })
+  amount?: string;
+
+  @Column({ type: 'int' })
+  transferIndex: number;
 
   @Column({ type: 'jsonb' })
   raw: Record<string, unknown>;

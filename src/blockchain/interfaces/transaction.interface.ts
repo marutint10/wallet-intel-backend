@@ -2,6 +2,14 @@ export type BlockchainNetwork = 'evm' | 'solana';
 
 export type BlockchainProvider = 'moralis' | 'alchemy' | 'helius';
 
+export interface NormalizedTokenTransfer {
+  fromAddress: string;
+  toAddress: string;
+  assetSymbol?: string;
+  amount?: string;
+  raw: Record<string, unknown>;
+}
+
 export interface FetchTransactionsOptions {
   address: string;
   network: BlockchainNetwork;
@@ -18,10 +26,17 @@ export interface NormalizedTransaction {
   toAddress: string;
   assetSymbol?: string;
   amount?: string;
+  tokenTransfers: NormalizedTokenTransfer[];
   raw: Record<string, unknown>;
 }
 
 export interface ProviderFetchResult {
   provider: BlockchainProvider;
   transactions: NormalizedTransaction[];
+}
+
+export interface FetchResult {
+  transactionCount: number;
+  tokenTransferCount: number;
+  source: BlockchainProvider;
 }
