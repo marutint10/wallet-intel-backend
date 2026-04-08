@@ -23,6 +23,11 @@ interface MoralisPaginatedResponse<T> {
   result: T[];
 }
 
+interface MoralisFetchOptions {
+  stopAtBlock?: number;
+  firstPageOnly?: boolean;
+}
+
 export interface MoralisErc20Transfer {
   token_name?: string;
   token_symbol?: string;
@@ -98,35 +103,68 @@ export class WalletService {
 
   async getWalletData(address: string): Promise<WalletTransactionsResponse> {
     const walletAddress = address.toLowerCase();
-    const cachedTransactions = await this.transactionRepo.find({
-      where: {
-        wallet_address: walletAddress,
-      },
-      order: {
-        block_number: 'DESC',
-      },
-    });
-
-    if (cachedTransactions.length > 0) {
-      return {
-        raw: {
-          address,
-          erc20_transfers: [],
-          native_transactions: [],
-        },
-        normalized: cachedTransactions.map((transaction) =>
-          this.mapEntityToNormalized(transaction),
-        ),
-      };
-    }
+    const latestStoredBlock = await this.getLatestStoredBlock(walletAddress);
 
     if (!this.moralisApiKey) {
       throw new InternalServerErrorException('MORALIS_API_KEY is not configured');
     }
 
+    if (latestStoredBlock !== null) {
+      const [latestErc20Transfers, latestWalletHistory] = await Promise.all([
+        this.fetchErc20Transfers(address, {
+          firstPageOnly: true,
+        }),
+        this.fetchWalletHistory(address, {
+          firstPageOnly: true,
+        }),
+      ]);
+
+      const latestNativeTransactions = latestWalletHistory.filter((transaction) =>
+        this.isNativeTransaction(transaction),
+      );
+
+      const apiLatestBlock = this.getHighestBlockNumber(
+        latestErc20Transfers,
+        latestNativeTransactions,
+      );
+
+      if (apiLatestBlock <= latestStoredBlock) {
+        return this.getStoredWalletData(address, walletAddress);
+      }
+
+      const [newErc20Transfers, newWalletHistory] = await Promise.all([
+        this.fetchErc20Transfers(address, {
+          stopAtBlock: latestStoredBlock,
+        }),
+        this.fetchWalletHistory(address, {
+          stopAtBlock: latestStoredBlock,
+        }),
+      ]);
+
+      const newNativeTransactions = this.filterNewTransactions(
+        newWalletHistory.filter((transaction) => this.isNativeTransaction(transaction)),
+        latestStoredBlock,
+      );
+
+      const filteredErc20Transfers = this.filterNewTransactions(
+        newErc20Transfers,
+        latestStoredBlock,
+      );
+
+      const normalizedTransactions = this.normalizeTransactions(
+        address,
+        filteredErc20Transfers,
+        newNativeTransactions,
+      );
+
+      await this.saveNormalizedTransactions(address, normalizedTransactions);
+
+      return this.getStoredWalletData(address, walletAddress);
+    }
+
     const [erc20Transfers, walletHistory] = await Promise.all([
-      this.fetchAllErc20Transfers(address),
-      this.fetchAllWalletHistory(address),
+      this.fetchErc20Transfers(address),
+      this.fetchWalletHistory(address),
     ]);
 
     const nativeTransactions = walletHistory.filter((transaction) =>
@@ -151,6 +189,76 @@ export class WalletService {
       raw: rawData,
       normalized: normalizedTransactions,
     };
+  }
+
+  private async getStoredWalletData(
+    address: string,
+    walletAddress: string,
+  ): Promise<WalletTransactionsResponse> {
+    const cachedTransactions = await this.transactionRepo.find({
+      where: {
+        wallet_address: walletAddress,
+      },
+      order: {
+        block_number: 'DESC',
+      },
+    });
+
+    return {
+      raw: {
+        address,
+        erc20_transfers: [],
+        native_transactions: [],
+      },
+      normalized: cachedTransactions.map((transaction) =>
+        this.mapEntityToNormalized(transaction),
+      ),
+    };
+  }
+
+  private async getLatestStoredBlock(address: string): Promise<number | null> {
+    const result = await this.transactionRepo
+      .createQueryBuilder('transaction')
+      .select('MAX(transaction.block_number)', 'latestBlock')
+      .where('transaction.wallet_address = :address', { address })
+      .getRawOne<{ latestBlock: string | null }>();
+
+    if (!result?.latestBlock) {
+      return null;
+    }
+
+    const latestBlock = Number(result.latestBlock);
+
+    return Number.isFinite(latestBlock) ? latestBlock : null;
+  }
+
+  private filterNewTransactions<T extends { block_number: number | string }>(
+    transactions: T[],
+    latestBlock: number,
+  ): T[] {
+    return transactions.filter(
+      (transaction) => this.toNumber(transaction.block_number) > latestBlock,
+    );
+  }
+
+  private getHighestBlockNumber(
+    erc20Transfers: MoralisErc20Transfer[],
+    nativeTransactions: MoralisWalletHistoryItem[],
+  ): number {
+    let highestBlock = 0;
+
+    for (const transfer of erc20Transfers) {
+      highestBlock = Math.max(highestBlock, this.toNumber(transfer.block_number));
+    }
+
+    for (const transaction of nativeTransactions) {
+      highestBlock = Math.max(
+        highestBlock,
+        this.toNumber(transaction.block_number),
+      );
+    }
+
+    return highestBlock;
   }
 
   private async saveNormalizedTransactions(
@@ -419,30 +527,38 @@ export class WalletService {
     return Number.isFinite(parsed) ? parsed : 0;
   }
 
-  private async fetchAllErc20Transfers(
+  private async fetchErc20Transfers(
     address: string,
+    options?: MoralisFetchOptions,
   ): Promise<MoralisErc20Transfer[]> {
     return this.fetchPaginatedMoralisEndpoint<MoralisErc20Transfer>(
       `/${address}/erc20/transfers`,
       'ERC-20 transfers',
+      options,
     );
   }
 
-  private async fetchAllWalletHistory(
+  private async fetchWalletHistory(
     address: string,
+    options?: MoralisFetchOptions,
   ): Promise<MoralisWalletHistoryItem[]> {
     return this.fetchPaginatedMoralisEndpoint<MoralisWalletHistoryItem>(
       `/wallets/${address}/history`,
       'wallet history',
+      options,
     );
   }
 
-  private async fetchPaginatedMoralisEndpoint<T>(
+  private async fetchPaginatedMoralisEndpoint<
+    T extends { block_number: number | string },
+  >(
     path: string,
     operation: string,
+    options?: MoralisFetchOptions,
   ): Promise<T[]> {
     const items: T[] = [];
     let cursor: string | undefined;
+    let shouldContinue = true;
 
     do {
       try {
@@ -458,14 +574,55 @@ export class WalletService {
           },
         );
 
-        items.push(...response.data.result);
-        cursor = response.data.cursor ?? undefined;
+        const filteredResult = this.applyStopAtBlock(
+          response.data.result,
+          options?.stopAtBlock,
+        );
+
+        items.push(...filteredResult.items);
+
+        shouldContinue =
+          !options?.firstPageOnly &&
+          Boolean(response.data.cursor) &&
+          !filteredResult.reachedStoredBlock;
+
+        cursor = shouldContinue ? response.data.cursor ?? undefined : undefined;
       } catch (error) {
         this.handleMoralisError(error, operation);
       }
-    } while (cursor);
+    } while (cursor && shouldContinue);
 
     return items;
+  }
+
+  private applyStopAtBlock<T extends { block_number: number | string }>(
+    items: T[],
+    stopAtBlock?: number,
+  ): { items: T[]; reachedStoredBlock: boolean } {
+    if (stopAtBlock === undefined) {
+      return {
+        items,
+        reachedStoredBlock: false,
+      };
+    }
+
+    const filteredItems: T[] = [];
+
+    for (const item of items) {
+      if (this.toNumber(item.block_number) <= stopAtBlock) {
+        return {
+          items: filteredItems,
+          reachedStoredBlock: true,
+        };
+      }
+
+      filteredItems.push(item);
+    }
+
+    return {
+      items: filteredItems,
+      reachedStoredBlock: false,
+    };
   }
 
   private isNativeTransaction(transaction: MoralisWalletHistoryItem): boolean {
