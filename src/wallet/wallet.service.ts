@@ -6,6 +6,12 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError, AxiosInstance } from 'axios';
+import {
+  NormalizedTokenAmount,
+  NormalizedTransaction,
+  WalletRawData,
+  WalletTransactionsResponse,
+} from './wallet.types';
 
 interface MoralisPaginatedResponse<T> {
   cursor?: string | null;
@@ -48,33 +54,6 @@ export interface MoralisWalletHistoryItem {
   summary?: string;
   native_transfers?: MoralisNativeTransfer[];
   [key: string]: unknown;
-}
-
-export interface NormalizedTokenAmount {
-  token: string;
-  amount: string;
-}
-
-export interface NormalizedTransaction {
-  hash: string;
-  block_number: number;
-  timestamp: string;
-  from: string;
-  to: string;
-  type: 'transfer' | 'swap' | 'unknown';
-  inputs: NormalizedTokenAmount[];
-  outputs: NormalizedTokenAmount[];
-}
-
-export interface WalletRawData {
-  address: string;
-  erc20_transfers: MoralisErc20Transfer[];
-  native_transactions: MoralisWalletHistoryItem[];
-}
-
-export interface WalletTransactionsResponse {
-  raw: WalletRawData;
-  normalized: NormalizedTransaction[];
 }
 
 function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
