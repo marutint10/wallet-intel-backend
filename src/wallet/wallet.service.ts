@@ -11,7 +11,6 @@ import { Repository } from 'typeorm';
 import {
   NormalizedTokenAmount,
   NormalizedTransaction,
-  WalletRawData,
   WalletTransactionsResponse,
 } from './wallet.types';
 import { TransactionEntity } from './transaction.entity';
@@ -171,12 +170,6 @@ export class WalletService {
       this.isNativeTransaction(transaction),
     );
 
-    const rawData: WalletRawData = {
-      address,
-      erc20_transfers: erc20Transfers,
-      native_transactions: nativeTransactions,
-    };
-
     const normalizedTransactions = this.normalizeTransactions(
       address,
       erc20Transfers,
@@ -185,10 +178,7 @@ export class WalletService {
 
     await this.saveNormalizedTransactions(address, normalizedTransactions);
 
-    return {
-      raw: rawData,
-      normalized: normalizedTransactions,
-    };
+    return this.getStoredWalletData(address, walletAddress);
   }
 
   private async getStoredWalletData(
@@ -203,6 +193,8 @@ export class WalletService {
         block_number: 'DESC',
       },
     });
+
+    this.logger.log('Serving wallet data from DB');
 
     return {
       raw: {
