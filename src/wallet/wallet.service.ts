@@ -77,6 +77,20 @@ export interface WalletTransactionsResponse {
   normalized: NormalizedTransaction[];
 }
 
+function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
+  const map = new Map<string, bigint>();
+
+  for (const entry of entries) {
+    const current = map.get(entry.token) || 0n;
+    map.set(entry.token, current + BigInt(entry.amount));
+  }
+
+  return Array.from(map.entries()).map(([token, amount]) => ({
+    token,
+    amount: amount.toString(),
+  }));
+}
+
 @Injectable()
 export class WalletService {
   private readonly logger = new Logger(WalletService.name);
@@ -191,17 +205,28 @@ export class WalletService {
         transfer.from_address,
         transfer.to_address,
         {
-          token: transfer.token_symbol ?? transfer.address,
+          token: transfer.token_symbol || transfer.address.slice(0, 6),
           amount: String(transfer.value),
         },
       );
     }
 
     return Array.from(normalizedByHash.values())
-      .map((transaction) => ({
-        ...transaction,
-        type: this.getTransactionType(transaction),
-      }))
+      .map((transaction) => {
+        const inputs = mergeTokenAmounts(transaction.inputs);
+        const outputs = mergeTokenAmounts(transaction.outputs);
+
+        return {
+          ...transaction,
+          inputs,
+          outputs,
+          type: this.getTransactionType({
+            ...transaction,
+            inputs,
+            outputs,
+          }),
+        };
+      })
       .sort((left, right) => right.block_number - left.block_number);
   }
 
@@ -258,8 +283,8 @@ export class WalletService {
     entry: NormalizedTokenAmount,
     direction?: string,
   ): void {
-    const normalizedFrom = fromAddress.toLowerCase();
-    const normalizedTo = toAddress.toLowerCase();
+    const normalizedFrom = fromAddress?.toLowerCase();
+    const normalizedTo = toAddress?.toLowerCase();
 
     if (direction === 'outgoing' || normalizedFrom === walletAddress) {
       transaction.inputs.push(entry);
@@ -271,24 +296,34 @@ export class WalletService {
       return;
     }
 
-    transaction.inputs.push(entry);
+    return;
   }
 
   private getTransactionType(
     transaction: NormalizedTransaction,
-  ): 'transfer' | 'swap' | 'unknown' {
-    const tokens = [...transaction.inputs, ...transaction.outputs].map(
-      (entry) => entry.token.toUpperCase(),
+  ): NormalizedTransaction['type'] {
+    const inputTokens = new Set(transaction.inputs.map((entry) => entry.token));
+    const outputTokens = new Set(
+      transaction.outputs.map((entry) => entry.token),
     );
 
-    const hasEth = tokens.includes('ETH');
-    const hasToken = tokens.some((token) => token !== 'ETH');
+    const hasInputs = transaction.inputs.length > 0;
+    const hasOutputs = transaction.outputs.length > 0;
 
-    if (hasEth && hasToken) {
+    if (hasInputs && hasOutputs) {
+      const isSameToken =
+        inputTokens.size === 1 &&
+        outputTokens.size === 1 &&
+        [...inputTokens][0] === [...outputTokens][0];
+
+      if (isSameToken) {
+        return 'transfer';
+      }
+
       return 'swap';
     }
 
-    if (hasEth || hasToken) {
+    if (hasInputs || hasOutputs) {
       return 'transfer';
     }
 
