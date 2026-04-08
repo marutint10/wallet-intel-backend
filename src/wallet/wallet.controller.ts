@@ -1,6 +1,7 @@
 import { BadRequestException, Controller, Get, Param } from '@nestjs/common';
-import { isEthereumAddress } from '../utils/address.validator';
-import { WalletService, WalletTransactionsResponse } from './wallet.service';
+import { isEthereumAddress } from '../shared/validators/address.validator';
+import { WalletTransactionsResponse } from './wallet.types';
+import { WalletService } from './wallet.service';
 
 @Controller('wallet')
 export class WalletController {
