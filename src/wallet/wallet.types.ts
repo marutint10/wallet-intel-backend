@@ -1,4 +1,4 @@
-import {
+import type {
   MoralisErc20Transfer,
   MoralisWalletHistoryItem,
 } from './wallet.service';
