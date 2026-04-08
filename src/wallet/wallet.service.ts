@@ -82,7 +82,7 @@ export class WalletService {
   constructor(
     private readonly configService: ConfigService,
     @InjectRepository(TransactionEntity)
-    private readonly transactionRepository: Repository<TransactionEntity>,
+    private readonly transactionRepo: Repository<TransactionEntity>,
   ) {
     this.moralisApiKey = this.configService.get<string>('moralis.apiKey') ?? '';
 
@@ -97,6 +97,29 @@ export class WalletService {
   }
 
   async getWalletData(address: string): Promise<WalletTransactionsResponse> {
+    const walletAddress = address.toLowerCase();
+    const cachedTransactions = await this.transactionRepo.find({
+      where: {
+        wallet_address: walletAddress,
+      },
+      order: {
+        block_number: 'DESC',
+      },
+    });
+
+    if (cachedTransactions.length > 0) {
+      return {
+        raw: {
+          address,
+          erc20_transfers: [],
+          native_transactions: [],
+        },
+        normalized: cachedTransactions.map((transaction) =>
+          this.mapEntityToNormalized(transaction),
+        ),
+      };
+    }
+
     if (!this.moralisApiKey) {
       throw new InternalServerErrorException('MORALIS_API_KEY is not configured');
     }
@@ -146,7 +169,7 @@ export class WalletService {
     }
 
     try {
-      await this.transactionRepository
+      await this.transactionRepo
         .createQueryBuilder()
         .insert()
         .into(TransactionEntity)
@@ -175,6 +198,21 @@ export class WalletService {
         'Failed to store normalized transactions.',
       );
     }
+  }
+
+  private mapEntityToNormalized(
+    transaction: TransactionEntity,
+  ): NormalizedTransaction {
+    return {
+      hash: transaction.transaction_hash,
+      block_number: transaction.block_number,
+      timestamp: transaction.timestamp.toISOString(),
+      from: transaction.from_address,
+      to: transaction.to_address,
+      type: transaction.type,
+      inputs: transaction.inputs,
+      outputs: transaction.outputs,
+    };
   }
 
   private normalizeTransactions(
