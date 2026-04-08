@@ -5,13 +5,16 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
 import axios, { AxiosError, AxiosInstance } from 'axios';
+import { Repository } from 'typeorm';
 import {
   NormalizedTokenAmount,
   NormalizedTransaction,
   WalletRawData,
   WalletTransactionsResponse,
 } from './wallet.types';
+import { TransactionEntity } from './transaction.entity';
 
 interface MoralisPaginatedResponse<T> {
   cursor?: string | null;
@@ -76,7 +79,11 @@ export class WalletService {
   private readonly moralisApiKey: string;
   private readonly moralisClient: AxiosInstance;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @InjectRepository(TransactionEntity)
+    private readonly transactionRepository: Repository<TransactionEntity>,
+  ) {
     this.moralisApiKey = this.configService.get<string>('moralis.apiKey') ?? '';
 
     this.moralisClient = axios.create({
@@ -109,14 +116,65 @@ export class WalletService {
       native_transactions: nativeTransactions,
     };
 
+    const normalizedTransactions = this.normalizeTransactions(
+      address,
+      erc20Transfers,
+      nativeTransactions,
+    );
+
+    await this.saveNormalizedTransactions(address, normalizedTransactions);
+
     return {
       raw: rawData,
-      normalized: this.normalizeTransactions(
-        address,
-        erc20Transfers,
-        nativeTransactions,
-      ),
+      normalized: normalizedTransactions,
     };
+  }
+
+  private async saveNormalizedTransactions(
+    address: string,
+    transactions: NormalizedTransaction[],
+  ): Promise<void> {
+    const transactionsToSave = transactions.filter(
+      (
+        transaction,
+      ): transaction is NormalizedTransaction & { type: 'transfer' | 'swap' } =>
+        transaction.type === 'transfer' || transaction.type === 'swap',
+    );
+
+    if (transactionsToSave.length === 0) {
+      return;
+    }
+
+    try {
+      await this.transactionRepository
+        .createQueryBuilder()
+        .insert()
+        .into(TransactionEntity)
+        .values(
+          transactionsToSave.map((transaction) => ({
+            wallet_address: address.toLowerCase(),
+            transaction_hash: transaction.hash,
+            block_number: transaction.block_number,
+            timestamp: new Date(transaction.timestamp),
+            from_address: transaction.from,
+            to_address: transaction.to,
+            type: transaction.type,
+            inputs: transaction.inputs,
+            outputs: transaction.outputs,
+          })),
+        )
+        .orIgnore()
+        .execute();
+    } catch (error) {
+      this.logger.error(
+        `Failed to persist normalized transactions for wallet ${address}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+
+      throw new InternalServerErrorException(
+        'Failed to store normalized transactions.',
+      );
+    }
   }
 
   private normalizeTransactions(
