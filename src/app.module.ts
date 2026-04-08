@@ -24,7 +24,7 @@ import { WalletModule } from './wallet/wallet.module';
           type: 'postgres' as const,
           url: databaseUrl,
           autoLoadEntities: true,
-          synchronize: false,
+          synchronize: true,
           logging: false,
         };
       },
