@@ -111,14 +111,22 @@ export class WalletService {
     }
 
     if (latestStoredBlock !== null) {
-      const [latestErc20Transfers, latestWalletHistory] = await Promise.all([
-        this.fetchErc20Transfers(address, {
-          firstPageOnly: true,
-        }),
-        this.fetchWalletHistory(address, {
-          firstPageOnly: true,
-        }),
-      ]);
+      let latestErc20Transfers: MoralisErc20Transfer[] = [];
+      let latestWalletHistory: MoralisWalletHistoryItem[] = [];
+
+      try {
+        [latestErc20Transfers, latestWalletHistory] = await Promise.all([
+          this.fetchErc20Transfers(address, {
+            firstPageOnly: true,
+          }),
+          this.fetchWalletHistory(address, {
+            firstPageOnly: true,
+          }),
+        ]);
+      } catch {
+        this.logger.warn('Moralis failed, falling back to DB');
+        return this.getStoredWalletData(address, walletAddress);
+      }
 
       const latestNativeTransactions = latestWalletHistory.filter((transaction) =>
         this.isNativeTransaction(transaction),
@@ -133,14 +141,22 @@ export class WalletService {
         return this.getStoredWalletData(address, walletAddress);
       }
 
-      const [newErc20Transfers, newWalletHistory] = await Promise.all([
-        this.fetchErc20Transfers(address, {
-          stopAtBlock: latestStoredBlock,
-        }),
-        this.fetchWalletHistory(address, {
-          stopAtBlock: latestStoredBlock,
-        }),
-      ]);
+      let newErc20Transfers: MoralisErc20Transfer[] = [];
+      let newWalletHistory: MoralisWalletHistoryItem[] = [];
+
+      try {
+        [newErc20Transfers, newWalletHistory] = await Promise.all([
+          this.fetchErc20Transfers(address, {
+            stopAtBlock: latestStoredBlock,
+          }),
+          this.fetchWalletHistory(address, {
+            stopAtBlock: latestStoredBlock,
+          }),
+        ]);
+      } catch {
+        this.logger.warn('Moralis failed while refreshing, falling back to DB');
+        return this.getStoredWalletData(address, walletAddress);
+      }
 
       const newNativeTransactions = this.filterNewTransactions(
         newWalletHistory.filter((transaction) => this.isNativeTransaction(transaction)),
@@ -163,10 +179,18 @@ export class WalletService {
       return this.getStoredWalletData(address, walletAddress);
     }
 
-    const [erc20Transfers, walletHistory] = await Promise.all([
-      this.fetchErc20Transfers(address),
-      this.fetchWalletHistory(address),
-    ]);
+    let erc20Transfers: MoralisErc20Transfer[] = [];
+    let walletHistory: MoralisWalletHistoryItem[] = [];
+
+    try {
+      [erc20Transfers, walletHistory] = await Promise.all([
+        this.fetchErc20Transfers(address),
+        this.fetchWalletHistory(address),
+      ]);
+    } catch {
+      this.logger.error('Moralis failed and no cached data available');
+      throw new BadGatewayException('Unable to fetch wallet data');
+    }
 
     const nativeTransactions = walletHistory.filter((transaction) =>
       this.isNativeTransaction(transaction),
@@ -642,7 +666,24 @@ export class WalletService {
 
         cursor = shouldContinue ? response.data.cursor ?? undefined : undefined;
       } catch (error) {
-        this.handleMoralisError(error, operation);
+        if (axios.isAxiosError(error)) {
+          const status = error.response?.status;
+          const message = this.extractMoralisMessage(error);
+
+          this.logger.warn(
+            `Moralis failed for ${operation}, continuing with fallback (${status ?? 'NO_RESPONSE'}: ${message})`,
+          );
+        } else {
+          this.logger.warn(
+            `Moralis failed for ${operation}, continuing with fallback`,
+          );
+        }
+
+        if (items.length === 0) {
+          throw error;
+        }
+
+        break;
       }
     } while (cursor && shouldContinue);
 
@@ -692,42 +733,6 @@ export class WalletService {
     }
 
     return this.isPositiveValue(transaction.value);
-  }
-
-  private handleMoralisError(error: unknown, operation: string): never {
-    if (axios.isAxiosError(error)) {
-      const status = error.response?.status;
-      const message = this.extractMoralisMessage(error);
-
-      this.logger.error(
-        `Moralis ${operation} request failed with status ${status ?? 'NO_RESPONSE'}: ${message}`,
-      );
-
-      if (status === 401 || status === 403) {
-        throw new BadGatewayException(
-          'Moralis authentication failed. Check MORALIS_API_KEY.',
-        );
-      }
-
-      if (status) {
-        throw new BadGatewayException(
-          `Moralis API failed while fetching ${operation}.`,
-        );
-      }
-
-      throw new BadGatewayException(
-        `Moralis did not respond while fetching ${operation}.`,
-      );
-    }
-
-    this.logger.error(
-      `Unexpected error while fetching ${operation}`,
-      error instanceof Error ? error.stack : undefined,
-    );
-
-    throw new BadGatewayException(
-      `Unexpected error while fetching ${operation}.`,
-    );
   }
 
   private extractMoralisMessage(error: AxiosError): string {
