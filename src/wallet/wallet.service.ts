@@ -50,6 +50,8 @@ interface CoinGeckoEthPriceResponse {
   };
 }
 
+const COINGECKO_API_BASE_URL = 'https://api.coingecko.com/api/v3';
+
 export interface MoralisErc20Transfer {
   token_name?: string;
   token_symbol?: string;
@@ -132,6 +134,7 @@ function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
 export class WalletService {
   private readonly logger = new Logger(WalletService.name);
   private readonly moralisApiKey: string;
+  private readonly coinGeckoApiKey: string;
   private readonly moralisClient: AxiosInstance;
 
   constructor(
@@ -140,6 +143,8 @@ export class WalletService {
     private readonly transactionRepo: Repository<TransactionEntity>,
   ) {
     this.moralisApiKey = this.configService.get<string>('moralis.apiKey') ?? '';
+    this.coinGeckoApiKey =
+      this.configService.get<string>('coingecko.apiKey') ?? '';
 
     this.moralisClient = axios.create({
       baseURL: 'https://deep-index.moralis.io/api/v2.2',
@@ -431,11 +436,21 @@ export class WalletService {
 
   async getPortfolioUSD(address: string): Promise<WalletPortfolioUSDResponse> {
     const portfolio = await this.getPortfolio(address);
+    const tokenFlow = await this.getTokenFlow(address);
     const portfolioEntries = Object.fromEntries(
-      Object.entries(portfolio).map(([token, entry]) => [
-        token,
-        this.normalizePortfolioEntry(entry),
-      ]),
+      Object.entries(portfolio).map(([token, entry]) => {
+        const normalizedEntry = this.normalizePortfolioEntry(entry);
+
+        return [
+          token,
+          {
+            amount: normalizedEntry.amount,
+            contractAddress:
+              normalizedEntry.contractAddress ??
+              tokenFlow.flow[token]?.contractAddress,
+          },
+        ];
+      }),
     ) as Record<string, PortfolioTokenEntry>;
 
     const contractAddresses = Array.from(
@@ -575,18 +590,18 @@ export class WalletService {
       return {};
     }
 
-    const baseUrl = process.env.COINGECKO_API_URL?.trim();
-
-    if (!baseUrl) {
+    if (!this.coinGeckoApiKey) {
+      this.logger.warn('COINGECKO_API_KEY is not configured');
       return {};
     }
 
     const response = await axios.get<CoinGeckoTokenPriceResponse>(
-      `${baseUrl.replace(/\/$/, '')}/simple/token_price/ethereum`,
+      `${COINGECKO_API_BASE_URL}/simple/token_price/ethereum`,
       {
         params: {
           contract_addresses: contractAddresses.join(','),
           vs_currencies: 'usd',
+          x_cg_demo_api_key: this.coinGeckoApiKey,
         },
         timeout: 10000,
       },
@@ -601,18 +616,18 @@ export class WalletService {
   }
 
   private async fetchEthereumUsdPrice(): Promise<number> {
-    const baseUrl = process.env.COINGECKO_API_URL?.trim();
-
-    if (!baseUrl) {
+    if (!this.coinGeckoApiKey) {
+      this.logger.warn('COINGECKO_API_KEY is not configured');
       return 0;
     }
 
     const response = await axios.get<CoinGeckoEthPriceResponse>(
-      `${baseUrl.replace(/\/$/, '')}/simple/price`,
+      `${COINGECKO_API_BASE_URL}/simple/price`,
       {
         params: {
           ids: 'ethereum',
           vs_currencies: 'usd',
+          x_cg_demo_api_key: this.coinGeckoApiKey,
         },
         timeout: 10000,
       },

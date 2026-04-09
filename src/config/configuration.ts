@@ -3,6 +3,9 @@ export default () => ({
   moralis: {
     apiKey: process.env.MORALIS_API_KEY ?? '',
   },
+  coingecko: {
+    apiKey: process.env.COINGECKO_API_KEY ?? '',
+  },
   database: {
     url: process.env.DATABASE_URL ?? '',
   },
