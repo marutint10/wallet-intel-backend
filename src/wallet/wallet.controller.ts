@@ -3,6 +3,7 @@ import { isEthereumAddress } from '../shared/validators/address.validator';
 import {
   StoredWalletTransactionsResponse,
   WalletNetFlowResponse,
+  WalletPortfolioResponse,
   WalletSummaryResponse,
   WalletTokenFlowResponse,
   WalletTransactionsResponse,
@@ -12,6 +13,17 @@ import { WalletService } from './wallet.service';
 @Controller('wallet')
 export class WalletController {
   constructor(private readonly walletService: WalletService) {}
+
+  @Get(':address/portfolio')
+  async getPortfolio(
+    @Param('address') address: string,
+  ): Promise<WalletPortfolioResponse> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getPortfolio(address);
+  }
 
   @Get(':address/net-flow')
   async getNetFlow(

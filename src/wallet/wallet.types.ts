@@ -6,6 +6,7 @@ import type {
 export interface NormalizedTokenAmount {
   token: string;
   amount: string;
+  decimals?: number;
 }
 
 export interface NormalizedTransaction {
@@ -46,6 +47,7 @@ export interface WalletSummaryResponse {
 export interface TokenFlowAmount {
   in: string;
   out: string;
+  decimals?: number;
 }
 
 export interface WalletTokenFlowResponse {
@@ -54,5 +56,9 @@ export interface WalletTokenFlowResponse {
 }
 
 export interface WalletNetFlowResponse {
+  [token: string]: string;
+}
+
+export interface WalletPortfolioResponse {
   [token: string]: string;
 }

@@ -12,6 +12,7 @@ import {
   NormalizedTokenAmount,
   NormalizedTransaction,
   WalletNetFlowResponse,
+  WalletPortfolioResponse,
   StoredWalletTransactionsResponse,
   WalletSummaryResponse,
   WalletTokenFlowResponse,
@@ -277,12 +278,22 @@ export class WalletService {
       },
     });
 
-    const flow: Record<string, { in: bigint; out: bigint }> = {};
+    const flow: Record<string, { in: bigint; out: bigint; decimals?: number }> =
+      {};
 
     for (const transaction of transactions) {
       for (const output of transaction.outputs) {
         if (!flow[output.token]) {
-          flow[output.token] = { in: 0n, out: 0n };
+          flow[output.token] = {
+            in: 0n,
+            out: 0n,
+            decimals: output.decimals,
+          };
+        } else if (
+          flow[output.token].decimals === undefined &&
+          output.decimals !== undefined
+        ) {
+          flow[output.token].decimals = output.decimals;
         }
 
         flow[output.token].in += BigInt(output.amount);
@@ -290,7 +301,16 @@ export class WalletService {
 
       for (const input of transaction.inputs) {
         if (!flow[input.token]) {
-          flow[input.token] = { in: 0n, out: 0n };
+          flow[input.token] = {
+            in: 0n,
+            out: 0n,
+            decimals: input.decimals,
+          };
+        } else if (
+          flow[input.token].decimals === undefined &&
+          input.decimals !== undefined
+        ) {
+          flow[input.token].decimals = input.decimals;
         }
 
         flow[input.token].out += BigInt(input.amount);
@@ -305,6 +325,7 @@ export class WalletService {
           {
             in: amounts.in.toString(),
             out: amounts.out.toString(),
+            decimals: amounts.decimals,
           },
         ]),
       ),
@@ -318,6 +339,20 @@ export class WalletService {
       Object.entries(tokenFlow.flow).map(([token, amounts]) => [
         token,
         (BigInt(amounts.in) - BigInt(amounts.out)).toString(),
+      ]),
+    );
+  }
+
+  async getPortfolio(address: string): Promise<WalletPortfolioResponse> {
+    const tokenFlow = await this.getTokenFlow(address);
+
+    return Object.fromEntries(
+      Object.entries(tokenFlow.flow).map(([token, amounts]) => [
+        token,
+        this.formatHumanReadableBalance(
+          BigInt(amounts.in) - BigInt(amounts.out),
+          amounts.decimals ?? 18,
+        ),
       ]),
     );
   }
@@ -347,6 +382,35 @@ export class WalletService {
         this.mapEntityToNormalized(transaction),
       ),
     };
+  }
+
+  private formatHumanReadableBalance(net: bigint, decimals: number): string {
+    if (net === 0n) {
+      return '0';
+    }
+
+    const safeDecimals = Number.isInteger(decimals) && decimals >= 0 ? decimals : 18;
+    const sign = net < 0n ? '-' : '';
+    const absoluteNet = net < 0n ? -net : net;
+
+    if (safeDecimals === 0) {
+      return `${sign}${absoluteNet.toString()}`;
+    }
+
+    const divisor = 10n ** BigInt(safeDecimals);
+    const wholePart = absoluteNet / divisor;
+    const fractionalPart = absoluteNet % divisor;
+    const fractionalString = fractionalPart
+      .toString()
+      .padStart(safeDecimals, '0')
+      .slice(0, 8)
+      .replace(/0+$/, '');
+
+    if (!fractionalString) {
+      return `${sign}${wholePart.toString()}`;
+    }
+
+    return `${sign}${wholePart.toString()}.${fractionalString}`;
   }
 
   private async getLatestStoredBlock(address: string): Promise<number | null> {
