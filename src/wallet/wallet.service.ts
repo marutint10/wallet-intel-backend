@@ -94,7 +94,7 @@ export class WalletService {
 
     this.moralisClient = axios.create({
       baseURL: 'https://deep-index.moralis.io/api/v2.2',
-      timeout: 10000,
+      timeout: 15000,
       headers: {
         Accept: 'application/json',
         'X-API-Key': this.moralisApiKey,
@@ -640,16 +640,15 @@ export class WalletService {
 
     do {
       try {
-        const response = await this.moralisClient.get<MoralisPaginatedResponse<T>>(
-          path,
-          {
+        const response = await this.callMoralisWithRetry(() =>
+          this.moralisClient.get<MoralisPaginatedResponse<T>>(path, {
             params: {
               chain: 'eth',
               order: 'DESC',
               limit: 100,
               ...(cursor ? { cursor } : {}),
             },
-          },
+          }),
         );
 
         const filteredResult = this.applyStopAtBlock(
@@ -688,6 +687,18 @@ export class WalletService {
     } while (cursor && shouldContinue);
 
     return items;
+  }
+
+  private async callMoralisWithRetry<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      this.logger.warn('Moralis failed, retrying once...');
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      return fn();
+    }
   }
 
   private applyStopAtBlock<T extends { block_number: number | string }>(
