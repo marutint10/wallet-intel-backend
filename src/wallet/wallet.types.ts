@@ -52,3 +52,7 @@ export interface WalletTokenFlowResponse {
   address: string;
   flow: Record<string, TokenFlowAmount>;
 }
+
+export interface WalletNetFlowResponse {
+  [token: string]: string;
+}

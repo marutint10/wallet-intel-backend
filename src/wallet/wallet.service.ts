@@ -11,6 +11,7 @@ import { Repository } from 'typeorm';
 import {
   NormalizedTokenAmount,
   NormalizedTransaction,
+  WalletNetFlowResponse,
   StoredWalletTransactionsResponse,
   WalletSummaryResponse,
   WalletTokenFlowResponse,
@@ -308,6 +309,17 @@ export class WalletService {
         ]),
       ),
     };
+  }
+
+  async getNetFlow(address: string): Promise<WalletNetFlowResponse> {
+    const tokenFlow = await this.getTokenFlow(address);
+
+    return Object.fromEntries(
+      Object.entries(tokenFlow.flow).map(([token, amounts]) => [
+        token,
+        (BigInt(amounts.in) - BigInt(amounts.out)).toString(),
+      ]),
+    );
   }
 
   private async getStoredWalletData(

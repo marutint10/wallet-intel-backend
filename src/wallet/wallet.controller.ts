@@ -2,6 +2,7 @@ import { BadRequestException, Controller, Get, Param } from '@nestjs/common';
 import { isEthereumAddress } from '../shared/validators/address.validator';
 import {
   StoredWalletTransactionsResponse,
+  WalletNetFlowResponse,
   WalletSummaryResponse,
   WalletTokenFlowResponse,
   WalletTransactionsResponse,
@@ -11,6 +12,17 @@ import { WalletService } from './wallet.service';
 @Controller('wallet')
 export class WalletController {
   constructor(private readonly walletService: WalletService) {}
+
+  @Get(':address/net-flow')
+  async getNetFlow(
+    @Param('address') address: string,
+  ): Promise<WalletNetFlowResponse> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getNetFlow(address);
+  }
 
   @Get(':address/token-flow')
   async getTokenFlow(
