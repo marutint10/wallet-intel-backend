@@ -42,3 +42,13 @@ export interface WalletSummaryResponse {
   total_transfers: number;
   tokens_interacted: number;
 }
+
+export interface TokenFlowAmount {
+  in: string;
+  out: string;
+}
+
+export interface WalletTokenFlowResponse {
+  address: string;
+  flow: Record<string, TokenFlowAmount>;
+}

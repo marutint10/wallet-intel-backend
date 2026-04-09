@@ -13,6 +13,7 @@ import {
   NormalizedTransaction,
   StoredWalletTransactionsResponse,
   WalletSummaryResponse,
+  WalletTokenFlowResponse,
   WalletTransactionsResponse,
 } from './wallet.types';
 import { TransactionEntity } from './transaction.entity';
@@ -264,6 +265,48 @@ export class WalletService {
       total_swaps: totalSwaps,
       total_transfers: totalTransfers,
       tokens_interacted: tokenSet.size,
+    };
+  }
+
+  async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {
+    const walletAddress = address.toLowerCase();
+    const transactions = await this.transactionRepo.find({
+      where: {
+        wallet_address: walletAddress,
+      },
+    });
+
+    const flow: Record<string, { in: bigint; out: bigint }> = {};
+
+    for (const transaction of transactions) {
+      for (const output of transaction.outputs) {
+        if (!flow[output.token]) {
+          flow[output.token] = { in: 0n, out: 0n };
+        }
+
+        flow[output.token].in += BigInt(output.amount);
+      }
+
+      for (const input of transaction.inputs) {
+        if (!flow[input.token]) {
+          flow[input.token] = { in: 0n, out: 0n };
+        }
+
+        flow[input.token].out += BigInt(input.amount);
+      }
+    }
+
+    return {
+      address: walletAddress,
+      flow: Object.fromEntries(
+        Object.entries(flow).map(([token, amounts]) => [
+          token,
+          {
+            in: amounts.in.toString(),
+            out: amounts.out.toString(),
+          },
+        ]),
+      ),
     };
   }
 
