@@ -11,6 +11,8 @@ import { Repository } from 'typeorm';
 import {
   NormalizedTokenAmount,
   NormalizedTransaction,
+  StoredWalletTransactionsResponse,
+  WalletSummaryResponse,
   WalletTransactionsResponse,
 } from './wallet.types';
 import { TransactionEntity } from './transaction.entity';
@@ -179,6 +181,66 @@ export class WalletService {
     await this.saveNormalizedTransactions(address, normalizedTransactions);
 
     return this.getStoredWalletData(address, walletAddress);
+  }
+
+  async getStoredTransactions(
+    address: string,
+  ): Promise<StoredWalletTransactionsResponse> {
+    const walletAddress = address.toLowerCase();
+    const transactions = await this.transactionRepo.find({
+      where: {
+        wallet_address: walletAddress,
+      },
+      order: {
+        block_number: 'DESC',
+      },
+    });
+
+    return {
+      address: walletAddress,
+      transactions: transactions.map((transaction) =>
+        this.mapEntityToNormalized(transaction),
+      ),
+    };
+  }
+
+  async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
+    const walletAddress = address.toLowerCase();
+    const transactions = await this.transactionRepo.find({
+      where: {
+        wallet_address: walletAddress,
+      },
+    });
+
+    let totalSwaps = 0;
+    let totalTransfers = 0;
+    const tokenSet = new Set<string>();
+
+    for (const transaction of transactions) {
+      if (transaction.type === 'swap') {
+        totalSwaps += 1;
+      }
+
+      if (transaction.type === 'transfer') {
+        totalTransfers += 1;
+      }
+
+      for (const input of transaction.inputs) {
+        tokenSet.add(input.token);
+      }
+
+      for (const output of transaction.outputs) {
+        tokenSet.add(output.token);
+      }
+    }
+
+    return {
+      address: walletAddress,
+      total_transactions: transactions.length,
+      total_swaps: totalSwaps,
+      total_transfers: totalTransfers,
+      tokens_interacted: tokenSet.size,
+    };
   }
 
   private async getStoredWalletData(
