@@ -29,3 +29,16 @@ export interface WalletTransactionsResponse {
   raw: WalletRawData;
   normalized: NormalizedTransaction[];
 }
+
+export interface StoredWalletTransactionsResponse {
+  address: string;
+  transactions: NormalizedTransaction[];
+}
+
+export interface WalletSummaryResponse {
+  address: string;
+  total_transactions: number;
+  total_swaps: number;
+  total_transfers: number;
+  tokens_interacted: number;
+}
