@@ -7,6 +7,7 @@ export interface NormalizedTokenAmount {
   token: string;
   amount: string;
   decimals?: number;
+  contractAddress?: string;
 }
 
 export interface NormalizedTransaction {
@@ -48,6 +49,7 @@ export interface TokenFlowAmount {
   in: string;
   out: string;
   decimals?: number;
+  contractAddress?: string;
 }
 
 export interface WalletTokenFlowResponse {
@@ -61,4 +63,13 @@ export interface WalletNetFlowResponse {
 
 export interface WalletPortfolioResponse {
   [token: string]: string;
+}
+
+export interface WalletPortfolioUsdItem {
+  amount: string;
+  usd: string;
+}
+
+export interface WalletPortfolioUSDResponse {
+  [token: string]: WalletPortfolioUsdItem;
 }

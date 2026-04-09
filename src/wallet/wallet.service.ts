@@ -13,6 +13,7 @@ import {
   NormalizedTransaction,
   WalletNetFlowResponse,
   WalletPortfolioResponse,
+  WalletPortfolioUSDResponse,
   StoredWalletTransactionsResponse,
   WalletSummaryResponse,
   WalletTokenFlowResponse,
@@ -30,6 +31,23 @@ interface MoralisPaginatedResponse<T> {
 interface MoralisFetchOptions {
   stopAtBlock?: number;
   firstPageOnly?: boolean;
+}
+
+interface PortfolioTokenEntry {
+  amount: string;
+  contractAddress?: string;
+}
+
+interface CoinGeckoTokenPriceResponse {
+  [contractAddress: string]: {
+    usd?: number;
+  };
+}
+
+interface CoinGeckoEthPriceResponse {
+  ethereum?: {
+    usd?: number;
+  };
 }
 
 export interface MoralisErc20Transfer {
@@ -69,16 +87,44 @@ export interface MoralisWalletHistoryItem {
 }
 
 function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
-  const map = new Map<string, bigint>();
+  const map = new Map<
+    string,
+    { amount: bigint; decimals?: number; contractAddress?: string }
+  >();
 
   for (const entry of entries) {
-    const current = map.get(entry.token) || 0n;
-    map.set(entry.token, current + BigInt(entry.amount));
+    if (!entry.token) {
+      continue;
+    }
+
+    const current = map.get(entry.token);
+
+    if (!current) {
+      map.set(entry.token, {
+        amount: BigInt(entry.amount),
+        decimals: entry.decimals,
+        contractAddress: entry.contractAddress?.toLowerCase(),
+      });
+
+      continue;
+    }
+
+    current.amount += BigInt(entry.amount);
+
+    if (current.decimals === undefined && entry.decimals !== undefined) {
+      current.decimals = entry.decimals;
+    }
+
+    if (!current.contractAddress && entry.contractAddress) {
+      current.contractAddress = entry.contractAddress.toLowerCase();
+    }
   }
 
-  return Array.from(map.entries()).map(([token, amount]) => ({
+  return Array.from(map.entries()).map(([token, entry]) => ({
     token,
-    amount: amount.toString(),
+    amount: entry.amount.toString(),
+    decimals: entry.decimals,
+    contractAddress: entry.contractAddress,
   }));
 }
 
@@ -278,16 +324,28 @@ export class WalletService {
       },
     });
 
-    const flow: Record<string, { in: bigint; out: bigint; decimals?: number }> =
-      {};
+    const flow: Record<
+      string,
+      {
+        in: bigint;
+        out: bigint;
+        decimals?: number;
+        contractAddress?: string;
+      }
+    > = {};
 
     for (const transaction of transactions) {
       for (const output of transaction.outputs) {
+        if (!output.token) {
+          continue;
+        }
+
         if (!flow[output.token]) {
           flow[output.token] = {
             in: 0n,
             out: 0n,
             decimals: output.decimals,
+            contractAddress: output.contractAddress?.toLowerCase(),
           };
         } else if (
           flow[output.token].decimals === undefined &&
@@ -296,21 +354,34 @@ export class WalletService {
           flow[output.token].decimals = output.decimals;
         }
 
+        if (!flow[output.token].contractAddress && output.contractAddress) {
+          flow[output.token].contractAddress = output.contractAddress.toLowerCase();
+        }
+
         flow[output.token].in += BigInt(output.amount);
       }
 
       for (const input of transaction.inputs) {
+        if (!input.token) {
+          continue;
+        }
+
         if (!flow[input.token]) {
           flow[input.token] = {
             in: 0n,
             out: 0n,
             decimals: input.decimals,
+            contractAddress: input.contractAddress?.toLowerCase(),
           };
         } else if (
           flow[input.token].decimals === undefined &&
           input.decimals !== undefined
         ) {
           flow[input.token].decimals = input.decimals;
+        }
+
+        if (!flow[input.token].contractAddress && input.contractAddress) {
+          flow[input.token].contractAddress = input.contractAddress.toLowerCase();
         }
 
         flow[input.token].out += BigInt(input.amount);
@@ -326,6 +397,7 @@ export class WalletService {
             in: amounts.in.toString(),
             out: amounts.out.toString(),
             decimals: amounts.decimals,
+            contractAddress: amounts.contractAddress,
           },
         ]),
       ),
@@ -354,6 +426,61 @@ export class WalletService {
           amounts.decimals ?? 18,
         ),
       ]),
+    );
+  }
+
+  async getPortfolioUSD(address: string): Promise<WalletPortfolioUSDResponse> {
+    const portfolio = await this.getPortfolio(address);
+    const portfolioEntries = Object.fromEntries(
+      Object.entries(portfolio).map(([token, entry]) => [
+        token,
+        this.normalizePortfolioEntry(entry),
+      ]),
+    ) as Record<string, PortfolioTokenEntry>;
+
+    const contractAddresses = Array.from(
+      new Set(
+        Object.values(portfolioEntries)
+          .map((entry) => entry.contractAddress?.toLowerCase())
+          .filter((address): address is string => Boolean(address)),
+      ),
+    );
+
+    let priceMap: Record<string, number> = {};
+    let ethPrice = 0;
+
+    try {
+      [priceMap, ethPrice] = await Promise.all([
+        this.fetchCoinGeckoTokenPrices(contractAddresses),
+        this.fetchEthereumUsdPrice(),
+      ]);
+    } catch (error) {
+      this.logger.warn(
+        'CoinGecko pricing failed, returning zero USD values',
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
+
+    return Object.fromEntries(
+      Object.entries(portfolioEntries).map(([token, entry]) => {
+        const amount = Number(entry.amount);
+        const normalizedContractAddress = entry.contractAddress?.toLowerCase();
+        const price =
+          token.toUpperCase() === 'ETH'
+            ? ethPrice
+            : normalizedContractAddress
+              ? priceMap[normalizedContractAddress] ?? 0
+              : 0;
+        const usdValue = Number.isFinite(amount) ? amount * price : 0;
+
+        return [
+          token,
+          {
+            amount: entry.amount,
+            usd: this.formatUsdValue(usdValue),
+          },
+        ];
+      }),
     );
   }
 
@@ -411,6 +538,103 @@ export class WalletService {
     }
 
     return `${sign}${wholePart.toString()}.${fractionalString}`;
+  }
+
+  private normalizePortfolioEntry(entry: unknown): PortfolioTokenEntry {
+    if (typeof entry === 'string') {
+      return {
+        amount: entry,
+      };
+    }
+
+    if (typeof entry === 'object' && entry !== null) {
+      const portfolioEntry = entry as {
+        amount?: unknown;
+        contractAddress?: unknown;
+      };
+
+      return {
+        amount:
+          typeof portfolioEntry.amount === 'string' ? portfolioEntry.amount : '0',
+        contractAddress:
+          typeof portfolioEntry.contractAddress === 'string'
+            ? portfolioEntry.contractAddress
+            : undefined,
+      };
+    }
+
+    return {
+      amount: '0',
+    };
+  }
+
+  private async fetchCoinGeckoTokenPrices(
+    contractAddresses: string[],
+  ): Promise<Record<string, number>> {
+    if (contractAddresses.length === 0) {
+      return {};
+    }
+
+    const baseUrl = process.env.COINGECKO_API_URL?.trim();
+
+    if (!baseUrl) {
+      return {};
+    }
+
+    const response = await axios.get<CoinGeckoTokenPriceResponse>(
+      `${baseUrl.replace(/\/$/, '')}/simple/token_price/ethereum`,
+      {
+        params: {
+          contract_addresses: contractAddresses.join(','),
+          vs_currencies: 'usd',
+        },
+        timeout: 10000,
+      },
+    );
+
+    return Object.fromEntries(
+      Object.entries(response.data).map(([contractAddress, value]) => [
+        contractAddress.toLowerCase(),
+        typeof value.usd === 'number' ? value.usd : 0,
+      ]),
+    );
+  }
+
+  private async fetchEthereumUsdPrice(): Promise<number> {
+    const baseUrl = process.env.COINGECKO_API_URL?.trim();
+
+    if (!baseUrl) {
+      return 0;
+    }
+
+    const response = await axios.get<CoinGeckoEthPriceResponse>(
+      `${baseUrl.replace(/\/$/, '')}/simple/price`,
+      {
+        params: {
+          ids: 'ethereum',
+          vs_currencies: 'usd',
+        },
+        timeout: 10000,
+      },
+    );
+
+    return typeof response.data.ethereum?.usd === 'number'
+      ? response.data.ethereum.usd
+      : 0;
+  }
+
+  private formatUsdValue(value: number): string {
+    if (!Number.isFinite(value)) {
+      return '0';
+    }
+
+    const rounded = Math.round(value * 100) / 100;
+
+    if (Object.is(rounded, -0) || rounded === 0) {
+      return '0';
+    }
+
+    return rounded.toFixed(2).replace(/\.0+$|(?<=\.\d)0+$/, '');
   }
 
   private async getLatestStoredBlock(address: string): Promise<number | null> {
@@ -585,8 +809,13 @@ export class WalletService {
         transfer.from_address,
         transfer.to_address,
         {
-          token: transfer.token_symbol || transfer.address.slice(0, 6),
+          token: transfer.token_symbol ?? '',
           amount: String(transfer.value),
+          decimals:
+            transfer.token_decimals !== undefined
+              ? this.toNumber(transfer.token_decimals)
+              : undefined,
+          contractAddress: transfer.address?.toLowerCase(),
         },
       );
     }
@@ -663,6 +892,10 @@ export class WalletService {
     entry: NormalizedTokenAmount,
     direction?: string,
   ): void {
+    if (!entry.token) {
+      return;
+    }
+
     const normalizedFrom = fromAddress?.toLowerCase();
     const normalizedTo = toAddress?.toLowerCase();
 
