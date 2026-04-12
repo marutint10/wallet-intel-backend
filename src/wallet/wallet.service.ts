@@ -11,6 +11,7 @@ import { Repository } from 'typeorm';
 import {
   NormalizedTokenAmount,
   NormalizedTransaction,
+  Trade,
   WalletNetFlowResponse,
   WalletPortfolioResponse,
   WalletPortfolioUSDResponse,
@@ -280,6 +281,40 @@ export class WalletService {
         this.mapEntityToNormalized(transaction),
       ),
     };
+  }
+
+  async getTrades(address: string): Promise<Trade[]> {
+    const walletAddress = address.toLowerCase();
+    const transactions = await this.transactionRepo.find({
+      where: {
+        wallet_address: walletAddress,
+      },
+      order: {
+        timestamp: 'ASC',
+      },
+    });
+
+    const swapTransactions = transactions
+      .filter((transaction) => transaction.type === 'swap')
+      .sort(
+        (left, right) =>
+          left.timestamp.getTime() - right.timestamp.getTime(),
+      );
+
+    const trades: Trade[] = [];
+
+    for (const transaction of swapTransactions) {
+      const timestamp = this.toUnixTimestamp(transaction.timestamp);
+
+      trades.push(
+        ...this.buildTradesFromEntries(transaction.inputs, 'SELL', timestamp),
+      );
+      trades.push(
+        ...this.buildTradesFromEntries(transaction.outputs, 'BUY', timestamp),
+      );
+    }
+
+    return trades.sort((left, right) => left.timestamp - right.timestamp);
   }
 
   async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
@@ -757,6 +792,83 @@ export class WalletService {
       inputs: transaction.inputs,
       outputs: transaction.outputs,
     };
+  }
+
+  private buildTradesFromEntries(
+    entries: NormalizedTokenAmount[],
+    type: Trade['type'],
+    timestamp: number,
+  ): Trade[] {
+    const trades: Trade[] = [];
+
+    for (const entry of entries) {
+      const trade = this.createTradeFromEntry(entry, type, timestamp);
+
+      if (trade) {
+        trades.push(trade);
+      }
+    }
+
+    return trades;
+  }
+
+  private createTradeFromEntry(
+    entry: NormalizedTokenAmount,
+    type: Trade['type'],
+    timestamp: number,
+  ): Trade | null {
+    if (!entry.token) {
+      return null;
+    }
+
+    const rawAmount = this.parseBigInt(entry.amount);
+
+    if (rawAmount === null || rawAmount === 0n) {
+      return null;
+    }
+
+    return {
+      token: entry.token,
+      type,
+      amount: this.normalizeTokenAmount(rawAmount, entry.decimals),
+      decimals: entry.decimals,
+      contractAddress: entry.contractAddress?.toLowerCase(),
+      timestamp,
+    };
+  }
+
+  private parseBigInt(value: string): bigint | null {
+    try {
+      return BigInt(value);
+    } catch {
+      return null;
+    }
+  }
+
+  private normalizeTokenAmount(rawAmount: bigint, decimals?: number): string {
+    const safeDecimals =
+      typeof decimals === 'number' && Number.isInteger(decimals) && decimals >= 0
+        ? decimals
+        : 18;
+
+    const divisor = 10n ** BigInt(safeDecimals);
+    const wholePart = rawAmount / divisor;
+    const fractionalPart = rawAmount % divisor;
+
+    if (fractionalPart === 0n) {
+      return wholePart.toString();
+    }
+
+    const fractionalString = fractionalPart
+      .toString()
+      .padStart(safeDecimals, '0')
+      .replace(/0+$/, '');
+
+    return `${wholePart.toString()}.${fractionalString}`;
+  }
+
+  private toUnixTimestamp(timestamp: Date): number {
+    return Math.floor(timestamp.getTime() / 1000);
   }
 
   private normalizeTransactions(

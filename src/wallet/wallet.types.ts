@@ -45,6 +45,15 @@ export interface WalletSummaryResponse {
   tokens_interacted: number;
 }
 
+export interface Trade {
+  token: string;
+  type: 'BUY' | 'SELL';
+  amount: string;
+  decimals?: number;
+  contractAddress?: string;
+  timestamp: number;
+}
+
 export interface TokenFlowAmount {
   in: string;
   out: string;

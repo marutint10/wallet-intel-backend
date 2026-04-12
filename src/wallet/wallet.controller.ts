@@ -2,6 +2,7 @@ import { BadRequestException, Controller, Get, Param } from '@nestjs/common';
 import { isEthereumAddress } from '../shared/validators/address.validator';
 import {
   StoredWalletTransactionsResponse,
+  Trade,
   WalletNetFlowResponse,
   WalletPortfolioResponse,
   WalletPortfolioUSDResponse,
@@ -79,6 +80,15 @@ export class WalletController {
     }
 
     return this.walletService.getStoredTransactions(address);
+  }
+
+  @Get(':address/trades')
+  async getTrades(@Param('address') address: string): Promise<Trade[]> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getTrades(address);
   }
 
   @Get(':address')
