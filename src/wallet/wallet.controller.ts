@@ -91,6 +91,15 @@ export class WalletController {
     return this.walletService.getTrades(address);
   }
 
+  @Get(':address/priced-trades')
+  async getPricedTrades(@Param('address') address: string) {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getPricedTrades(address);
+  }
+
   @Get(':address')
   async getWalletData(
     @Param('address') address: string,

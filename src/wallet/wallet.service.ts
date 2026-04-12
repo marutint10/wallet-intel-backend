@@ -51,7 +51,29 @@ interface CoinGeckoEthPriceResponse {
   };
 }
 
+interface CoinGeckoHistoricalPriceResponse {
+  market_data?: {
+    current_price?: {
+      usd?: number;
+    };
+  };
+}
+
+interface DefiLlamaPriceResponse {
+  coins: {
+    [key: string]: {
+      price: number;
+      symbol: string;
+      timestamp: number;
+      confidence: number;
+    };
+  };
+}
+
 const COINGECKO_API_BASE_URL = 'https://api.coingecko.com/api/v3';
+const DEFILLAMA_API_BASE_URL = 'https://coins.llama.fi';
+
+type PricedTrade = Trade & { price: number };
 
 export interface MoralisErc20Transfer {
   token_name?: string;
@@ -315,6 +337,32 @@ export class WalletService {
     }
 
     return trades.sort((left, right) => left.timestamp - right.timestamp);
+  }
+
+  async getPricedTrades(address: string): Promise<PricedTrade[]> {
+    const trades = await this.getTrades(address);
+
+    const priceCache = new Map<string, number>();
+    const pricedTrades: PricedTrade[] = [];
+
+    for (const trade of trades) {
+      const cacheKey = `${trade.contractAddress?.toLowerCase() ?? trade.token}-${trade.timestamp}`;
+
+      let price = priceCache.get(cacheKey);
+
+      if (price === undefined) {
+        price = await this.fetchHistoricalTradePrice(
+          trade.token,
+          trade.contractAddress,
+          trade.timestamp,
+        );
+        priceCache.set(cacheKey, price);
+      }
+
+      pricedTrades.push({ ...trade, price });
+    }
+
+    return pricedTrades;
   }
 
   async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
@@ -673,6 +721,170 @@ export class WalletService {
       : 0;
   }
 
+  private formatTradeDate(timestamp: number): string {
+    const date = new Date(timestamp * 1000);
+    const day = String(date.getUTCDate()).padStart(2, '0');
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const year = date.getUTCFullYear();
+
+    return `${day}-${month}-${year}`;
+  }
+
+  private static readonly COINGECKO_COIN_ID_MAP: Record<string, string> = {
+    ETH: 'ethereum',
+    BTC: 'bitcoin',
+    USDT: 'tether',
+  };
+
+  private static readonly DEFILLAMA_NATIVE_TOKEN_MAP: Record<string, string> = {
+    ETH: 'coingecko:ethereum',
+    WETH: 'coingecko:weth',
+    BTC: 'coingecko:bitcoin',
+    WBTC: 'coingecko:wrapped-bitcoin',
+    USDT: 'coingecko:tether',
+    USDC: 'coingecko:usd-coin',
+    DAI: 'coingecko:dai',
+  };
+
+  private async fetchHistoricalTradePrice(
+    token: string,
+    contractAddress: string | undefined,
+    timestamp: number,
+  ): Promise<number> {
+    const defiLlamaPrice = await this.fetchDefiLlamaPrice(
+      token,
+      contractAddress,
+      timestamp,
+    );
+
+    if (defiLlamaPrice > 0) {
+      return defiLlamaPrice;
+    }
+
+    const coinGeckoPrice = await this.fetchCoinGeckoFallbackPrice(
+      token,
+      timestamp,
+    );
+
+    if (coinGeckoPrice > 0) {
+      return coinGeckoPrice;
+    }
+
+    this.logger.warn(
+      `No price found for ${token} at ${timestamp} from any source`,
+    );
+
+    return 0;
+  }
+
+  private async fetchDefiLlamaPrice(
+    token: string,
+    contractAddress: string | undefined,
+    timestamp: number,
+  ): Promise<number> {
+    try {
+      const coinKey = this.buildDefiLlamaCoinKey(token, contractAddress);
+
+      if (!coinKey) {
+        this.logger.debug(`Cannot build DeFi Llama key for ${token}`);
+        return 0;
+      }
+
+      const url = `${DEFILLAMA_API_BASE_URL}/prices/historical/${timestamp}/${coinKey}`;
+      this.logger.debug(`[DefiLlama] GET ${url}`);
+
+      const response = await axios.get<DefiLlamaPriceResponse>(url, {
+        timeout: 10000,
+      });
+
+      const coinData = response.data?.coins?.[coinKey];
+      const price = coinData?.price;
+
+      if (typeof price === 'number' && price > 0) {
+        this.logger.debug(
+          `[DefiLlama] ${token} @ ${timestamp} = $${price} (confidence: ${coinData.confidence})`,
+        );
+        return price;
+      }
+
+      this.logger.debug(
+        `[DefiLlama] No price data for ${token} at ${timestamp}`,
+      );
+
+      return 0;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        this.logger.warn(
+          `[DefiLlama] HTTP ${error.response?.status ?? 'NO_RESPONSE'} for ${token} at ${timestamp}`,
+        );
+      } else {
+        this.logger.warn(
+          `[DefiLlama] Failed for ${token} at ${timestamp}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      }
+
+      return 0;
+    }
+  }
+
+  private buildDefiLlamaCoinKey(
+    token: string,
+    contractAddress: string | undefined,
+  ): string | null {
+    const nativeKey =
+      WalletService.DEFILLAMA_NATIVE_TOKEN_MAP[token.toUpperCase()];
+
+    if (nativeKey) {
+      return nativeKey;
+    }
+
+    if (contractAddress) {
+      return `ethereum:${contractAddress.toLowerCase()}`;
+    }
+
+    return null;
+  }
+
+  private async fetchCoinGeckoFallbackPrice(
+    token: string,
+    timestamp: number,
+  ): Promise<number> {
+    const coinId = WalletService.COINGECKO_COIN_ID_MAP[token.toUpperCase()];
+
+    if (!coinId || !this.coinGeckoApiKey) {
+      return 0;
+    }
+
+    try {
+      const date = this.formatTradeDate(timestamp);
+      const response = await axios.get<CoinGeckoHistoricalPriceResponse>(
+        `${COINGECKO_API_BASE_URL}/coins/${coinId}/history`,
+        {
+          params: {
+            date,
+            localization: false,
+            x_cg_demo_api_key: this.coinGeckoApiKey,
+          },
+          timeout: 10000,
+        },
+      );
+
+      return this.extractHistoricalUsdPrice(response.data);
+    } catch {
+      this.logger.warn(`[CoinGecko fallback] Failed for ${token}`);
+      return 0;
+    }
+  }
+
+  private extractHistoricalUsdPrice(
+    response?: CoinGeckoHistoricalPriceResponse,
+  ): number {
+    return typeof response?.market_data?.current_price?.usd === 'number'
+      ? response.market_data.current_price.usd
+      : 0;
+  }
+
   private formatUsdValue(value: number): string {
     if (!Number.isFinite(value)) {
       return '0';
@@ -904,9 +1116,10 @@ export class WalletService {
             : [];
 
       for (const nativeTransfer of nativeTransfers) {
-        const entry = {
+        const entry: NormalizedTokenAmount = {
           token: nativeTransfer.token_symbol ?? 'ETH',
           amount: String(nativeTransfer.value),
+          decimals: 18,
         };
 
         this.addTransferEntry(
