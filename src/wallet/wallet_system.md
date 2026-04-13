@@ -213,6 +213,12 @@ Returns:
 - total swaps
 - total transfers
 - number of unique tokens touched
+- total realized PnL across tokens
+- average positive ROI across tokens
+- average win rate across tokens with sells
+- best and worst sell trade seen across tokens
+- number of profitable tokens
+- number of losing tokens
 
 ### GET /wallet/:address/token-flow
 
@@ -241,6 +247,8 @@ Builds trades and then adds historical prices.
 ### GET /wallet/:address/pnl
 
 Builds FIFO-based realized PnL, realized ROI, win rate, and best/worst trade from priced trades.
+
+The summary endpoint reuses this PnL output and aggregates it instead of re-implementing FIFO logic.
 
 ### Service method: getPnL(address)
 

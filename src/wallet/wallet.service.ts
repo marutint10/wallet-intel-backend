@@ -513,19 +513,29 @@ export class WalletService {
 
   async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
     const walletAddress = address.toLowerCase();
-    const transactions = await this.transactionRepo.find({
-      where: {
-        wallet_address: walletAddress,
-      },
-    });
+    const [transactions, pnlByToken] = await Promise.all([
+      this.transactionRepo.find({
+        where: {
+          wallet_address: walletAddress,
+        },
+      }),
+      this.getPnL(address),
+    ]);
 
     let totalSwaps = 0;
     let totalTransfers = 0;
     const tokenSet = new Set<string>();
+    const sellTokenSet = new Set<string>();
 
     for (const transaction of transactions) {
       if (transaction.type === 'swap') {
         totalSwaps += 1;
+
+        for (const input of transaction.inputs) {
+          if (input.token) {
+            sellTokenSet.add(input.token);
+          }
+        }
       }
 
       if (transaction.type === 'transfer') {
@@ -541,12 +551,67 @@ export class WalletService {
       }
     }
 
+    const pnlEntries = Object.entries(pnlByToken);
+    const roiValues = pnlEntries
+      .map(([, metrics]) => metrics.roi)
+      .filter((roi) => roi > 0);
+    const winRateValues = pnlEntries
+      .filter(([token]) => sellTokenSet.has(token))
+      .map(([, metrics]) => metrics.winRate);
+    const bestTradeCandidates = pnlEntries
+      .filter(([token]) => sellTokenSet.has(token))
+      .map(([, metrics]) => metrics.bestTrade);
+    const worstTradeCandidates = pnlEntries
+      .filter(([token]) => sellTokenSet.has(token))
+      .map(([, metrics]) => metrics.worstTrade);
+    const totalRealizedPnL = this.roundDecimal(
+      pnlEntries.reduce(
+        (total, [, metrics]) => total + metrics.realizedPnL,
+        0,
+      ),
+    );
+    const avgROI =
+      roiValues.length > 0
+        ? this.roundDecimal(
+            roiValues.reduce((total, value) => total + value, 0) /
+              roiValues.length,
+          )
+        : 0;
+    const avgWinRate =
+      winRateValues.length > 0
+        ? this.roundDecimal(
+            winRateValues.reduce((total, value) => total + value, 0) /
+              winRateValues.length,
+          )
+        : 0;
+    const bestTrade =
+      bestTradeCandidates.length > 0
+        ? this.roundDecimal(Math.max(...bestTradeCandidates))
+        : 0;
+    const worstTrade =
+      worstTradeCandidates.length > 0
+        ? this.roundDecimal(Math.min(...worstTradeCandidates))
+        : 0;
+    const profitableTokens = pnlEntries.filter(
+      ([, metrics]) => metrics.realizedPnL > 0,
+    ).length;
+    const losingTokens = pnlEntries.filter(
+      ([, metrics]) => metrics.realizedPnL < 0,
+    ).length;
+
     return {
       address: walletAddress,
       total_transactions: transactions.length,
       total_swaps: totalSwaps,
       total_transfers: totalTransfers,
       tokens_interacted: tokenSet.size,
+      totalRealizedPnL,
+      avgROI,
+      avgWinRate,
+      bestTrade,
+      worstTrade,
+      profitableTokens,
+      losingTokens,
     };
   }
 

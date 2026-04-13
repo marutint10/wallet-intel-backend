@@ -43,6 +43,13 @@ export interface WalletSummaryResponse {
   total_swaps: number;
   total_transfers: number;
   tokens_interacted: number;
+  totalRealizedPnL: number;
+  avgROI: number;
+  avgWinRate: number;
+  bestTrade: number;
+  worstTrade: number;
+  profitableTokens: number;
+  losingTokens: number;
 }
 
 export interface Trade {
