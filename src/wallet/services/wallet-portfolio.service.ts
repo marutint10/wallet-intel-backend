@@ -68,11 +68,20 @@ export class WalletPortfolioService {
   ): Promise<WalletHoldingsUSDResponse> {
     const holdings = await this.getHoldings(address);
     const { ethPrice, tokenPrices } = await this.fetchHoldingPrices(holdings);
+    const holdingsWithUsd = holdings.map((holding) => ({
+      holding,
+      usdValue: this.computeHoldingUsdValue(holding, ethPrice, tokenPrices),
+    }));
+    const totalPortfolioValue = holdingsWithUsd.reduce(
+      (total, entry) => this.addDecimalStrings(total, entry.usdValue),
+      '0',
+    );
 
-    return holdings.map((holding) => ({
+    return holdingsWithUsd.map(({ holding, usdValue }) => ({
       token: holding.token,
       amount: holding.amount,
-      usdValue: this.computeHoldingUsdValue(holding, ethPrice, tokenPrices),
+      usdValue,
+      allocation: this.computeAllocationPercentage(usdValue, totalPortfolioValue),
       decimals: holding.decimals,
       contractAddress: holding.contractAddress,
     }));
@@ -458,6 +467,53 @@ export class WalletPortfolioService {
       leftDecimal.value * rightDecimal.value,
       leftDecimal.scale + rightDecimal.scale,
     );
+  }
+
+  private addDecimalStrings(left: string, right: string): string {
+    const leftDecimal = this.parseDecimalString(left);
+    const rightDecimal = this.parseDecimalString(right);
+
+    if (!leftDecimal && !rightDecimal) {
+      return '0';
+    }
+
+    if (!leftDecimal) {
+      return rightDecimal ? this.formatScaledInteger(rightDecimal.value, rightDecimal.scale) : '0';
+    }
+
+    if (!rightDecimal) {
+      return this.formatScaledInteger(leftDecimal.value, leftDecimal.scale);
+    }
+
+    const scale = Math.max(leftDecimal.scale, rightDecimal.scale);
+    const leftValue = leftDecimal.value * 10n ** BigInt(scale - leftDecimal.scale);
+    const rightValue = rightDecimal.value * 10n ** BigInt(scale - rightDecimal.scale);
+
+    return this.formatScaledInteger(leftValue + rightValue, scale);
+  }
+
+  private computeAllocationPercentage(
+    usdValue: string,
+    totalPortfolioValue: string,
+  ): string {
+    const usdDecimal = this.parseDecimalString(usdValue);
+    const totalDecimal = this.parseDecimalString(totalPortfolioValue);
+
+    if (!usdDecimal || !totalDecimal || usdDecimal.value === 0n || totalDecimal.value === 0n) {
+      return '0';
+    }
+
+    const precision = 6;
+    const scaledNumerator =
+      usdDecimal.value * 100n * 10n ** BigInt(totalDecimal.scale + precision);
+    const scaledDenominator =
+      totalDecimal.value * 10n ** BigInt(usdDecimal.scale);
+
+    if (scaledDenominator === 0n) {
+      return '0';
+    }
+
+    return this.formatScaledInteger(scaledNumerator / scaledDenominator, precision);
   }
 
   private parseDecimalString(value: string): { value: bigint; scale: number } | null {

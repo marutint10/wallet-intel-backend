@@ -117,6 +117,7 @@ export interface WalletHoldingUsdItem {
   token: string;
   amount: string;
   usdValue: string;
+  allocation: string;
   decimals?: number;
   contractAddress?: string;
 }
