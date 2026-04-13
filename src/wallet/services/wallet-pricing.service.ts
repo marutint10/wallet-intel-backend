@@ -80,6 +80,28 @@ export class WalletPricingService {
     return 0;
   }
 
+  async fetchHistoricalMarketPrice(
+    token: string,
+    contractAddress: string | undefined,
+    timestamp: number,
+  ): Promise<number> {
+    const defiLlamaPrice = await this.fetchDefiLlamaPrice(
+      token,
+      contractAddress,
+      timestamp,
+    );
+
+    if (defiLlamaPrice > 0) {
+      return defiLlamaPrice;
+    }
+
+    this.logger.warn(
+      `No DefiLlama historical market price found for ${token} at ${timestamp}`,
+    );
+
+    return 0;
+  }
+
   async fetchCoinGeckoTokenPrices(
     contractAddresses: string[],
   ): Promise<Record<string, number>> {

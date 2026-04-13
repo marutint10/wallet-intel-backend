@@ -22,6 +22,7 @@ interface HoldingLot {
   amount: bigint;
   acquiredAt: Date;
   avgBuyPrice: string | null;
+  costBasisType: 'actual' | 'estimated';
 }
 
 interface HoldingAnalyticsInfo {
@@ -98,26 +99,40 @@ export class WalletPortfolioService {
       '0',
     );
 
-    return holdingsWithUsd.map(({ holding, usdValue }) => ({
-      token: holding.token,
-      amount: holding.amount,
-      usdValue,
-      allocation: this.computeAllocationPercentage(usdValue, totalPortfolioValue),
-      holdingSince:
+    return holdingsWithUsd.map(({ holding, usdValue }) => {
+      const analytics =
         holdingAnalytics.get(
           this.getHoldingKey(holding.token, holding.contractAddress),
-        )?.holdingSince ?? null,
-      holdingDays:
-        holdingAnalytics.get(
-          this.getHoldingKey(holding.token, holding.contractAddress),
-        )?.holdingDays ?? null,
-      avgBuyPrice:
-        holdingAnalytics.get(
-          this.getHoldingKey(holding.token, holding.contractAddress),
-        )?.avgBuyPrice ?? null,
-      decimals: holding.decimals,
-      contractAddress: holding.contractAddress,
-    }));
+        ) ?? null;
+      const currentPrice = this.getCurrentHoldingPrice(
+        holding,
+        ethPrice,
+        tokenPrices,
+      );
+      const unrealizedPnl = this.computeUnrealizedPnl(
+        holding.amount,
+        currentPrice,
+        analytics?.avgBuyPrice ?? null,
+      );
+
+      return {
+        token: holding.token,
+        amount: holding.amount,
+        usdValue,
+        allocation: this.computeAllocationPercentage(usdValue, totalPortfolioValue),
+        holdingSince: analytics?.holdingSince ?? null,
+        holdingDays: analytics?.holdingDays ?? null,
+        avgBuyPrice: analytics?.avgBuyPrice ?? null,
+        currentPrice,
+        unrealizedPnl,
+        unrealizedRoi: this.computeUnrealizedRoi(
+          currentPrice,
+          analytics?.avgBuyPrice ?? null,
+        ),
+        decimals: holding.decimals,
+        contractAddress: holding.contractAddress,
+      };
+    });
   }
 
   async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {
@@ -593,9 +608,13 @@ export class WalletPortfolioService {
       amount: rawAmount,
       acquiredAt: timestamp,
       avgBuyPrice:
-        transactionType === 'swap'
-          ? await this.getHistoricalAcquisitionPrice(entry, timestamp, priceCache)
-          : null,
+        await this.getLotAcquisitionPrice(
+          entry,
+          timestamp,
+          transactionType,
+          priceCache,
+        ),
+      costBasisType: transactionType === 'swap' ? 'actual' : 'estimated',
     });
 
     lotsByHolding.set(holdingKey, lots);
@@ -651,6 +670,7 @@ export class WalletPortfolioService {
       amount: lot.amount,
       acquiredAt: lot.acquiredAt,
       avgBuyPrice: lot.avgBuyPrice,
+      costBasisType: lot.costBasisType,
     }));
     const totalTrackedBalance = trimmedLots.reduce(
       (total, lot) => total + lot.amount,
@@ -722,12 +742,13 @@ export class WalletPortfolioService {
     return `symbol:${token.toUpperCase()}`;
   }
 
-  private async getHistoricalAcquisitionPrice(
+  private async getLotAcquisitionPrice(
     entry: NormalizedTokenAmount,
     timestamp: Date,
+    transactionType: 'transfer' | 'swap',
     priceCache: Map<string, string | null>,
   ): Promise<string | null> {
-    const cacheKey = `${this.getHoldingKey(entry.token, entry.contractAddress)}:${timestamp.toISOString()}`;
+    const cacheKey = `${transactionType}:${this.getHoldingKey(entry.token, entry.contractAddress)}:${timestamp.toISOString()}`;
     const cachedPrice = priceCache.get(cacheKey);
 
     if (cachedPrice !== undefined) {
@@ -735,11 +756,18 @@ export class WalletPortfolioService {
     }
 
     const unixTimestamp = this.walletCoreService.toUnixTimestamp(timestamp);
-    const price = await this.walletPricingService.fetchHistoricalTradePrice(
-      entry.token,
-      entry.contractAddress,
-      unixTimestamp,
-    );
+    const price =
+      transactionType === 'swap'
+        ? await this.walletPricingService.fetchHistoricalTradePrice(
+            entry.token,
+            entry.contractAddress,
+            unixTimestamp,
+          )
+        : await this.walletPricingService.fetchHistoricalMarketPrice(
+            entry.token,
+            entry.contractAddress,
+            unixTimestamp,
+          );
     const normalizedPrice =
       Number.isFinite(price) && price > 0
         ? this.normalizeDecimalString(price.toString())
@@ -780,6 +808,20 @@ export class WalletPortfolioService {
     ethPrice: number,
     tokenPrices: Record<string, number>,
   ): string {
+    const price = this.getCurrentHoldingPrice(holding, ethPrice, tokenPrices);
+
+    if (price === '0') {
+      return '0';
+    }
+
+    return this.multiplyDecimalStrings(holding.amount, price);
+  }
+
+  private getCurrentHoldingPrice(
+    holding: WalletHoldingItem,
+    ethPrice: number,
+    tokenPrices: Record<string, number>,
+  ): string {
     const price =
       holding.token.toUpperCase() === 'ETH'
         ? ethPrice
@@ -791,7 +833,48 @@ export class WalletPortfolioService {
       return '0';
     }
 
-    return this.multiplyDecimalStrings(holding.amount, price.toString());
+    return this.normalizeDecimalString(price.toString()) ?? '0';
+  }
+
+  private computeUnrealizedPnl(
+    amount: string,
+    currentPrice: string,
+    avgBuyPrice: string | null,
+  ): string | null {
+    if (!avgBuyPrice) {
+      return null;
+    }
+
+    const priceDelta = this.subtractDecimalStrings(currentPrice, avgBuyPrice);
+
+    if (priceDelta === null) {
+      return null;
+    }
+
+    return this.multiplySignedDecimalStrings(amount, priceDelta);
+  }
+
+  private computeUnrealizedRoi(
+    currentPrice: string,
+    avgBuyPrice: string | null,
+  ): string | null {
+    if (!avgBuyPrice) {
+      return null;
+    }
+
+    const priceDelta = this.subtractDecimalStrings(currentPrice, avgBuyPrice);
+
+    if (priceDelta === null) {
+      return null;
+    }
+
+    const ratio = this.divideSignedDecimalStrings(priceDelta, avgBuyPrice, 8);
+
+    if (ratio === null) {
+      return null;
+    }
+
+    return this.multiplySignedDecimalStrings(ratio, '100');
   }
 
   private multiplyDecimalStrings(left: string, right: string): string {
@@ -889,6 +972,133 @@ export class WalletPortfolioService {
       scaledNumerator / scaledDenominator,
       Math.max(0, precision),
     );
+  }
+
+  private subtractDecimalStrings(left: string, right: string): string | null {
+    const leftDecimal = this.parseSignedDecimalString(left);
+    const rightDecimal = this.parseSignedDecimalString(right);
+
+    if (!leftDecimal || !rightDecimal) {
+      return null;
+    }
+
+    const scale = Math.max(leftDecimal.scale, rightDecimal.scale);
+    const leftValue =
+      leftDecimal.value * 10n ** BigInt(scale - leftDecimal.scale);
+    const rightValue =
+      rightDecimal.value * 10n ** BigInt(scale - rightDecimal.scale);
+
+    return this.formatSignedScaledInteger(leftValue - rightValue, scale);
+  }
+
+  private multiplySignedDecimalStrings(left: string, right: string): string | null {
+    const leftDecimal = this.parseSignedDecimalString(left);
+    const rightDecimal = this.parseSignedDecimalString(right);
+
+    if (!leftDecimal || !rightDecimal) {
+      return null;
+    }
+
+    return this.formatSignedScaledInteger(
+      leftDecimal.value * rightDecimal.value,
+      leftDecimal.scale + rightDecimal.scale,
+    );
+  }
+
+  private divideSignedDecimalStrings(
+    numerator: string,
+    denominator: string,
+    precision: number,
+  ): string | null {
+    const numeratorDecimal = this.parseSignedDecimalString(numerator);
+    const denominatorDecimal = this.parseSignedDecimalString(denominator);
+
+    if (
+      !numeratorDecimal ||
+      !denominatorDecimal ||
+      denominatorDecimal.value === 0n
+    ) {
+      return null;
+    }
+
+    const sign =
+      (numeratorDecimal.value < 0n) !== (denominatorDecimal.value < 0n)
+        ? -1n
+        : 1n;
+    const absoluteNumerator =
+      numeratorDecimal.value < 0n
+        ? -numeratorDecimal.value
+        : numeratorDecimal.value;
+    const absoluteDenominator =
+      denominatorDecimal.value < 0n
+        ? -denominatorDecimal.value
+        : denominatorDecimal.value;
+    const scaledNumerator =
+      absoluteNumerator *
+      10n ** BigInt(denominatorDecimal.scale + Math.max(0, precision));
+    const scaledDenominator =
+      absoluteDenominator * 10n ** BigInt(numeratorDecimal.scale);
+
+    if (scaledDenominator === 0n) {
+      return null;
+    }
+
+    return this.formatSignedScaledInteger(
+      sign * (scaledNumerator / scaledDenominator),
+      Math.max(0, precision),
+    );
+  }
+
+  private parseSignedDecimalString(
+    value: string,
+  ): { value: bigint; scale: number } | null {
+    const normalizedValue = this.normalizeSignedDecimalString(value);
+
+    if (!normalizedValue) {
+      return null;
+    }
+
+    const sign = normalizedValue.startsWith('-') ? -1n : 1n;
+    const unsignedValue = normalizedValue.replace(/^[+-]/, '');
+    const [wholePart, fractionalPart = ''] = unsignedValue.split('.');
+
+    return {
+      value: sign * BigInt(`${wholePart}${fractionalPart}`),
+      scale: fractionalPart.length,
+    };
+  }
+
+  private normalizeSignedDecimalString(value: string): string | null {
+    const trimmedValue = value.trim();
+
+    if (!trimmedValue) {
+      return null;
+    }
+
+    const signPrefix = trimmedValue.startsWith('-') ? '-' : '';
+    const unsignedValue = trimmedValue.replace(/^[+-]/, '');
+    const normalizedValue = this.normalizeDecimalString(unsignedValue);
+
+    if (!normalizedValue) {
+      return null;
+    }
+
+    if (normalizedValue === '0') {
+      return '0';
+    }
+
+    return signPrefix ? `-${normalizedValue}` : normalizedValue;
+  }
+
+  private formatSignedScaledInteger(value: bigint, scale: number): string {
+    if (value === 0n) {
+      return '0';
+    }
+
+    const signPrefix = value < 0n ? '-' : '';
+    const absoluteValue = value < 0n ? -value : value;
+
+    return `${signPrefix}${this.formatScaledInteger(absoluteValue, scale)}`;
   }
 
   private parseDecimalString(value: string): { value: bigint; scale: number } | null {

@@ -121,6 +121,9 @@ export interface WalletHoldingUsdItem {
   holdingSince: string | null;
   holdingDays: number | null;
   avgBuyPrice: string | null;
+  currentPrice: string;
+  unrealizedPnl: string | null;
+  unrealizedRoi: string | null;
   decimals?: number;
   contractAddress?: string;
 }
