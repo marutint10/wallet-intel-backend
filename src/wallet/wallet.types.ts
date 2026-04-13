@@ -1,7 +1,7 @@
 import type {
   MoralisErc20Transfer,
   MoralisWalletHistoryItem,
-} from './wallet.service';
+} from './services/wallet-core.service';
 
 export interface NormalizedTokenAmount {
   token: string;

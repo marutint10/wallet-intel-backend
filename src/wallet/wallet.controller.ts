@@ -11,7 +11,7 @@ import {
   WalletTokenFlowResponse,
   WalletTransactionsResponse,
 } from './wallet.types';
-import { WalletService } from './wallet.service';
+import { WalletService } from './services/wallet.service';
 
 @Controller('wallet')
 export class WalletController {

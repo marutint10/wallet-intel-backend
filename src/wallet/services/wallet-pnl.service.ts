@@ -1,0 +1,341 @@
+import { Injectable, Logger } from '@nestjs/common';
+import {
+  Trade,
+  WalletPnLResponse,
+  WalletSummaryResponse,
+} from '../wallet.types';
+import { WalletCoreService } from './wallet-core.service';
+import { PricedTrade, WalletPricingService } from './wallet-pricing.service';
+
+type FifoBuyLot = { amount: number; price: number };
+
+@Injectable()
+export class WalletPnlService {
+  private readonly logger = new Logger(WalletPnlService.name);
+
+  constructor(
+    private readonly walletCoreService: WalletCoreService,
+    private readonly walletPricingService: WalletPricingService,
+  ) {}
+
+  async getTrades(address: string): Promise<Trade[]> {
+    const transactions =
+      await this.walletCoreService.getTransactionEntities(address);
+
+    const swapTransactions = transactions
+      .filter((transaction) => transaction.type === 'swap')
+      .sort(
+        (left, right) =>
+          left.timestamp.getTime() - right.timestamp.getTime(),
+      );
+
+    const trades: Trade[] = [];
+
+    for (const transaction of swapTransactions) {
+      const timestamp = this.walletCoreService.toUnixTimestamp(
+        transaction.timestamp,
+      );
+
+      trades.push(
+        ...this.walletCoreService.buildTradesFromEntries(
+          transaction.inputs,
+          'SELL',
+          timestamp,
+        ),
+      );
+      trades.push(
+        ...this.walletCoreService.buildTradesFromEntries(
+          transaction.outputs,
+          'BUY',
+          timestamp,
+        ),
+      );
+    }
+
+    return trades.sort((left, right) => left.timestamp - right.timestamp);
+  }
+
+  async getPricedTrades(address: string): Promise<PricedTrade[]> {
+    const trades = await this.getTrades(address);
+
+    const priceCache = new Map<string, number>();
+    const pricedTrades: PricedTrade[] = [];
+
+    for (const trade of trades) {
+      const cacheKey = `${trade.contractAddress?.toLowerCase() ?? trade.token}-${trade.timestamp}`;
+
+      let price = priceCache.get(cacheKey);
+
+      if (price === undefined) {
+        price =
+          await this.walletPricingService.fetchHistoricalTradePrice(
+            trade.token,
+            trade.contractAddress,
+            trade.timestamp,
+          );
+        priceCache.set(cacheKey, price);
+      }
+
+      pricedTrades.push({ ...trade, price });
+    }
+
+    return this.walletPricingService.inferMissingSwapPrices(pricedTrades);
+  }
+
+  async getPnL(address: string): Promise<WalletPnLResponse> {
+    const pricedTrades = await this.getPricedTrades(address);
+    const sortedTrades = [...pricedTrades].sort(
+      (left, right) => left.timestamp - right.timestamp,
+    );
+    const buyQueues = new Map<string, FifoBuyLot[]>();
+    const realizedPnLByToken = new Map<string, number>();
+    const realizedCostBasisByToken = new Map<string, number>();
+    const sellStatsByToken = new Map<
+      string,
+      { wins: number; losses: number; bestTrade: number; worstTrade: number }
+    >();
+
+    for (const trade of sortedTrades) {
+      if (!realizedPnLByToken.has(trade.token)) {
+        realizedPnLByToken.set(trade.token, 0);
+      }
+
+      if (!realizedCostBasisByToken.has(trade.token)) {
+        realizedCostBasisByToken.set(trade.token, 0);
+      }
+
+      if (!sellStatsByToken.has(trade.token)) {
+        sellStatsByToken.set(trade.token, {
+          wins: 0,
+          losses: 0,
+          bestTrade: 0,
+          worstTrade: 0,
+        });
+      }
+
+      const amount = this.walletPricingService.parsePositiveNumber(
+        trade.amount,
+      );
+
+      if (amount === null || !this.isValidTradePrice(trade.price)) {
+        continue;
+      }
+
+      const queue = buyQueues.get(trade.token) ?? [];
+
+      if (trade.type === 'BUY') {
+        queue.push({
+          amount,
+          price: trade.price,
+        });
+        buyQueues.set(trade.token, queue);
+        continue;
+      }
+
+      let sellAmount = amount;
+      let sellPnL = 0;
+      let matchedAnyLots = false;
+
+      while (sellAmount > 0 && queue.length > 0) {
+        const oldestBuy = queue[0];
+        const matchedAmount = Math.min(sellAmount, oldestBuy.amount);
+        const currentPnL = realizedPnLByToken.get(trade.token) ?? 0;
+        const currentCostBasis =
+          realizedCostBasisByToken.get(trade.token) ?? 0;
+        const matchedPnL = (trade.price - oldestBuy.price) * matchedAmount;
+        const matchedCostBasis = oldestBuy.price * matchedAmount;
+
+        sellPnL = this.roundDecimal(sellPnL + matchedPnL);
+        matchedAnyLots = true;
+
+        realizedPnLByToken.set(
+          trade.token,
+          this.roundDecimal(currentPnL + matchedPnL),
+        );
+        realizedCostBasisByToken.set(
+          trade.token,
+          this.roundDecimal(currentCostBasis + matchedCostBasis),
+        );
+
+        oldestBuy.amount = this.roundDecimal(oldestBuy.amount - matchedAmount);
+        sellAmount = this.roundDecimal(sellAmount - matchedAmount);
+
+        if (oldestBuy.amount <= 0) {
+          queue.shift();
+        }
+      }
+
+      if (matchedAnyLots) {
+        const sellStats = sellStatsByToken.get(trade.token) ?? {
+          wins: 0,
+          losses: 0,
+          bestTrade: 0,
+          worstTrade: 0,
+        };
+
+        if (sellPnL > 0) {
+          sellStats.wins += 1;
+        } else {
+          sellStats.losses += 1;
+        }
+
+        if (sellStats.wins + sellStats.losses === 1) {
+          sellStats.bestTrade = sellPnL;
+          sellStats.worstTrade = sellPnL;
+        } else {
+          sellStats.bestTrade = Math.max(sellStats.bestTrade, sellPnL);
+          sellStats.worstTrade = Math.min(sellStats.worstTrade, sellPnL);
+        }
+
+        sellStatsByToken.set(trade.token, sellStats);
+      }
+
+      if (queue.length > 0) {
+        buyQueues.set(trade.token, queue);
+      }
+    }
+
+    return Object.fromEntries(
+      Array.from(realizedPnLByToken.entries()).map(([token, realizedPnL]) => {
+        const costBasis = realizedCostBasisByToken.get(token) ?? 0;
+        const sellStats = sellStatsByToken.get(token) ?? {
+          wins: 0,
+          losses: 0,
+          bestTrade: 0,
+          worstTrade: 0,
+        };
+        const totalClosedTrades = sellStats.wins + sellStats.losses;
+        const roundedRealizedPnL = this.roundDecimal(realizedPnL);
+        const roi =
+          costBasis > 0
+            ? this.roundDecimal((roundedRealizedPnL / costBasis) * 100)
+            : 0;
+        const winRate =
+          totalClosedTrades > 0
+            ? this.roundDecimal((sellStats.wins / totalClosedTrades) * 100)
+            : 0;
+
+        return [
+          token,
+          {
+            realizedPnL: roundedRealizedPnL,
+            roi,
+            winRate,
+            bestTrade: this.roundDecimal(sellStats.bestTrade),
+            worstTrade: this.roundDecimal(sellStats.worstTrade),
+          },
+        ];
+      }),
+    );
+  }
+
+  async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
+    const walletAddress = address.toLowerCase();
+    const [transactions, pnlByToken] = await Promise.all([
+      this.walletCoreService.getTransactionEntitiesUnordered(address),
+      this.getPnL(address),
+    ]);
+
+    let totalSwaps = 0;
+    let totalTransfers = 0;
+    const tokenSet = new Set<string>();
+
+    for (const transaction of transactions) {
+      if (transaction.type === 'swap') {
+        totalSwaps += 1;
+      }
+
+      if (transaction.type === 'transfer') {
+        totalTransfers += 1;
+      }
+
+      for (const input of transaction.inputs) {
+        tokenSet.add(input.token);
+      }
+
+      for (const output of transaction.outputs) {
+        tokenSet.add(output.token);
+      }
+    }
+
+    const pnlEntries = Object.entries(pnlByToken);
+    const activeTokens = pnlEntries.filter(
+      ([, metrics]) =>
+        metrics.realizedPnL !== 0 ||
+        metrics.bestTrade !== 0 ||
+        metrics.worstTrade !== 0 ||
+        metrics.winRate !== 0,
+    );
+    const roiValues = activeTokens
+      .map(([, metrics]) => metrics.roi)
+      .filter((roi) => roi > 0);
+    const winRateValues = activeTokens.map(([, metrics]) => metrics.winRate);
+    const bestTradeCandidates = activeTokens.map(
+      ([, metrics]) => metrics.bestTrade,
+    );
+    const worstTradeCandidates = activeTokens.map(
+      ([, metrics]) => metrics.worstTrade,
+    );
+    const totalRealizedPnL = this.roundDecimal(
+      pnlEntries.reduce(
+        (total, [, metrics]) => total + metrics.realizedPnL,
+        0,
+      ),
+    );
+    const avgROI =
+      roiValues.length > 0
+        ? this.roundDecimal(
+            roiValues.reduce((total, value) => total + value, 0) /
+              roiValues.length,
+          )
+        : 0;
+    const avgWinRate =
+      winRateValues.length > 0
+        ? this.roundDecimal(
+            winRateValues.reduce((total, value) => total + value, 0) /
+              winRateValues.length,
+          )
+        : 0;
+    const bestTrade =
+      bestTradeCandidates.length > 0
+        ? this.roundDecimal(Math.max(...bestTradeCandidates))
+        : 0;
+    const worstTrade =
+      worstTradeCandidates.length > 0
+        ? this.roundDecimal(Math.min(...worstTradeCandidates))
+        : 0;
+    const profitableTokens = pnlEntries.filter(
+      ([, metrics]) => metrics.realizedPnL > 0,
+    ).length;
+    const losingTokens = pnlEntries.filter(
+      ([, metrics]) => metrics.realizedPnL < 0,
+    ).length;
+
+    return {
+      address: walletAddress,
+      total_transactions: transactions.length,
+      total_swaps: totalSwaps,
+      total_transfers: totalTransfers,
+      tokens_interacted: tokenSet.size,
+      totalRealizedPnL,
+      avgROI,
+      avgWinRate,
+      bestTrade,
+      worstTrade,
+      profitableTokens,
+      losingTokens,
+    };
+  }
+
+  private isValidTradePrice(price: number): boolean {
+    return Number.isFinite(price) && price >= 0;
+  }
+
+  private roundDecimal(value: number, decimals = 12): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+
+    return Number(value.toFixed(decimals));
+  }
+}
