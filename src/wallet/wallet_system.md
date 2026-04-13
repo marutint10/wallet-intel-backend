@@ -1,81 +1,186 @@
 # Wallet System
 
-This file explains how the wallet module works in simple words.
+This document explains the wallet module as it exists today.
 
-The goal is to keep this as a living document.
-Whenever we add or change wallet logic, we should update this file so another developer can understand the system quickly.
+It should be treated as a living architecture note.
+If wallet behavior changes, this file should change in the same task.
 
-## 1. What this module does
+## 1. What the wallet module does
 
-The wallet module reads wallet activity from external APIs, converts it into our own clean format, stores it in Postgres, and then builds useful wallet views on top of that data.
+The wallet module has three jobs:
 
-Today the module can do these things:
+1. ingest wallet history from external providers
+2. normalize and store that history in Postgres
+3. build analytics and portfolio views on top of normalized data
 
-- fetch wallet transaction history
-- normalize raw blockchain data into one internal transaction format
-- store normalized transactions in the database
-- return stored transactions
-- classify transactions as transfer or swap
-- build trades from swaps
-- add historical prices to trades
-- infer a missing swap price from the priced counterpart trade
-- calculate FIFO-based realized PnL per token
-- compute token flow, net flow, portfolio, and portfolio USD value
-- return a wallet summary
+Current capabilities:
 
-## 2. Main idea of the architecture
+- fetch wallet transaction history from Moralis
+- normalize ERC-20 and native ETH activity into one internal format
+- persist normalized transactions in Postgres
+- serve stored normalized transactions
+- classify normalized transactions as `transfer` or `swap`
+- build trades from swap transactions
+- attach historical prices to trades
+- infer one missing swap-leg price from the priced counterpart trade
+- calculate realized FIFO PnL metrics
+- calculate token flow and net flow from stored transactions
+- return live on-chain holdings from Moralis balances endpoints
+- return live enriched portfolio analytics
+- return DB-backed reconstructed balances as a ledger view
+- return wallet summary metrics
 
-We use one main service for the whole wallet system.
+## 2. Current architecture
 
-High-level flow:
+The wallet module is now split into focused services.
 
-1. Client calls a wallet API route.
-2. Controller validates the wallet address.
-3. Controller calls WalletService.
-4. WalletService either:
-   - fetches fresh data from Moralis and stores normalized results, or
-   - falls back to already stored data from Postgres.
-5. WalletService builds higher-level outputs from stored normalized transactions.
+### WalletController
 
-This means the database is our internal source of truth after normalization.
-External APIs are only used to fetch raw data and price information.
+Owns the HTTP API under `/wallet`.
 
-## 3. Folder overview
+Responsibilities:
 
-### wallet.module.ts
-
-Registers the wallet controller, wallet service, and TypeORM repository for the transactions table.
-
-### wallet.controller.ts
-
-Defines the HTTP endpoints under `/wallet`.
-It only does light work:
-
-- validate Ethereum address
-- call the correct service method
+- validate Ethereum addresses
+- call the correct facade method
 - return the response
 
-Business logic stays in the service.
+The controller does not contain business logic.
 
-### wallet.service.ts
+### WalletService
 
-This is the core of the system.
-It handles:
+This is a thin facade.
 
-- fetching raw wallet data from Moralis
-- retry and fallback behavior
-- transaction normalization
-- transaction type detection
-- database persistence
-- trade building
-- trade pricing
-- FIFO realized PnL calculation
-- portfolio and summary calculations
+Responsibilities:
 
-### transaction.entity.ts
+- expose a clean public service surface to the controller
+- delegate ingestion calls to `WalletCoreService`
+- delegate PnL calls to `WalletPnlService`
+- delegate holdings, ledger, and portfolio calls to `WalletPortfolioService`
 
-Defines the `transactions` table.
-Each row is one normalized blockchain transaction for one wallet.
+### WalletCoreService
+
+This is the ingestion and normalization layer.
+
+Responsibilities:
+
+- configure the Moralis client
+- fetch ERC-20 transfers and wallet history
+- fetch live native and ERC-20 balances
+- refresh only new blocks when DB data already exists
+- normalize raw provider payloads into `NormalizedTransaction`
+- persist normalized transactions into Postgres
+- return stored normalized transactions
+- expose transaction entities to downstream services
+- build trade entries from normalized token amounts
+
+### WalletPricingService
+
+This is the pricing layer.
+
+Responsibilities:
+
+- fetch current ERC-20 prices from CoinGecko
+- fetch current ETH/USD price from CoinGecko
+- fetch historical trade prices from DefiLlama with CoinGecko fallback
+- fetch historical transfer-in market prices from DefiLlama only
+- infer one missing swap-leg price when the opposite side is priced
+
+### WalletPnlService
+
+This is the realized trading analytics layer.
+
+Responsibilities:
+
+- build trades from stored swap transactions
+- attach historical prices to trades
+- compute realized FIFO PnL per token
+- compute realized ROI, win rate, best trade, and worst trade
+- compute wallet summary metrics from stored transactions and realized PnL
+
+### WalletPortfolioService
+
+This is the holdings and portfolio analytics layer.
+
+Responsibilities:
+
+- fetch live raw holdings from Moralis balances endpoints
+- compute the live enriched portfolio view
+- compute the DB-backed reconstructed ledger view
+- compute token flow and net flow from normalized history
+- compute holding duration and cost basis analytics from FIFO lots
+- compute current-price-based unrealized PnL and ROI
+
+### Placeholder services
+
+The following services still exist as placeholders for future architecture work:
+
+- `PortfolioService`
+- `PnlService`
+- `ScoringService`
+- `ClassificationService`
+
+They are registered in the module but are not the main runtime path for current wallet analytics.
+
+## 3. Module wiring
+
+`WalletModule` registers:
+
+- `WalletController`
+- `WalletCoreService`
+- `WalletPricingService`
+- `WalletPnlService`
+- `WalletPortfolioService`
+- `WalletService`
+- the placeholder services listed above
+- the TypeORM repository for `TransactionEntity`
+
+## 4. Configuration
+
+Current config values:
+
+- `PORT`
+- `MORALIS_API_KEY`
+- `COINGECKO_API_KEY`
+- `DATABASE_URL`
+
+The app is currently Ethereum-focused.
+Moralis calls use `chain: 'eth'`.
+
+## 5. External providers and how we use them
+
+### Moralis
+
+Moralis is used for both history ingestion and live holdings.
+
+Current usage:
+
+- ERC-20 transfers
+- wallet history for native ETH transfers
+- native balance endpoint
+- ERC-20 balances endpoint
+
+Moralis is the source for blockchain activity and current on-chain balances.
+
+### DefiLlama
+
+DefiLlama is the primary historical pricing source.
+
+Current usage:
+
+- historical trade pricing
+- historical market pricing for transfer-in lots
+
+### CoinGecko
+
+CoinGecko is used for:
+
+- current ERC-20 USD prices
+- current ETH/USD price
+- fallback historical trade pricing for supported tokens when DefiLlama has no answer
+
+## 6. Database model
+
+The `transactions` table stores normalized wallet transactions.
 
 Important stored fields:
 
@@ -86,93 +191,43 @@ Important stored fields:
 - from address
 - to address
 - type: `transfer` or `swap`
-- inputs: tokens that left the wallet
-- outputs: tokens that entered the wallet
+- inputs: tokens leaving the wallet
+- outputs: tokens entering the wallet
 
-### wallet.types.ts
+Important rules:
 
-Defines the shared response and data types used by the controller and service.
-
-## 4. App-level wiring
-
-The wallet module is loaded by `AppModule`.
-
-Important app pieces:
-
-- `ConfigModule` loads env-based configuration
-- `TypeOrmModule` connects to Postgres
-- `WalletModule` adds wallet APIs
-
-Current config values:
-
-- `PORT`
-- `MORALIS_API_KEY`
-- `COINGECKO_API_KEY`
-- `DATABASE_URL`
-
-The app starts in `main.ts` with CORS enabled.
-
-## 5. External services we use
-
-### Moralis
-
-Moralis is the main source for raw wallet history.
-
-We use it to fetch:
-
-- ERC-20 transfers
-- wallet history for native ETH transfers
-
-Moralis is used only for raw transaction data.
-
-### DeFi Llama
-
-DeFi Llama is the first source for historical token pricing in `getPricedTrades`.
-
-### CoinGecko
-
-CoinGecko is used in two ways:
-
-- portfolio spot prices for current USD values
-- fallback historical prices when DeFi Llama has no historical price
-
-## 6. Database model
-
-The `transactions` table stores normalized wallet transactions.
+- one row per `wallet_address + transaction_hash`
+- duplicate inserts are ignored safely
+- `inputs` and `outputs` are stored as JSONB arrays
 
 Why we store normalized data:
 
-- raw API data is noisy and provider-specific
-- normalized data is easier to query and reuse
-- most wallet analytics can run from DB without calling Moralis again
-
-Important database rules:
-
-- one row per wallet + transaction hash
-- unique constraint prevents duplicate saves
-- `inputs` and `outputs` are stored as JSONB arrays
+- provider payloads are noisy and provider-specific
+- normalized data is easier to reason about
+- most analytics can run from stored history
+- we can recover from temporary upstream failures
 
 ## 7. Core data model
 
 ### NormalizedTransaction
 
-This is our internal transaction shape.
+This is the internal transaction format used across the module.
 
 - `inputs` means tokens leaving the wallet
 - `outputs` means tokens entering the wallet
-- `type` is decided after normalization
+- `type` is inferred after normalization
 
 ### Trade
 
-A trade is created only from swap transactions.
+Trades are built only from normalized transactions of type `swap`.
 
-- swap input entries become `SELL` trades
-- swap output entries become `BUY` trades
+- swap inputs become `SELL`
+- swap outputs become `BUY`
 
-Each trade has:
+Each trade includes:
 
 - token
-- buy/sell type
+- trade type
 - normalized amount
 - decimals
 - contract address
@@ -180,423 +235,465 @@ Each trade has:
 
 ### PricedTrade
 
-This is just a trade plus a `price` field.
+`PricedTrade` is a `Trade` plus a historical `price`.
 
-## 8. Endpoints and what each one returns
+## 8. Current endpoint map
 
 ### GET /wallet/:address
 
 Main ingestion endpoint.
 
-What it does:
+Behavior:
 
-1. checks if we already have transactions in DB
-2. if yes, checks Moralis for newer blocks
-3. fetches only new data when possible
-4. normalizes and stores new transactions
-5. returns stored normalized transactions
+1. check the newest stored block for the wallet
+2. if cached data exists, do a lightweight Moralis freshness check
+3. fetch only new pages when newer blocks exist
+4. normalize raw results into `NormalizedTransaction`
+5. persist new normalized transactions
+6. return the stored normalized view
 
-If Moralis is down and we already have cached data, the system falls back to DB.
+If Moralis is unavailable and cached data exists, the service falls back to DB.
 
-### GET /wallet/:address/stored
+### GET /wallet/:address/holdings
+
+Returns live raw token balances from blockchain balance endpoints.
+
+Response intent:
+
+- raw current balances only
+- no DB reconstruction
+- no pricing
+- no holding analytics
+
+Current response fields:
+
+- `token`
+- `amount`
+- `contractAddress?`
+- `decimals?`
+
+### GET /wallet/:address/portfolio
+
+Returns the live enriched portfolio view.
+
+This is the main presentation endpoint for current holdings analytics.
+
+It is built from:
+
+- live balances from Moralis
+- current prices from CoinGecko
+- normalized stored history for holding analytics and cost basis
+
+Current response fields:
+
+- `token`
+- `amount`
+- `usdValue`
+- `allocation`
+- `holdingSince`
+- `holdingDays`
+- `avgBuyPrice`
+- `currentPrice`
+- `pnl`
+- `roi`
+- `decimals?`
+- `contractAddress?`
+
+Important note:
+
+- `pnl` and `roi` on this endpoint are unrealized metrics for the current remaining position
+
+### GET /wallet/:address/ledger
+
+Returns the DB-backed reconstructed balance view.
+
+This endpoint represents the old portfolio behavior.
+
+It is built from stored normalized history only:
+
+- token flow from DB
+- net flow = `in - out`
+- human-readable balance formatting
+
+This is useful when we want a ledger-style position view derived from stored history instead of live chain balances.
+
+### GET /wallet/:address/token-flow
+
+Returns total incoming and outgoing raw amounts per token from stored normalized transactions.
+
+### GET /wallet/:address/net-flow
+
+Returns `in - out` per token from stored normalized transactions.
+
+### GET /wallet/:address/transactions
 
 Returns stored normalized transactions only.
-No fresh fetch is done here.
+No fresh ingestion is triggered here.
+
+### GET /wallet/:address/trades
+
+Returns trades built from stored swap transactions.
+
+### GET /wallet/:address/priced-trades
+
+Returns trades plus historical prices.
+
+### GET /wallet/:address/pnl
+
+Returns realized FIFO PnL metrics built from priced trades.
+
+Current fields per token:
+
+- `realizedPnL`
+- `roi`
+- `winRate`
+- `bestTrade`
+- `worstTrade`
 
 ### GET /wallet/:address/summary
 
-Builds a simple summary from stored transactions.
+Returns wallet-level summary metrics derived from stored transactions and realized PnL output.
 
-Returns:
+Current fields:
 
 - total transactions
 - total swaps
 - total transfers
-- number of unique tokens touched
-- total realized PnL across tokens
-- average positive ROI across tokens
-- average win rate across tokens with sells
-- best and worst sell trade seen across tokens
-- number of profitable tokens
-- number of losing tokens
+- unique tokens interacted with
+- total realized PnL
+- average ROI
+- average win rate
+- best trade
+- worst trade
+- profitable token count
+- losing token count
 
-### GET /wallet/:address/token-flow
+## 9. Main ingestion flow
 
-Builds token in/out totals from stored transactions.
-
-### GET /wallet/:address/net-flow
-
-Returns `in - out` for each token.
-
-### GET /wallet/:address/portfolio
-
-Returns human-readable token balances from net flow.
-
-### GET /wallet/:address/usd
-
-Adds current USD prices to the portfolio view.
-
-### GET /wallet/:address/trades
-
-Builds trades from stored swap transactions.
-
-### GET /wallet/:address/priced-trades
-
-Builds trades and then adds historical prices.
-
-### GET /wallet/:address/pnl
-
-Builds FIFO-based realized PnL, realized ROI, win rate, and best/worst trade from priced trades.
-
-The summary endpoint reuses this PnL output and aggregates it instead of re-implementing FIFO logic.
-
-### Service method: getPnL(address)
-
-Builds FIFO-based realized PnL, realized ROI, win rate, and best/worst trade from priced trades.
-
-It returns data in this shape:
-
-- token => `{ realizedPnL, roi, winRate, bestTrade, worstTrade }`
-
-## 9. Detailed request flow for the main wallet endpoint
-
-This is the most important system flow.
+This is the flow behind `GET /wallet/:address`.
 
 ### Step 1: validate address
 
-The controller checks if the input is a valid Ethereum address.
-If invalid, it throws `BadRequestException`.
+The controller validates the Ethereum address.
+Invalid input throws `BadRequestException`.
 
-### Step 2: check latest stored block
+### Step 2: check cached state
 
-The service checks the newest block number already stored for that wallet.
+`WalletCoreService` looks up the latest stored block for the wallet.
 
 Two cases:
 
-- no stored data exists yet
+- no stored data yet
 - stored data already exists
 
-### Step 3: fetch from Moralis
+### Step 3: check Moralis freshness
 
-If stored data exists, we first fetch only the latest page from Moralis.
-This is a quick freshness check.
+If cached data exists, the service fetches only the first page from Moralis.
+This acts as a freshness check.
 
-If Moralis has no newer block than what we already stored, we return DB data directly.
+If Moralis is not ahead of the DB, the service serves DB data.
 
-If Moralis has newer blocks, we fetch only transactions above the latest stored block.
+If Moralis has newer blocks, the service fetches only transactions above the newest stored block.
 
-If no stored data exists, we fetch the full wallet history.
+### Step 4: normalize raw history
 
-### Step 4: normalize raw data
-
-Moralis returns ERC-20 transfers and native transfers in different formats.
-We convert both into one common internal shape.
+Moralis native history and ERC-20 transfers use different payloads.
+We normalize both into `NormalizedTransaction`.
 
 During normalization we:
 
 - group entries by transaction hash
-- create one `NormalizedTransaction` per hash
+- create one normalized transaction per hash
 - push outgoing assets into `inputs`
 - push incoming assets into `outputs`
 - merge repeated token entries inside the same transaction
-- decide if the transaction is a `transfer` or `swap`
+- classify the transaction as `transfer` or `swap`
 
-### Step 5: detect transaction type
+### Step 5: save and return stored view
 
-Rules used now:
+The service persists normalized transactions and then returns the stored representation.
 
-- if a transaction has both inputs and outputs and the tokens are different, it is a `swap`
-- if it only has one side, it is a `transfer`
-- if it has both sides but the token is the same on both sides, it is treated as a `transfer`
+This keeps the output stable regardless of the raw provider payload.
 
-### Step 6: save normalized transactions
+## 10. Transaction classification rules
 
-The system stores normalized transactions into Postgres.
-Duplicate inserts are ignored because of the unique wallet+hash constraint.
+Current rules are intentionally lightweight.
 
-### Step 7: return stored view
+- inputs + outputs with different tokens => `swap`
+- only one side present => `transfer`
+- inputs + outputs of the same token => `transfer`
 
-After saving, the endpoint returns data from the database, not directly from raw API output.
+This works well for many common wallet events, but it is still a heuristic.
 
-This keeps response shape consistent.
+## 11. How live holdings work
 
-## 10. How transfer direction is decided
+`getHoldings()` does not reconstruct balances from DB.
 
-Direction is based on wallet address comparison.
+It fetches:
 
-- if the wallet is the sender, the token goes to `inputs`
-- if the wallet is the receiver, the token goes to `outputs`
+- native ETH balance from Moralis native balance endpoint
+- ERC-20 balances from Moralis ERC-20 balances endpoint
 
-For native transfers, Moralis may already provide direction info.
-If present, we use it.
+Current behavior:
 
-## 11. How trades are built
+- convert raw balances using token decimals
+- include native ETH as `ETH`
+- exclude zero balances
+- trim trailing zeros
 
-Trades are built only from normalized transactions whose type is `swap`.
+This endpoint is the source for the live portfolio pipeline.
+
+## 12. How ledger works
+
+`getLedger()` uses stored normalized history.
+
+Pipeline:
+
+1. read stored transactions
+2. sum token inputs and outputs separately
+3. compute `net = in - out`
+4. format the net amount into a human-readable balance
+
+This is the historical reconstructed position view.
+
+It is different from live holdings because DB history can be incomplete, delayed, or intentionally reflect only what has been ingested so far.
+
+## 13. How trades are built
+
+Trades are built only from stored `swap` transactions.
 
 For each swap transaction:
 
-- every input token becomes a `SELL` trade
-- every output token becomes a `BUY` trade
+- every input becomes a `SELL`
+- every output becomes a `BUY`
 
-Amounts are converted from raw integer units into human-readable token amounts using token decimals.
+Amounts are normalized into human-readable token units using decimals.
 
-Example:
+## 14. Historical pricing rules
 
-- input: 100 USDC
-- output: 0.04 ETH
+### Trade pricing
 
-This becomes:
+For priced trades, the lookup order is:
 
-- SELL 100 USDC
-- BUY 0.04 ETH
+1. DefiLlama historical price
+2. CoinGecko historical fallback for supported tokens
+3. if still missing, keep price `0`
 
-Both trades share the same timestamp because they come from the same swap.
+### Missing swap-leg inference
 
-## 12. How historical pricing works
+If a swap has exactly two trades at the same timestamp and exactly one side has price `0`, the module may infer the missing side price from the priced counterpart.
 
-`getPricedTrades()` does pricing in two stages.
+This is conservative on purpose.
 
-### Stage 1: direct historical price lookup
+### Transfer-in lot pricing
 
-For each trade:
+Transfer-in holdings lots now use estimated historical market price instead of automatically returning unknown cost basis.
 
-1. try DeFi Llama historical price
-2. if not found, try CoinGecko historical fallback for supported tokens
-3. if still not found, keep price as `0`
+Lookup rule:
 
-There is also a simple in-memory cache inside the request so the same token+timestamp is not priced many times.
+1. DefiLlama historical market price at receive timestamp
+2. if missing, keep estimated price as `null`
 
-### Stage 2: infer missing swap price from counterpart trade
+This means transfer-ins now often contribute to average cost basis when DefiLlama supports the asset.
 
-Some swaps have one priced side and one unpriced side.
-This usually happens when the market data provider has no listing for one token.
+## 15. Realized FIFO PnL flow
 
-We now handle that case after direct pricing.
+`WalletPnlService.getPnL()` processes priced trades from oldest to newest.
 
-Logic:
-
-1. group priced trades by timestamp
-2. treat a valid swap pair as exactly two trades at that timestamp
-3. ensure one is `BUY` and one is `SELL`
-4. only continue if exactly one trade has price `0`
-5. compute the known USD value
-6. infer the missing side price from the other side
-
-Formula:
-
-- `knownUsdValue = knownTrade.amount * knownTrade.price`
-- `missingPrice = knownUsdValue / missingTrade.amount`
-
-When we do nothing:
-
-- both sides already have prices
-- both sides are missing prices
-- there are not exactly two trades at that timestamp
-- both trades are the same type
-- amount is invalid or zero
-
-This keeps the inference conservative and avoids accidental bad pricing.
-
-## 13. How FIFO realized PnL works
-
-`getPnL()` uses the output of `getPricedTrades()`.
-
-Important rule:
-
-- trades are processed oldest to newest
-
-For each token, the system keeps a FIFO buy queue.
-
-Each buy lot stores:
-
-- amount
-- price
+Per token, the service keeps a FIFO buy queue.
 
 ### On BUY
 
-The buy lot is pushed into that token's queue.
+Push a buy lot into the token queue.
 
 ### On SELL
 
-The sell amount is matched against the oldest buy lots first.
+Consume the oldest buy lots first.
 
 For each match:
 
 - `matchedAmount = min(sellAmount, oldestBuy.amount)`
-- `pnl += (sellPrice - buyPrice) * matchedAmount`
-- `costBasis += buyPrice * matchedAmount`
+- `matchedPnL = (sellPrice - buyPrice) * matchedAmount`
+- `matchedCostBasis = buyPrice * matchedAmount`
 
-For each SELL event:
+The service also tracks:
 
-- first aggregate the total PnL for that sell across all FIFO matches
-- if sell PnL is greater than `0`, count it as a win
-- if sell PnL is `0` or below, count it as a loss
-- compare that full sell PnL against the current best and worst sell values
+- realized PnL
+- realized ROI
+- win rate
+- best trade
+- worst trade
 
-Then:
+This endpoint is strictly realized PnL.
+It does not calculate unrealized position performance.
 
-- reduce the oldest buy amount
-- reduce the remaining sell amount
-- remove the buy lot if it is fully consumed
+## 16. Live portfolio analytics flow
 
-### Edge behavior
+`WalletPortfolioService.getPortfolio()` is the enriched live holdings pipeline.
 
-- if a sell happens before any buy, the unmatched sell is skipped safely
-- partial sells are handled by reducing the oldest lot and continuing only if needed
-- unrealized PnL is not calculated here
-- average-cost logic is not used here
+It combines three inputs:
 
-After processing all sells, realized ROI is calculated per token:
+1. live balances from Moralis
+2. current market prices from CoinGecko
+3. normalized stored history for holding analytics and cost basis
 
-- `roi = (realizedPnL / costBasis) * 100`
+### Step 1: fetch live holdings
 
-If cost basis is `0`, ROI is returned as `0`.
+The service calls `getHoldings()`.
 
-Win rate is also calculated per token:
+### Step 2: fetch current prices
 
-- `winRate = (wins / totalClosedTrades) * 100`
+The service fetches:
 
-If there are no matched sells, win rate is returned as `0`.
+- current ERC-20 prices by contract address
+- current ETH/USD price
 
-Best and worst trade are also calculated per token from sell events only:
+These are used for:
 
-- `bestTrade = max(sellPnl)`
-- `worstTrade = min(sellPnl)`
+- `currentPrice`
+- `usdValue`
+- unrealized `pnl`
+- unrealized `roi`
 
-If there are no matched sells, both are returned as `0`.
+### Step 3: rebuild current holding lots from normalized history
 
-This means the current PnL engine is strictly realized FIFO PnL with realized ROI percentage, sell-based win rate, and sell-based best/worst trade tracking.
+The service refreshes history best-effort, then reads stored normalized transactions in chronological order.
 
-## 14. How portfolio and USD views work
+It builds FIFO lots per token.
 
-The flow is layered.
+For each incoming token amount:
 
-### Token flow
+- create a lot
+- attach acquisition timestamp
+- attach acquisition price
+- mark cost basis type
 
-For every token we track:
+Current cost basis type rules:
 
-- total incoming amount
-- total outgoing amount
+- swap-acquired lot => `actual`
+- transfer-in lot => `estimated`
 
-### Net flow
+For each outgoing token amount:
 
-Net flow is:
+- consume the oldest lots first
 
-- `in - out`
+This preserves reset and partial-sell behavior.
 
-### Portfolio
+### Step 4: align lots to current live balance
 
-Portfolio converts net flow into human-readable token balances.
+The live balance from Moralis is treated as the current source of truth.
+Rebuilt lots are trimmed to match the current balance.
 
-### Portfolio USD
+This protects the analytics from minor ingestion gaps or stale stored state.
 
-Portfolio USD takes the portfolio balances and multiplies them by current token prices.
+### Step 5: derive enriched metrics
 
-Current rules:
+For each currently held token:
 
-- ETH uses Ethereum price lookup
-- ERC-20 tokens use contract-address-based CoinGecko lookup
-- if no price is found, USD value becomes `0`
+- `usdValue = amount * currentPrice`
+- `allocation = usdValue / totalPortfolioValue * 100`
+- `holdingSince` = timestamp of the oldest remaining lot
+- `holdingDays` = days between `holdingSince` and now
+- `avgBuyPrice` = weighted average acquisition price of remaining lots only
+- `pnl = (currentPrice - avgBuyPrice) * amount`
+- `roi = ((currentPrice - avgBuyPrice) / avgBuyPrice) * 100`
 
-## 15. Reliability and fallback behavior
+Important behavior:
 
-The system is built to keep working even when external APIs are unstable.
+- reset logic is respected because fully sold lots are removed from FIFO state
+- partial sells preserve the original acquisition date and basis of remaining lot fragments
+- if no usable remaining lots exist, holding analytics return `null`
+- if average buy price is unknown, unrealized `pnl` and `roi` return `null`
 
-Current protections:
+## 17. Average buy price rules
 
-- Moralis client has timeout configured
-- paginated fetch has retry once behavior
-- if refresh fails and cached DB data exists, we return DB data
-- if pricing fails, we return zero prices instead of crashing the whole request
-- duplicate transaction saves are ignored safely
+`avgBuyPrice` is calculated from current remaining lots only.
 
-This is important because wallet analytics depends on third-party providers.
+This means we do not blindly average all historical buys.
 
-## 16. Current assumptions and limits
+Example:
 
-These are important for future developers.
+- buy 10 ETH at 1000
+- sell 10 ETH
+- buy 5 ETH at 2000
 
-### Chain support
+Current `avgBuyPrice` is based only on the second lot.
 
-Right now the Moralis fetch uses `chain: 'eth'`.
-So this module is currently Ethereum-focused.
+If any remaining lot lacks usable acquisition price, average buy price becomes `null`.
 
-### Transaction classification is simple
+## 18. Reliability and fallback behavior
 
-The current `transfer` vs `swap` detection is rule-based and lightweight.
-It works for many standard cases, but not all complex DeFi patterns.
+Current resilience rules:
 
-### Historical price coverage is incomplete
+- Moralis client uses timeouts
+- Moralis history fetch retries once
+- cached DB data is used when refresh fails
+- current pricing failures degrade to zero price instead of crashing the whole response
+- transfer-in estimated basis falls back to `null` when unsupported
+- duplicate inserts are ignored safely
 
-Some tokens will still have no direct market listing.
-We partly solve this with counterpart price inference for simple 2-leg swaps.
+## 19. Current assumptions and limits
 
-### Pricing inference is conservative
+### Ethereum only
 
-We only infer when there is a clear one-known one-missing pair.
-This avoids incorrect prices for complex transactions.
+The module currently assumes Ethereum mainnet behavior.
 
-### Realized PnL depends on historical prices
+### Classification is heuristic
 
-FIFO PnL is only as good as the trade prices feeding into it.
-If a token still has no usable historical price, that trade will not contribute useful PnL.
+`transfer` vs `swap` detection is still rule-based.
+Complex DeFi patterns may need more advanced classification later.
 
-### Database sync mode
+### Stored history is important
 
-TypeORM is using `synchronize: true` right now.
-That is convenient during early development, but in a mature production setup we should move to migrations.
+Portfolio analytics depend on normalized stored history for duration and cost basis.
+If ingestion is incomplete, analytics may be partially missing even when live balances are available.
 
-## 17. How to extend this module safely
+### Transfer-in cost basis is estimated, not proven
 
-If you add new wallet features, follow this order:
+For transfers, we use historical market price at receive time when available.
+This improves intelligence, but it is still an estimate rather than true executed basis.
 
-1. decide whether the feature should use raw provider data or normalized DB data
-2. prefer building new analytics on top of normalized stored transactions
-3. if you change normalization rules, check all downstream endpoints
-4. if you add a new transaction type or trade rule, update this document
-5. if you add new pricing logic, document the exact fallback order
+### TypeORM sync mode
 
-## 18. Suggested mental model for new developers
+TypeORM is still running with development-friendly sync behavior.
+Production should move to migrations.
 
-If you are new to this codebase, think of the wallet system in 3 layers:
+## 20. Suggested mental model
 
-### Layer 1: ingestion
+Think of the module as four layers:
 
-Fetch raw wallet activity from providers.
+1. provider ingestion
+2. normalization and storage
+3. realized trade analytics
+4. live holdings and portfolio analytics
 
-### Layer 2: normalization and storage
+That mental model matches the current service split.
 
-Convert raw provider-specific data into our internal format and store it.
+## 21. Best file reading order
 
-### Layer 3: analytics
-
-Build trades, pricing, FIFO PnL, flows, balances, and summaries from stored normalized data.
-
-If you understand these 3 layers, the whole module becomes much easier to work with.
-
-## 19. Files a developer should read first
-
-If someone joins the project, this is the best reading order:
+Recommended reading order for a new developer:
 
 1. `src/wallet/wallet.controller.ts`
-2. `src/wallet/wallet.service.ts`
-3. `src/wallet/transaction.entity.ts`
-4. `src/wallet/wallet.types.ts`
-5. `src/app.module.ts`
-6. `src/config/configuration.ts`
+2. `src/wallet/services/wallet.service.ts`
+3. `src/wallet/services/wallet-core.service.ts`
+4. `src/wallet/services/wallet-pricing.service.ts`
+5. `src/wallet/services/wallet-pnl.service.ts`
+6. `src/wallet/services/wallet-portfolio.service.ts`
+7. `src/wallet/transaction.entity.ts`
+8. `src/wallet/wallet.types.ts`
 
-## 20. Update rule for this document
+## 22. Update rule for this document
 
-Whenever we change any of the below, update this file in the same PR or task:
+Whenever any of the following change, update this file in the same task:
 
-- endpoint behavior
+- endpoint behavior or naming
+- provider usage
 - normalization rules
 - transaction classification logic
-- pricing logic
-- PnL logic
-- external provider usage
+- pricing lookup order
+- FIFO lot logic
+- cost basis logic
+- portfolio analytics fields
 - database schema for wallet data
-- portfolio or summary calculations
 
-This document should always explain the current system, not the intended future system.
+This document should describe the current implementation, not an older version and not a future design.
