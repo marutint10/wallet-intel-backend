@@ -1,5 +1,7 @@
 import type {
+  MoralisErc20Balance,
   MoralisErc20Transfer,
+  MoralisNativeBalanceResponse,
   MoralisWalletHistoryItem,
 } from './services/wallet-core.service';
 
@@ -101,3 +103,17 @@ export interface WalletPortfolioUsdItem {
 export interface WalletPortfolioUSDResponse {
   [token: string]: WalletPortfolioUsdItem;
 }
+
+export interface WalletHoldingItem {
+  token: string;
+  amount: string;
+  contractAddress?: string;
+  decimals?: number;
+}
+
+export type WalletHoldingsResponse = WalletHoldingItem[];
+
+export type {
+  MoralisErc20Balance,
+  MoralisNativeBalanceResponse,
+};

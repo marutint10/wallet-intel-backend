@@ -65,6 +65,20 @@ export interface MoralisWalletHistoryItem {
   [key: string]: unknown;
 }
 
+export interface MoralisNativeBalanceResponse {
+  balance?: string;
+  [key: string]: unknown;
+}
+
+export interface MoralisErc20Balance {
+  token_address?: string;
+  symbol?: string;
+  name?: string;
+  decimals?: string | number;
+  balance?: string;
+  [key: string]: unknown;
+}
+
 function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
   const map = new Map<
     string,
@@ -130,13 +144,52 @@ export class WalletCoreService {
     });
   }
 
+  async getNativeBalance(address: string): Promise<MoralisNativeBalanceResponse> {
+    this.ensureMoralisApiKey();
+
+    try {
+      const response = await this.callMoralisWithRetry(() =>
+        this.moralisClient.get<MoralisNativeBalanceResponse>(
+          `/${address}/balance`,
+          {
+            params: {
+              chain: 'eth',
+            },
+          },
+        ),
+      );
+
+      return response.data;
+    } catch (error) {
+      this.logMoralisRequestFailure('native balance', error);
+      throw new BadGatewayException('Unable to fetch wallet holdings');
+    }
+  }
+
+  async getErc20Balances(address: string): Promise<MoralisErc20Balance[]> {
+    this.ensureMoralisApiKey();
+
+    try {
+      const response = await this.callMoralisWithRetry(() =>
+        this.moralisClient.get<MoralisErc20Balance[]>(`/${address}/erc20`, {
+          params: {
+            chain: 'eth',
+          },
+        }),
+      );
+
+      return Array.isArray(response.data) ? response.data : [];
+    } catch (error) {
+      this.logMoralisRequestFailure('ERC-20 balances', error);
+      throw new BadGatewayException('Unable to fetch wallet holdings');
+    }
+  }
+
   async getWalletData(address: string): Promise<WalletTransactionsResponse> {
     const walletAddress = address.toLowerCase();
     const latestStoredBlock = await this.getLatestStoredBlock(walletAddress);
 
-    if (!this.moralisApiKey) {
-      throw new InternalServerErrorException('MORALIS_API_KEY is not configured');
-    }
+    this.ensureMoralisApiKey();
 
     if (latestStoredBlock !== null) {
       let latestErc20Transfers: MoralisErc20Transfer[] = [];
@@ -354,6 +407,12 @@ export class WalletCoreService {
       .replace(/0+$/, '');
 
     return `${wholePart.toString()}.${fractionalString}`;
+  }
+
+  private ensureMoralisApiKey(): void {
+    if (!this.moralisApiKey) {
+      throw new InternalServerErrorException('MORALIS_API_KEY is not configured');
+    }
   }
 
   private async getStoredWalletData(
@@ -861,5 +920,19 @@ export class WalletCoreService {
     }
 
     return error.message;
+  }
+
+  private logMoralisRequestFailure(operation: string, error: unknown): void {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      const message = this.extractMoralisMessage(error);
+
+      this.logger.error(
+        `Moralis failed for ${operation} (${status ?? 'NO_RESPONSE'}: ${message})`,
+      );
+      return;
+    }
+
+    this.logger.error(`Moralis failed for ${operation}`);
   }
 }

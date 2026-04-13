@@ -3,6 +3,7 @@ import { isEthereumAddress } from '../shared/validators/address.validator';
 import {
   StoredWalletTransactionsResponse,
   Trade,
+  WalletHoldingsResponse,
   WalletNetFlowResponse,
   WalletPnLResponse,
   WalletPortfolioResponse,
@@ -16,6 +17,17 @@ import { WalletService } from './services/wallet.service';
 @Controller('wallet')
 export class WalletController {
   constructor(private readonly walletService: WalletService) {}
+
+  @Get(':address/holdings')
+  async getHoldings(
+    @Param('address') address: string,
+  ): Promise<WalletHoldingsResponse> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getHoldings(address);
+  }
 
   @Get(':address/usd')
   async getPortfolioUSD(

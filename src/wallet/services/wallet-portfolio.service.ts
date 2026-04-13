@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
+  MoralisErc20Balance,
+  WalletHoldingsResponse,
   WalletNetFlowResponse,
   WalletPortfolioResponse,
   WalletPortfolioUSDResponse,
@@ -21,6 +23,43 @@ export class WalletPortfolioService {
     private readonly walletCoreService: WalletCoreService,
     private readonly walletPricingService: WalletPricingService,
   ) {}
+
+  async getHoldings(address: string): Promise<WalletHoldingsResponse> {
+    const [nativeBalance, erc20Balances] = await Promise.all([
+      this.walletCoreService.getNativeBalance(address),
+      this.walletCoreService.getErc20Balances(address),
+    ]);
+
+    const holdings: WalletHoldingsResponse = [];
+    const nativeRawBalance = this.parseRawAmount(nativeBalance.balance);
+
+    if (nativeRawBalance && nativeRawBalance > 0n) {
+      holdings.push({
+        token: 'ETH',
+        amount: this.formatTokenBalance(nativeRawBalance, 18),
+        decimals: 18,
+      });
+    }
+
+    for (const balance of erc20Balances) {
+      const rawAmount = this.parseRawAmount(balance.balance);
+
+      if (!rawAmount || rawAmount === 0n) {
+        continue;
+      }
+
+      const decimals = this.toSafeDecimals(balance.decimals);
+
+      holdings.push({
+        token: this.resolveTokenLabel(balance),
+        amount: this.formatTokenBalance(rawAmount, decimals),
+        contractAddress: balance.token_address?.toLowerCase(),
+        decimals,
+      });
+    }
+
+    return holdings;
+  }
 
   async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {
     const walletAddress = address.toLowerCase();
@@ -259,5 +298,70 @@ export class WalletPortfolioService {
     return {
       amount: '0',
     };
+  }
+
+  private parseRawAmount(value: unknown): bigint | null {
+    if (typeof value !== 'string' && typeof value !== 'number') {
+      return null;
+    }
+
+    try {
+      return BigInt(value);
+    } catch {
+      return null;
+    }
+  }
+
+  private toSafeDecimals(value: unknown): number {
+    const parsed = Number(value);
+
+    if (Number.isInteger(parsed) && parsed >= 0) {
+      return parsed;
+    }
+
+    return 18;
+  }
+
+  private formatTokenBalance(rawAmount: bigint, decimals: number): string {
+    if (rawAmount === 0n) {
+      return '0';
+    }
+
+    const safeDecimals = this.toSafeDecimals(decimals);
+
+    if (safeDecimals === 0) {
+      return rawAmount.toString();
+    }
+
+    const divisor = 10n ** BigInt(safeDecimals);
+    const wholePart = rawAmount / divisor;
+    const fractionalPart = rawAmount % divisor;
+
+    if (fractionalPart === 0n) {
+      return wholePart.toString();
+    }
+
+    const fractionalString = fractionalPart
+      .toString()
+      .padStart(safeDecimals, '0')
+      .replace(/0+$/, '');
+
+    return `${wholePart.toString()}.${fractionalString}`;
+  }
+
+  private resolveTokenLabel(balance: MoralisErc20Balance): string {
+    const symbol = typeof balance.symbol === 'string' ? balance.symbol.trim() : '';
+
+    if (symbol) {
+      return symbol;
+    }
+
+    const name = typeof balance.name === 'string' ? balance.name.trim() : '';
+
+    if (name) {
+      return name;
+    }
+
+    return balance.token_address?.toLowerCase() ?? 'UNKNOWN';
   }
 }
