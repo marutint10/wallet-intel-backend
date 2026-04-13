@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
   MoralisErc20Balance,
+  NormalizedTokenAmount,
   WalletHoldingItem,
   WalletHoldingsResponse,
   WalletHoldingsUSDResponse,
@@ -15,6 +16,16 @@ import { WalletPricingService } from './wallet-pricing.service';
 interface PortfolioTokenEntry {
   amount: string;
   contractAddress?: string;
+}
+
+interface HoldingLot {
+  amount: bigint;
+  acquiredAt: Date;
+}
+
+interface HoldingDurationInfo {
+  holdingSince: string | null;
+  holdingDays: number | null;
 }
 
 @Injectable()
@@ -67,7 +78,10 @@ export class WalletPortfolioService {
     address: string,
   ): Promise<WalletHoldingsUSDResponse> {
     const holdings = await this.getHoldings(address);
-    const { ethPrice, tokenPrices } = await this.fetchHoldingPrices(holdings);
+    const [{ ethPrice, tokenPrices }, holdingDurations] = await Promise.all([
+      this.fetchHoldingPrices(holdings),
+      this.buildHoldingDurationMap(address, holdings),
+    ]);
     const holdingsWithUsd = holdings.map((holding) => ({
       holding,
       usdValue: this.computeHoldingUsdValue(holding, ethPrice, tokenPrices),
@@ -82,6 +96,14 @@ export class WalletPortfolioService {
       amount: holding.amount,
       usdValue,
       allocation: this.computeAllocationPercentage(usdValue, totalPortfolioValue),
+      holdingSince:
+        holdingDurations.get(
+          this.getHoldingKey(holding.token, holding.contractAddress),
+        )?.holdingSince ?? null,
+      holdingDays:
+        holdingDurations.get(
+          this.getHoldingKey(holding.token, holding.contractAddress),
+        )?.holdingDays ?? null,
       decimals: holding.decimals,
       contractAddress: holding.contractAddress,
     }));
@@ -430,6 +452,219 @@ export class WalletPortfolioService {
         tokenPricesResult.status === 'fulfilled' ? tokenPricesResult.value : {},
       ethPrice: ethPriceResult.status === 'fulfilled' ? ethPriceResult.value : 0,
     };
+  }
+
+  private async buildHoldingDurationMap(
+    address: string,
+    holdings: WalletHoldingsResponse,
+  ): Promise<Map<string, HoldingDurationInfo>> {
+    await this.refreshTransactionHistory(address);
+
+    const transactions = await this.walletCoreService.getTransactionEntities(address);
+    const lotsByHolding = this.buildLotsByHoldingKey(transactions);
+    const durationMap = new Map<string, HoldingDurationInfo>();
+    const now = new Date();
+
+    for (const holding of holdings) {
+      const holdingKey = this.getHoldingKey(holding.token, holding.contractAddress);
+      const rawAmount = this.parseDisplayAmountToRaw(
+        holding.amount,
+        holding.decimals ?? 18,
+      );
+
+      if (rawAmount === null || rawAmount <= 0n) {
+        durationMap.set(holdingKey, {
+          holdingSince: null,
+          holdingDays: null,
+        });
+        continue;
+      }
+
+      const lots = lotsByHolding.get(holdingKey) ?? [];
+      const relevantLots = this.trimLotsToCurrentBalance(lots, rawAmount);
+      const oldestActiveLot = relevantLots[0];
+
+      if (!oldestActiveLot) {
+        durationMap.set(holdingKey, {
+          holdingSince: null,
+          holdingDays: null,
+        });
+        continue;
+      }
+
+      durationMap.set(holdingKey, {
+        holdingSince: oldestActiveLot.acquiredAt.toISOString(),
+        holdingDays: this.getHoldingDays(oldestActiveLot.acquiredAt, now),
+      });
+    }
+
+    return durationMap;
+  }
+
+  private async refreshTransactionHistory(address: string): Promise<void> {
+    try {
+      await this.walletCoreService.getWalletData(address);
+    } catch (error) {
+      this.logger.warn(
+        'Wallet history refresh failed for holdings duration analytics, using stored history only',
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
+  }
+
+  private buildLotsByHoldingKey(
+    transactions: Array<{
+      timestamp: Date;
+      inputs: NormalizedTokenAmount[];
+      outputs: NormalizedTokenAmount[];
+    }>,
+  ): Map<string, HoldingLot[]> {
+    const lotsByHolding = new Map<string, HoldingLot[]>();
+
+    for (const transaction of transactions) {
+      for (const output of transaction.outputs) {
+        this.applyIncomingEntry(lotsByHolding, output, transaction.timestamp);
+      }
+
+      for (const input of transaction.inputs) {
+        this.applyOutgoingEntry(lotsByHolding, input);
+      }
+    }
+
+    return lotsByHolding;
+  }
+
+  private applyIncomingEntry(
+    lotsByHolding: Map<string, HoldingLot[]>,
+    entry: NormalizedTokenAmount,
+    timestamp: Date,
+  ): void {
+    const rawAmount = this.parseRawAmount(entry.amount);
+
+    if (!rawAmount || rawAmount <= 0n) {
+      return;
+    }
+
+    const holdingKey = this.getHoldingKey(entry.token, entry.contractAddress);
+    const lots = lotsByHolding.get(holdingKey) ?? [];
+
+    lots.push({
+      amount: rawAmount,
+      acquiredAt: timestamp,
+    });
+
+    lotsByHolding.set(holdingKey, lots);
+  }
+
+  private applyOutgoingEntry(
+    lotsByHolding: Map<string, HoldingLot[]>,
+    entry: NormalizedTokenAmount,
+  ): void {
+    const rawAmount = this.parseRawAmount(entry.amount);
+
+    if (!rawAmount || rawAmount <= 0n) {
+      return;
+    }
+
+    const holdingKey = this.getHoldingKey(entry.token, entry.contractAddress);
+    const lots = lotsByHolding.get(holdingKey) ?? [];
+    let remainingAmount = rawAmount;
+
+    while (remainingAmount > 0n && lots.length > 0) {
+      const oldestLot = lots[0];
+
+      if (oldestLot.amount > remainingAmount) {
+        oldestLot.amount -= remainingAmount;
+        remainingAmount = 0n;
+        break;
+      }
+
+      remainingAmount -= oldestLot.amount;
+      lots.shift();
+    }
+
+    if (lots.length > 0) {
+      lotsByHolding.set(holdingKey, lots);
+      return;
+    }
+
+    lotsByHolding.delete(holdingKey);
+  }
+
+  private trimLotsToCurrentBalance(
+    lots: HoldingLot[],
+    currentBalance: bigint,
+  ): HoldingLot[] {
+    if (currentBalance <= 0n || lots.length === 0) {
+      return [];
+    }
+
+    const trimmedLots = lots.map((lot) => ({
+      amount: lot.amount,
+      acquiredAt: lot.acquiredAt,
+    }));
+    const totalTrackedBalance = trimmedLots.reduce(
+      (total, lot) => total + lot.amount,
+      0n,
+    );
+
+    if (totalTrackedBalance <= currentBalance) {
+      return trimmedLots;
+    }
+
+    let excessBalance = totalTrackedBalance - currentBalance;
+
+    while (excessBalance > 0n && trimmedLots.length > 0) {
+      const oldestLot = trimmedLots[0];
+
+      if (oldestLot.amount > excessBalance) {
+        oldestLot.amount -= excessBalance;
+        excessBalance = 0n;
+        break;
+      }
+
+      excessBalance -= oldestLot.amount;
+      trimmedLots.shift();
+    }
+
+    return trimmedLots;
+  }
+
+  private parseDisplayAmountToRaw(
+    value: string,
+    decimals: number,
+  ): bigint | null {
+    const parsedValue = this.parseDecimalString(value);
+
+    if (!parsedValue) {
+      return null;
+    }
+
+    const safeDecimals = this.toSafeDecimals(decimals);
+
+    if (parsedValue.scale > safeDecimals) {
+      return null;
+    }
+
+    return parsedValue.value * 10n ** BigInt(safeDecimals - parsedValue.scale);
+  }
+
+  private getHoldingDays(acquiredAt: Date, now: Date): number {
+    const milliseconds = now.getTime() - acquiredAt.getTime();
+
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
+      return 0;
+    }
+
+    return Math.floor(milliseconds / 86400000);
+  }
+
+  private getHoldingKey(token: string, contractAddress?: string): string {
+    if (contractAddress) {
+      return `contract:${contractAddress.toLowerCase()}`;
+    }
+
+    return `symbol:${token.toUpperCase()}`;
   }
 
   private computeHoldingUsdValue(

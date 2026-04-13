@@ -118,6 +118,8 @@ export interface WalletHoldingUsdItem {
   amount: string;
   usdValue: string;
   allocation: string;
+  holdingSince: string | null;
+  holdingDays: number | null;
   decimals?: number;
   contractAddress?: string;
 }
