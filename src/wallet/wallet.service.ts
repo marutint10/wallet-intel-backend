@@ -525,17 +525,10 @@ export class WalletService {
     let totalSwaps = 0;
     let totalTransfers = 0;
     const tokenSet = new Set<string>();
-    const sellTokenSet = new Set<string>();
 
     for (const transaction of transactions) {
       if (transaction.type === 'swap') {
         totalSwaps += 1;
-
-        for (const input of transaction.inputs) {
-          if (input.token) {
-            sellTokenSet.add(input.token);
-          }
-        }
       }
 
       if (transaction.type === 'transfer') {
@@ -552,18 +545,19 @@ export class WalletService {
     }
 
     const pnlEntries = Object.entries(pnlByToken);
-    const roiValues = pnlEntries
+    const activeTokens = pnlEntries.filter(
+      ([, metrics]) =>
+        metrics.realizedPnL !== 0 ||
+        metrics.bestTrade !== 0 ||
+        metrics.worstTrade !== 0 ||
+        metrics.winRate !== 0,
+    );
+    const roiValues = activeTokens
       .map(([, metrics]) => metrics.roi)
       .filter((roi) => roi > 0);
-    const winRateValues = pnlEntries
-      .filter(([token]) => sellTokenSet.has(token))
-      .map(([, metrics]) => metrics.winRate);
-    const bestTradeCandidates = pnlEntries
-      .filter(([token]) => sellTokenSet.has(token))
-      .map(([, metrics]) => metrics.bestTrade);
-    const worstTradeCandidates = pnlEntries
-      .filter(([token]) => sellTokenSet.has(token))
-      .map(([, metrics]) => metrics.worstTrade);
+    const winRateValues = activeTokens.map(([, metrics]) => metrics.winRate);
+    const bestTradeCandidates = activeTokens.map(([, metrics]) => metrics.bestTrade);
+    const worstTradeCandidates = activeTokens.map(([, metrics]) => metrics.worstTrade);
     const totalRealizedPnL = this.roundDecimal(
       pnlEntries.reduce(
         (total, [, metrics]) => total + metrics.realizedPnL,
