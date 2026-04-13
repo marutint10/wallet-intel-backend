@@ -54,6 +54,14 @@ export interface Trade {
   timestamp: number;
 }
 
+export interface WalletTokenPnL {
+  realizedPnL: number;
+}
+
+export interface WalletPnLResponse {
+  [token: string]: WalletTokenPnL;
+}
+
 export interface TokenFlowAmount {
   in: string;
   out: string;
