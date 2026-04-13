@@ -362,7 +362,7 @@ export class WalletService {
       pricedTrades.push({ ...trade, price });
     }
 
-    return pricedTrades;
+    return this.inferMissingSwapPrices(pricedTrades);
   }
 
   async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
@@ -636,6 +636,69 @@ export class WalletService {
     }
 
     return `${sign}${wholePart.toString()}.${fractionalString}`;
+  }
+
+  private inferMissingSwapPrices(pricedTrades: PricedTrade[]): PricedTrade[] {
+    const tradesByTimestamp = new Map<number, PricedTrade[]>();
+
+    for (const trade of pricedTrades) {
+      const tradesAtTimestamp = tradesByTimestamp.get(trade.timestamp) ?? [];
+      tradesAtTimestamp.push(trade);
+      tradesByTimestamp.set(trade.timestamp, tradesAtTimestamp);
+    }
+
+    for (const tradesAtTimestamp of tradesByTimestamp.values()) {
+      if (tradesAtTimestamp.length !== 2) {
+        continue;
+      }
+
+      const [firstTrade, secondTrade] = tradesAtTimestamp;
+
+      if (firstTrade.type === secondTrade.type) {
+        continue;
+      }
+
+      const missingTrades = tradesAtTimestamp.filter((trade) => trade.price === 0);
+
+      if (missingTrades.length !== 1) {
+        continue;
+      }
+
+      const knownTrade = tradesAtTimestamp.find((trade) => trade.price > 0);
+      const missingTrade = missingTrades[0];
+
+      if (!knownTrade) {
+        continue;
+      }
+
+      const knownAmount = this.parsePositiveNumber(knownTrade.amount);
+      const missingAmount = this.parsePositiveNumber(missingTrade.amount);
+
+      if (knownAmount === null || missingAmount === null) {
+        continue;
+      }
+
+      const knownUsdValue = knownAmount * knownTrade.price;
+      const inferredPrice = knownUsdValue / missingAmount;
+
+      if (!Number.isFinite(inferredPrice) || inferredPrice <= 0) {
+        continue;
+      }
+
+      missingTrade.price = inferredPrice;
+    }
+
+    return pricedTrades;
+  }
+
+  private parsePositiveNumber(value: string): number | null {
+    const parsedValue = Number(value);
+
+    if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+      return null;
+    }
+
+    return parsedValue;
   }
 
   private normalizePortfolioEntry(entry: unknown): PortfolioTokenEntry {
