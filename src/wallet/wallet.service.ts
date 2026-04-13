@@ -374,10 +374,15 @@ export class WalletService {
     );
     const buyQueues = new Map<string, FifoBuyLot[]>();
     const realizedPnLByToken = new Map<string, number>();
+    const realizedCostBasisByToken = new Map<string, number>();
 
     for (const trade of sortedTrades) {
       if (!realizedPnLByToken.has(trade.token)) {
         realizedPnLByToken.set(trade.token, 0);
+      }
+
+      if (!realizedCostBasisByToken.has(trade.token)) {
+        realizedCostBasisByToken.set(trade.token, 0);
       }
 
       const amount = this.parsePositiveNumber(trade.amount);
@@ -403,11 +408,17 @@ export class WalletService {
         const oldestBuy = queue[0];
         const matchedAmount = Math.min(sellAmount, oldestBuy.amount);
         const currentPnL = realizedPnLByToken.get(trade.token) ?? 0;
+        const currentCostBasis = realizedCostBasisByToken.get(trade.token) ?? 0;
         const matchedPnL = (trade.price - oldestBuy.price) * matchedAmount;
+        const matchedCostBasis = oldestBuy.price * matchedAmount;
 
         realizedPnLByToken.set(
           trade.token,
           this.roundDecimal(currentPnL + matchedPnL),
+        );
+        realizedCostBasisByToken.set(
+          trade.token,
+          this.roundDecimal(currentCostBasis + matchedCostBasis),
         );
 
         oldestBuy.amount = this.roundDecimal(oldestBuy.amount - matchedAmount);
@@ -424,12 +435,22 @@ export class WalletService {
     }
 
     return Object.fromEntries(
-      Array.from(realizedPnLByToken.entries()).map(([token, realizedPnL]) => [
-        token,
-        {
-          realizedPnL: this.roundDecimal(realizedPnL),
-        },
-      ]),
+      Array.from(realizedPnLByToken.entries()).map(([token, realizedPnL]) => {
+        const costBasis = realizedCostBasisByToken.get(token) ?? 0;
+        const roundedRealizedPnL = this.roundDecimal(realizedPnL);
+        const roi =
+          costBasis > 0
+            ? this.roundDecimal((roundedRealizedPnL / costBasis) * 100)
+            : 0;
+
+        return [
+          token,
+          {
+            realizedPnL: roundedRealizedPnL,
+            roi,
+          },
+        ];
+      }),
     );
   }
 
