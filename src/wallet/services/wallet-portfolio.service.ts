@@ -21,11 +21,18 @@ interface PortfolioTokenEntry {
 interface HoldingLot {
   amount: bigint;
   acquiredAt: Date;
+  avgBuyPrice: string | null;
 }
 
-interface HoldingDurationInfo {
+interface HoldingAnalyticsInfo {
   holdingSince: string | null;
   holdingDays: number | null;
+  avgBuyPrice: string | null;
+}
+
+interface AlignedHoldingLots {
+  lots: HoldingLot[];
+  fullyCovered: boolean;
 }
 
 @Injectable()
@@ -78,9 +85,9 @@ export class WalletPortfolioService {
     address: string,
   ): Promise<WalletHoldingsUSDResponse> {
     const holdings = await this.getHoldings(address);
-    const [{ ethPrice, tokenPrices }, holdingDurations] = await Promise.all([
+    const [{ ethPrice, tokenPrices }, holdingAnalytics] = await Promise.all([
       this.fetchHoldingPrices(holdings),
-      this.buildHoldingDurationMap(address, holdings),
+      this.buildHoldingAnalyticsMap(address, holdings),
     ]);
     const holdingsWithUsd = holdings.map((holding) => ({
       holding,
@@ -97,13 +104,17 @@ export class WalletPortfolioService {
       usdValue,
       allocation: this.computeAllocationPercentage(usdValue, totalPortfolioValue),
       holdingSince:
-        holdingDurations.get(
+        holdingAnalytics.get(
           this.getHoldingKey(holding.token, holding.contractAddress),
         )?.holdingSince ?? null,
       holdingDays:
-        holdingDurations.get(
+        holdingAnalytics.get(
           this.getHoldingKey(holding.token, holding.contractAddress),
         )?.holdingDays ?? null,
+      avgBuyPrice:
+        holdingAnalytics.get(
+          this.getHoldingKey(holding.token, holding.contractAddress),
+        )?.avgBuyPrice ?? null,
       decimals: holding.decimals,
       contractAddress: holding.contractAddress,
     }));
@@ -454,15 +465,15 @@ export class WalletPortfolioService {
     };
   }
 
-  private async buildHoldingDurationMap(
+  private async buildHoldingAnalyticsMap(
     address: string,
     holdings: WalletHoldingsResponse,
-  ): Promise<Map<string, HoldingDurationInfo>> {
+  ): Promise<Map<string, HoldingAnalyticsInfo>> {
     await this.refreshTransactionHistory(address);
 
     const transactions = await this.walletCoreService.getTransactionEntities(address);
-    const lotsByHolding = this.buildLotsByHoldingKey(transactions);
-    const durationMap = new Map<string, HoldingDurationInfo>();
+    const lotsByHolding = await this.buildLotsByHoldingKey(transactions);
+    const analyticsMap = new Map<string, HoldingAnalyticsInfo>();
     const now = new Date();
 
     for (const holding of holdings) {
@@ -473,32 +484,39 @@ export class WalletPortfolioService {
       );
 
       if (rawAmount === null || rawAmount <= 0n) {
-        durationMap.set(holdingKey, {
+        analyticsMap.set(holdingKey, {
           holdingSince: null,
           holdingDays: null,
+          avgBuyPrice: null,
         });
         continue;
       }
 
       const lots = lotsByHolding.get(holdingKey) ?? [];
-      const relevantLots = this.trimLotsToCurrentBalance(lots, rawAmount);
-      const oldestActiveLot = relevantLots[0];
+      const alignedLots = this.alignLotsToCurrentBalance(lots, rawAmount);
+      const oldestActiveLot = alignedLots.lots[0];
 
       if (!oldestActiveLot) {
-        durationMap.set(holdingKey, {
+        analyticsMap.set(holdingKey, {
           holdingSince: null,
           holdingDays: null,
+          avgBuyPrice: null,
         });
         continue;
       }
 
-      durationMap.set(holdingKey, {
+      analyticsMap.set(holdingKey, {
         holdingSince: oldestActiveLot.acquiredAt.toISOString(),
         holdingDays: this.getHoldingDays(oldestActiveLot.acquiredAt, now),
+        avgBuyPrice: this.computeAverageBuyPrice(
+          alignedLots,
+          holding.amount,
+          holding.decimals ?? 18,
+        ),
       });
     }
 
-    return durationMap;
+    return analyticsMap;
   }
 
   private async refreshTransactionHistory(address: string): Promise<void> {
@@ -514,16 +532,37 @@ export class WalletPortfolioService {
 
   private buildLotsByHoldingKey(
     transactions: Array<{
+      type: 'transfer' | 'swap';
       timestamp: Date;
       inputs: NormalizedTokenAmount[];
       outputs: NormalizedTokenAmount[];
     }>,
-  ): Map<string, HoldingLot[]> {
+  ): Promise<Map<string, HoldingLot[]>> {
+    const priceCache = new Map<string, string | null>();
     const lotsByHolding = new Map<string, HoldingLot[]>();
 
+    return this.buildHoldingLots(transactions, lotsByHolding, priceCache);
+  }
+
+  private async buildHoldingLots(
+    transactions: Array<{
+      type: 'transfer' | 'swap';
+      timestamp: Date;
+      inputs: NormalizedTokenAmount[];
+      outputs: NormalizedTokenAmount[];
+    }>,
+    lotsByHolding: Map<string, HoldingLot[]>,
+    priceCache: Map<string, string | null>,
+  ): Promise<Map<string, HoldingLot[]>> {
     for (const transaction of transactions) {
       for (const output of transaction.outputs) {
-        this.applyIncomingEntry(lotsByHolding, output, transaction.timestamp);
+        await this.applyIncomingEntry(
+          lotsByHolding,
+          output,
+          transaction.timestamp,
+          transaction.type,
+          priceCache,
+        );
       }
 
       for (const input of transaction.inputs) {
@@ -534,11 +573,13 @@ export class WalletPortfolioService {
     return lotsByHolding;
   }
 
-  private applyIncomingEntry(
+  private async applyIncomingEntry(
     lotsByHolding: Map<string, HoldingLot[]>,
     entry: NormalizedTokenAmount,
     timestamp: Date,
-  ): void {
+    transactionType: 'transfer' | 'swap',
+    priceCache: Map<string, string | null>,
+  ): Promise<void> {
     const rawAmount = this.parseRawAmount(entry.amount);
 
     if (!rawAmount || rawAmount <= 0n) {
@@ -551,6 +592,10 @@ export class WalletPortfolioService {
     lots.push({
       amount: rawAmount,
       acquiredAt: timestamp,
+      avgBuyPrice:
+        transactionType === 'swap'
+          ? await this.getHistoricalAcquisitionPrice(entry, timestamp, priceCache)
+          : null,
     });
 
     lotsByHolding.set(holdingKey, lots);
@@ -591,17 +636,21 @@ export class WalletPortfolioService {
     lotsByHolding.delete(holdingKey);
   }
 
-  private trimLotsToCurrentBalance(
+  private alignLotsToCurrentBalance(
     lots: HoldingLot[],
     currentBalance: bigint,
-  ): HoldingLot[] {
+  ): AlignedHoldingLots {
     if (currentBalance <= 0n || lots.length === 0) {
-      return [];
+      return {
+        lots: [],
+        fullyCovered: currentBalance === 0n,
+      };
     }
 
     const trimmedLots = lots.map((lot) => ({
       amount: lot.amount,
       acquiredAt: lot.acquiredAt,
+      avgBuyPrice: lot.avgBuyPrice,
     }));
     const totalTrackedBalance = trimmedLots.reduce(
       (total, lot) => total + lot.amount,
@@ -609,7 +658,10 @@ export class WalletPortfolioService {
     );
 
     if (totalTrackedBalance <= currentBalance) {
-      return trimmedLots;
+      return {
+        lots: trimmedLots,
+        fullyCovered: totalTrackedBalance === currentBalance,
+      };
     }
 
     let excessBalance = totalTrackedBalance - currentBalance;
@@ -627,7 +679,10 @@ export class WalletPortfolioService {
       trimmedLots.shift();
     }
 
-    return trimmedLots;
+    return {
+      lots: trimmedLots,
+      fullyCovered: true,
+    };
   }
 
   private parseDisplayAmountToRaw(
@@ -665,6 +720,59 @@ export class WalletPortfolioService {
     }
 
     return `symbol:${token.toUpperCase()}`;
+  }
+
+  private async getHistoricalAcquisitionPrice(
+    entry: NormalizedTokenAmount,
+    timestamp: Date,
+    priceCache: Map<string, string | null>,
+  ): Promise<string | null> {
+    const cacheKey = `${this.getHoldingKey(entry.token, entry.contractAddress)}:${timestamp.toISOString()}`;
+    const cachedPrice = priceCache.get(cacheKey);
+
+    if (cachedPrice !== undefined) {
+      return cachedPrice;
+    }
+
+    const unixTimestamp = this.walletCoreService.toUnixTimestamp(timestamp);
+    const price = await this.walletPricingService.fetchHistoricalTradePrice(
+      entry.token,
+      entry.contractAddress,
+      unixTimestamp,
+    );
+    const normalizedPrice =
+      Number.isFinite(price) && price > 0
+        ? this.normalizeDecimalString(price.toString())
+        : null;
+
+    priceCache.set(cacheKey, normalizedPrice);
+    return normalizedPrice;
+  }
+
+  private computeAverageBuyPrice(
+    alignedLots: AlignedHoldingLots,
+    currentAmount: string,
+    decimals: number,
+  ): string | null {
+    if (!alignedLots.fullyCovered || alignedLots.lots.length === 0) {
+      return null;
+    }
+
+    let totalCostBasis = '0';
+
+    for (const lot of alignedLots.lots) {
+      if (!lot.avgBuyPrice) {
+        return null;
+      }
+
+      const lotAmount = this.formatTokenBalance(lot.amount, decimals);
+      totalCostBasis = this.addDecimalStrings(
+        totalCostBasis,
+        this.multiplyDecimalStrings(lotAmount, lot.avgBuyPrice),
+      );
+    }
+
+    return this.divideDecimalStrings(totalCostBasis, currentAmount, 8);
   }
 
   private computeHoldingUsdValue(
@@ -749,6 +857,38 @@ export class WalletPortfolioService {
     }
 
     return this.formatScaledInteger(scaledNumerator / scaledDenominator, precision);
+  }
+
+  private divideDecimalStrings(
+    numerator: string,
+    denominator: string,
+    precision: number,
+  ): string | null {
+    const numeratorDecimal = this.parseDecimalString(numerator);
+    const denominatorDecimal = this.parseDecimalString(denominator);
+
+    if (
+      !numeratorDecimal ||
+      !denominatorDecimal ||
+      denominatorDecimal.value === 0n
+    ) {
+      return null;
+    }
+
+    const scaledNumerator =
+      numeratorDecimal.value *
+      10n ** BigInt(denominatorDecimal.scale + Math.max(0, precision));
+    const scaledDenominator =
+      denominatorDecimal.value * 10n ** BigInt(numeratorDecimal.scale);
+
+    if (scaledDenominator === 0n) {
+      return null;
+    }
+
+    return this.formatScaledInteger(
+      scaledNumerator / scaledDenominator,
+      Math.max(0, precision),
+    );
   }
 
   private parseDecimalString(value: string): { value: bigint; scale: number } | null {

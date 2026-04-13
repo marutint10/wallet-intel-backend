@@ -120,6 +120,7 @@ export interface WalletHoldingUsdItem {
   allocation: string;
   holdingSince: string | null;
   holdingDays: number | null;
+  avgBuyPrice: string | null;
   decimals?: number;
   contractAddress?: string;
 }
