@@ -4,6 +4,7 @@ import {
   StoredWalletTransactionsResponse,
   Trade,
   WalletNetFlowResponse,
+  WalletPnLResponse,
   WalletPortfolioResponse,
   WalletPortfolioUSDResponse,
   WalletSummaryResponse,
@@ -98,6 +99,17 @@ export class WalletController {
     }
 
     return this.walletService.getPricedTrades(address);
+  }
+
+  @Get(':address/pnl')
+  async getPnL(
+    @Param('address') address: string,
+  ): Promise<WalletPnLResponse> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getPnL(address);
   }
 
   @Get(':address')
