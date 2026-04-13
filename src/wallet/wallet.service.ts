@@ -13,6 +13,7 @@ import {
   NormalizedTransaction,
   Trade,
   WalletNetFlowResponse,
+  WalletPnLResponse,
   WalletPortfolioResponse,
   WalletPortfolioUSDResponse,
   StoredWalletTransactionsResponse,
@@ -74,6 +75,7 @@ const COINGECKO_API_BASE_URL = 'https://api.coingecko.com/api/v3';
 const DEFILLAMA_API_BASE_URL = 'https://coins.llama.fi';
 
 type PricedTrade = Trade & { price: number };
+type FifoBuyLot = { amount: number; price: number };
 
 export interface MoralisErc20Transfer {
   token_name?: string;
@@ -363,6 +365,72 @@ export class WalletService {
     }
 
     return this.inferMissingSwapPrices(pricedTrades);
+  }
+
+  async getPnL(address: string): Promise<WalletPnLResponse> {
+    const pricedTrades = await this.getPricedTrades(address);
+    const sortedTrades = [...pricedTrades].sort(
+      (left, right) => left.timestamp - right.timestamp,
+    );
+    const buyQueues = new Map<string, FifoBuyLot[]>();
+    const realizedPnLByToken = new Map<string, number>();
+
+    for (const trade of sortedTrades) {
+      if (!realizedPnLByToken.has(trade.token)) {
+        realizedPnLByToken.set(trade.token, 0);
+      }
+
+      const amount = this.parsePositiveNumber(trade.amount);
+
+      if (amount === null || !this.isValidTradePrice(trade.price)) {
+        continue;
+      }
+
+      const queue = buyQueues.get(trade.token) ?? [];
+
+      if (trade.type === 'BUY') {
+        queue.push({
+          amount,
+          price: trade.price,
+        });
+        buyQueues.set(trade.token, queue);
+        continue;
+      }
+
+      let sellAmount = amount;
+
+      while (sellAmount > 0 && queue.length > 0) {
+        const oldestBuy = queue[0];
+        const matchedAmount = Math.min(sellAmount, oldestBuy.amount);
+        const currentPnL = realizedPnLByToken.get(trade.token) ?? 0;
+        const matchedPnL = (trade.price - oldestBuy.price) * matchedAmount;
+
+        realizedPnLByToken.set(
+          trade.token,
+          this.roundDecimal(currentPnL + matchedPnL),
+        );
+
+        oldestBuy.amount = this.roundDecimal(oldestBuy.amount - matchedAmount);
+        sellAmount = this.roundDecimal(sellAmount - matchedAmount);
+
+        if (oldestBuy.amount <= 0) {
+          queue.shift();
+        }
+      }
+
+      if (queue.length > 0) {
+        buyQueues.set(trade.token, queue);
+      }
+    }
+
+    return Object.fromEntries(
+      Array.from(realizedPnLByToken.entries()).map(([token, realizedPnL]) => [
+        token,
+        {
+          realizedPnL: this.roundDecimal(realizedPnL),
+        },
+      ]),
+    );
   }
 
   async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
@@ -699,6 +767,18 @@ export class WalletService {
     }
 
     return parsedValue;
+  }
+
+  private isValidTradePrice(price: number): boolean {
+    return Number.isFinite(price) && price >= 0;
+  }
+
+  private roundDecimal(value: number, decimals = 12): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+
+    return Number(value.toFixed(decimals));
   }
 
   private normalizePortfolioEntry(entry: unknown): PortfolioTokenEntry {
