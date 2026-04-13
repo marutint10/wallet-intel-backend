@@ -240,15 +240,15 @@ Builds trades and then adds historical prices.
 
 ### GET /wallet/:address/pnl
 
-Builds FIFO-based realized PnL and realized ROI from priced trades.
+Builds FIFO-based realized PnL, realized ROI, and win rate from priced trades.
 
 ### Service method: getPnL(address)
 
-Builds FIFO-based realized PnL and realized ROI from priced trades.
+Builds FIFO-based realized PnL, realized ROI, and win rate from priced trades.
 
 It returns data in this shape:
 
-- token => `{ realizedPnL, roi }`
+- token => `{ realizedPnL, roi, winRate }`
 
 ## 9. Detailed request flow for the main wallet endpoint
 
@@ -419,6 +419,12 @@ For each match:
 - `pnl += (sellPrice - buyPrice) * matchedAmount`
 - `costBasis += buyPrice * matchedAmount`
 
+For each SELL event:
+
+- first aggregate the total PnL for that sell across all FIFO matches
+- if sell PnL is greater than `0`, count it as a win
+- if sell PnL is `0` or below, count it as a loss
+
 Then:
 
 - reduce the oldest buy amount
@@ -438,7 +444,13 @@ After processing all sells, realized ROI is calculated per token:
 
 If cost basis is `0`, ROI is returned as `0`.
 
-This means the current PnL engine is strictly realized FIFO PnL with realized ROI percentage.
+Win rate is also calculated per token:
+
+- `winRate = (wins / totalClosedTrades) * 100`
+
+If there are no matched sells, win rate is returned as `0`.
+
+This means the current PnL engine is strictly realized FIFO PnL with realized ROI percentage and sell-based win rate.
 
 ## 14. How portfolio and USD views work
 

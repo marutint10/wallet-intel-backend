@@ -375,6 +375,7 @@ export class WalletService {
     const buyQueues = new Map<string, FifoBuyLot[]>();
     const realizedPnLByToken = new Map<string, number>();
     const realizedCostBasisByToken = new Map<string, number>();
+    const sellStatsByToken = new Map<string, { wins: number; losses: number }>();
 
     for (const trade of sortedTrades) {
       if (!realizedPnLByToken.has(trade.token)) {
@@ -383,6 +384,10 @@ export class WalletService {
 
       if (!realizedCostBasisByToken.has(trade.token)) {
         realizedCostBasisByToken.set(trade.token, 0);
+      }
+
+      if (!sellStatsByToken.has(trade.token)) {
+        sellStatsByToken.set(trade.token, { wins: 0, losses: 0 });
       }
 
       const amount = this.parsePositiveNumber(trade.amount);
@@ -403,6 +408,8 @@ export class WalletService {
       }
 
       let sellAmount = amount;
+      let sellPnL = 0;
+      let matchedAnyLots = false;
 
       while (sellAmount > 0 && queue.length > 0) {
         const oldestBuy = queue[0];
@@ -411,6 +418,9 @@ export class WalletService {
         const currentCostBasis = realizedCostBasisByToken.get(trade.token) ?? 0;
         const matchedPnL = (trade.price - oldestBuy.price) * matchedAmount;
         const matchedCostBasis = oldestBuy.price * matchedAmount;
+
+        sellPnL = this.roundDecimal(sellPnL + matchedPnL);
+        matchedAnyLots = true;
 
         realizedPnLByToken.set(
           trade.token,
@@ -429,6 +439,21 @@ export class WalletService {
         }
       }
 
+      if (matchedAnyLots) {
+        const sellStats = sellStatsByToken.get(trade.token) ?? {
+          wins: 0,
+          losses: 0,
+        };
+
+        if (sellPnL > 0) {
+          sellStats.wins += 1;
+        } else {
+          sellStats.losses += 1;
+        }
+
+        sellStatsByToken.set(trade.token, sellStats);
+      }
+
       if (queue.length > 0) {
         buyQueues.set(trade.token, queue);
       }
@@ -437,10 +462,16 @@ export class WalletService {
     return Object.fromEntries(
       Array.from(realizedPnLByToken.entries()).map(([token, realizedPnL]) => {
         const costBasis = realizedCostBasisByToken.get(token) ?? 0;
+        const sellStats = sellStatsByToken.get(token) ?? { wins: 0, losses: 0 };
+        const totalClosedTrades = sellStats.wins + sellStats.losses;
         const roundedRealizedPnL = this.roundDecimal(realizedPnL);
         const roi =
           costBasis > 0
             ? this.roundDecimal((roundedRealizedPnL / costBasis) * 100)
+            : 0;
+        const winRate =
+          totalClosedTrades > 0
+            ? this.roundDecimal((sellStats.wins / totalClosedTrades) * 100)
             : 0;
 
         return [
@@ -448,6 +479,7 @@ export class WalletService {
           {
             realizedPnL: roundedRealizedPnL,
             roi,
+            winRate,
           },
         ];
       }),
