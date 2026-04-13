@@ -1,7 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
   MoralisErc20Balance,
+  WalletHoldingItem,
   WalletHoldingsResponse,
+  WalletHoldingsUSDResponse,
   WalletNetFlowResponse,
   WalletPortfolioResponse,
   WalletPortfolioUSDResponse,
@@ -59,6 +61,21 @@ export class WalletPortfolioService {
     }
 
     return holdings;
+  }
+
+  async getHoldingsWithUSD(
+    address: string,
+  ): Promise<WalletHoldingsUSDResponse> {
+    const holdings = await this.getHoldings(address);
+    const { ethPrice, tokenPrices } = await this.fetchHoldingPrices(holdings);
+
+    return holdings.map((holding) => ({
+      token: holding.token,
+      amount: holding.amount,
+      usdValue: this.computeHoldingUsdValue(holding, ethPrice, tokenPrices),
+      decimals: holding.decimals,
+      contractAddress: holding.contractAddress,
+    }));
   }
 
   async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {
@@ -363,5 +380,160 @@ export class WalletPortfolioService {
     }
 
     return balance.token_address?.toLowerCase() ?? 'UNKNOWN';
+  }
+
+  private async fetchHoldingPrices(
+    holdings: WalletHoldingsResponse,
+  ): Promise<{ ethPrice: number; tokenPrices: Record<string, number> }> {
+    const contractAddresses = Array.from(
+      new Set(
+        holdings
+          .map((holding) => holding.contractAddress?.toLowerCase())
+          .filter((address): address is string => Boolean(address)),
+      ),
+    );
+
+    const [tokenPricesResult, ethPriceResult] = await Promise.allSettled([
+      this.walletPricingService.fetchCoinGeckoTokenPrices(contractAddresses),
+      this.walletPricingService.fetchEthereumUsdPrice(),
+    ]);
+
+    if (tokenPricesResult.status === 'rejected') {
+      this.logger.warn(
+        'Token pricing failed for holdings valuation, defaulting token usdValue to 0',
+        tokenPricesResult.reason instanceof Error
+          ? tokenPricesResult.reason.stack
+          : undefined,
+      );
+    }
+
+    if (ethPriceResult.status === 'rejected') {
+      this.logger.warn(
+        'ETH pricing failed for holdings valuation, defaulting ETH usdValue to 0',
+        ethPriceResult.reason instanceof Error
+          ? ethPriceResult.reason.stack
+          : undefined,
+      );
+    }
+
+    return {
+      tokenPrices:
+        tokenPricesResult.status === 'fulfilled' ? tokenPricesResult.value : {},
+      ethPrice: ethPriceResult.status === 'fulfilled' ? ethPriceResult.value : 0,
+    };
+  }
+
+  private computeHoldingUsdValue(
+    holding: WalletHoldingItem,
+    ethPrice: number,
+    tokenPrices: Record<string, number>,
+  ): string {
+    const price =
+      holding.token.toUpperCase() === 'ETH'
+        ? ethPrice
+        : holding.contractAddress
+          ? tokenPrices[holding.contractAddress.toLowerCase()] ?? 0
+          : 0;
+
+    if (!Number.isFinite(price) || price <= 0) {
+      return '0';
+    }
+
+    return this.multiplyDecimalStrings(holding.amount, price.toString());
+  }
+
+  private multiplyDecimalStrings(left: string, right: string): string {
+    const leftDecimal = this.parseDecimalString(left);
+    const rightDecimal = this.parseDecimalString(right);
+
+    if (!leftDecimal || !rightDecimal) {
+      return '0';
+    }
+
+    if (leftDecimal.value === 0n || rightDecimal.value === 0n) {
+      return '0';
+    }
+
+    return this.formatScaledInteger(
+      leftDecimal.value * rightDecimal.value,
+      leftDecimal.scale + rightDecimal.scale,
+    );
+  }
+
+  private parseDecimalString(value: string): { value: bigint; scale: number } | null {
+    const normalizedValue = this.normalizeDecimalString(value);
+
+    if (!normalizedValue) {
+      return null;
+    }
+
+    const [wholePart, fractionalPart = ''] = normalizedValue.split('.');
+
+    return {
+      value: BigInt(`${wholePart}${fractionalPart}`),
+      scale: fractionalPart.length,
+    };
+  }
+
+  private normalizeDecimalString(value: string): string | null {
+    const trimmedValue = value.trim();
+
+    if (!trimmedValue) {
+      return null;
+    }
+
+    const match = trimmedValue.match(/^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/);
+
+    if (!match) {
+      return null;
+    }
+
+    if (!/[eE]/.test(trimmedValue)) {
+      return trimmedValue.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+    }
+
+    const [base, exponentValue] = trimmedValue.toLowerCase().split('e');
+    const exponent = Number(exponentValue);
+
+    if (!Number.isInteger(exponent)) {
+      return null;
+    }
+
+    const [wholePart, fractionalPart = ''] = base.split('.');
+    const digits = `${wholePart}${fractionalPart}`;
+    const decimalIndex = wholePart.length + exponent;
+
+    if (decimalIndex <= 0) {
+      return `0.${'0'.repeat(-decimalIndex)}${digits}`.replace(/0+$/, '');
+    }
+
+    if (decimalIndex >= digits.length) {
+      return `${digits}${'0'.repeat(decimalIndex - digits.length)}`;
+    }
+
+    return `${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`.replace(
+      /\.0+$|(\.\d*?)0+$/,
+      '$1',
+    );
+  }
+
+  private formatScaledInteger(value: bigint, scale: number): string {
+    if (value === 0n) {
+      return '0';
+    }
+
+    if (scale === 0) {
+      return value.toString();
+    }
+
+    const digits = value.toString().padStart(scale + 1, '0');
+    const wholePart = digits.slice(0, digits.length - scale);
+    const fractionalPart = digits.slice(digits.length - scale).replace(/0+$/, '');
+
+    if (!fractionalPart) {
+      return wholePart;
+    }
+
+    return `${wholePart}.${fractionalPart}`;
   }
 }

@@ -113,6 +113,16 @@ export interface WalletHoldingItem {
 
 export type WalletHoldingsResponse = WalletHoldingItem[];
 
+export interface WalletHoldingUsdItem {
+  token: string;
+  amount: string;
+  usdValue: string;
+  decimals?: number;
+  contractAddress?: string;
+}
+
+export type WalletHoldingsUSDResponse = WalletHoldingUsdItem[];
+
 export type {
   MoralisErc20Balance,
   MoralisNativeBalanceResponse,

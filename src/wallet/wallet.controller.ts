@@ -4,6 +4,7 @@ import {
   StoredWalletTransactionsResponse,
   Trade,
   WalletHoldingsResponse,
+  WalletHoldingsUSDResponse,
   WalletNetFlowResponse,
   WalletPnLResponse,
   WalletPortfolioResponse,
@@ -27,6 +28,17 @@ export class WalletController {
     }
 
     return this.walletService.getHoldings(address);
+  }
+
+  @Get(':address/holdings/usd')
+  async getHoldingsWithUSD(
+    @Param('address') address: string,
+  ): Promise<WalletHoldingsUSDResponse> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getHoldingsWithUSD(address);
   }
 
   @Get(':address/usd')
