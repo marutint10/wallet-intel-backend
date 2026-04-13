@@ -2,11 +2,10 @@ import { Injectable } from '@nestjs/common';
 import {
   Trade,
   WalletHoldingsResponse,
-  WalletHoldingsUSDResponse,
+  WalletLedgerResponse,
   WalletNetFlowResponse,
   WalletPnLResponse,
   WalletPortfolioResponse,
-  WalletPortfolioUSDResponse,
   StoredWalletTransactionsResponse,
   WalletSummaryResponse,
   WalletTokenFlowResponse,
@@ -58,23 +57,15 @@ export class WalletService {
     return this.walletPortfolioService.getNetFlow(address);
   }
 
+  async getLedger(address: string): Promise<WalletLedgerResponse> {
+    return this.walletPortfolioService.getLedger(address);
+  }
+
   async getPortfolio(address: string): Promise<WalletPortfolioResponse> {
     return this.walletPortfolioService.getPortfolio(address);
   }
 
-  async getPortfolioUSD(
-    address: string,
-  ): Promise<WalletPortfolioUSDResponse> {
-    return this.walletPortfolioService.getPortfolioUSD(address);
-  }
-
   async getHoldings(address: string): Promise<WalletHoldingsResponse> {
     return this.walletPortfolioService.getHoldings(address);
-  }
-
-  async getHoldingsWithUSD(
-    address: string,
-  ): Promise<WalletHoldingsUSDResponse> {
-    return this.walletPortfolioService.getHoldingsWithUSD(address);
   }
 }

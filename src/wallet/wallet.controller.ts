@@ -4,11 +4,10 @@ import {
   StoredWalletTransactionsResponse,
   Trade,
   WalletHoldingsResponse,
-  WalletHoldingsUSDResponse,
+  WalletLedgerResponse,
   WalletNetFlowResponse,
   WalletPnLResponse,
   WalletPortfolioResponse,
-  WalletPortfolioUSDResponse,
   WalletSummaryResponse,
   WalletTokenFlowResponse,
   WalletTransactionsResponse,
@@ -30,28 +29,6 @@ export class WalletController {
     return this.walletService.getHoldings(address);
   }
 
-  @Get(':address/holdings/usd')
-  async getHoldingsWithUSD(
-    @Param('address') address: string,
-  ): Promise<WalletHoldingsUSDResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
-
-    return this.walletService.getHoldingsWithUSD(address);
-  }
-
-  @Get(':address/usd')
-  async getPortfolioUSD(
-    @Param('address') address: string,
-  ): Promise<WalletPortfolioUSDResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
-
-    return this.walletService.getPortfolioUSD(address);
-  }
-
   @Get(':address/portfolio')
   async getPortfolio(
     @Param('address') address: string,
@@ -61,6 +38,17 @@ export class WalletController {
     }
 
     return this.walletService.getPortfolio(address);
+  }
+
+  @Get(':address/ledger')
+  async getLedger(
+    @Param('address') address: string,
+  ): Promise<WalletLedgerResponse> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getLedger(address);
   }
 
   @Get(':address/net-flow')
@@ -96,7 +84,7 @@ export class WalletController {
     return this.walletService.getWalletSummary(address);
   }
 
-  @Get(':address/stored')
+  @Get(':address/transactions')
   async getStoredTransactions(
     @Param('address') address: string,
   ): Promise<StoredWalletTransactionsResponse> {

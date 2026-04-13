@@ -91,17 +91,8 @@ export interface WalletNetFlowResponse {
   [token: string]: string;
 }
 
-export interface WalletPortfolioResponse {
+export interface WalletLedgerResponse {
   [token: string]: string;
-}
-
-export interface WalletPortfolioUsdItem {
-  amount: string;
-  usd: string;
-}
-
-export interface WalletPortfolioUSDResponse {
-  [token: string]: WalletPortfolioUsdItem;
 }
 
 export interface WalletHoldingItem {
@@ -113,7 +104,7 @@ export interface WalletHoldingItem {
 
 export type WalletHoldingsResponse = WalletHoldingItem[];
 
-export interface WalletHoldingUsdItem {
+export interface WalletPortfolioItem {
   token: string;
   amount: string;
   usdValue: string;
@@ -122,13 +113,13 @@ export interface WalletHoldingUsdItem {
   holdingDays: number | null;
   avgBuyPrice: string | null;
   currentPrice: string;
-  unrealizedPnl: string | null;
-  unrealizedRoi: string | null;
+  pnl: string | null;
+  roi: string | null;
   decimals?: number;
   contractAddress?: string;
 }
 
-export type WalletHoldingsUSDResponse = WalletHoldingUsdItem[];
+export type WalletPortfolioResponse = WalletPortfolioItem[];
 
 export type {
   MoralisErc20Balance,

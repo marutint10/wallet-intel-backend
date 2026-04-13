@@ -4,19 +4,13 @@ import {
   NormalizedTokenAmount,
   WalletHoldingItem,
   WalletHoldingsResponse,
-  WalletHoldingsUSDResponse,
+  WalletLedgerResponse,
   WalletNetFlowResponse,
   WalletPortfolioResponse,
-  WalletPortfolioUSDResponse,
   WalletTokenFlowResponse,
 } from '../wallet.types';
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPricingService } from './wallet-pricing.service';
-
-interface PortfolioTokenEntry {
-  amount: string;
-  contractAddress?: string;
-}
 
 interface HoldingLot {
   amount: bigint;
@@ -82,9 +76,7 @@ export class WalletPortfolioService {
     return holdings;
   }
 
-  async getHoldingsWithUSD(
-    address: string,
-  ): Promise<WalletHoldingsUSDResponse> {
+  async getPortfolio(address: string): Promise<WalletPortfolioResponse> {
     const holdings = await this.getHoldings(address);
     const [{ ethPrice, tokenPrices }, holdingAnalytics] = await Promise.all([
       this.fetchHoldingPrices(holdings),
@@ -124,8 +116,8 @@ export class WalletPortfolioService {
         holdingDays: analytics?.holdingDays ?? null,
         avgBuyPrice: analytics?.avgBuyPrice ?? null,
         currentPrice,
-        unrealizedPnl,
-        unrealizedRoi: this.computeUnrealizedRoi(
+        pnl: unrealizedPnl,
+        roi: this.computeUnrealizedRoi(
           currentPrice,
           analytics?.avgBuyPrice ?? null,
         ),
@@ -133,6 +125,20 @@ export class WalletPortfolioService {
         contractAddress: holding.contractAddress,
       };
     });
+  }
+
+  async getLedger(address: string): Promise<WalletLedgerResponse> {
+    const tokenFlow = await this.getTokenFlow(address);
+
+    return Object.fromEntries(
+      Object.entries(tokenFlow.flow).map(([token, amounts]) => [
+        token,
+        this.formatHumanReadableBalance(
+          BigInt(amounts.in) - BigInt(amounts.out),
+          amounts.decimals ?? 18,
+        ),
+      ]),
+    );
   }
 
   async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {
@@ -233,87 +239,6 @@ export class WalletPortfolioService {
     );
   }
 
-  async getPortfolio(address: string): Promise<WalletPortfolioResponse> {
-    const tokenFlow = await this.getTokenFlow(address);
-
-    return Object.fromEntries(
-      Object.entries(tokenFlow.flow).map(([token, amounts]) => [
-        token,
-        this.formatHumanReadableBalance(
-          BigInt(amounts.in) - BigInt(amounts.out),
-          amounts.decimals ?? 18,
-        ),
-      ]),
-    );
-  }
-
-  async getPortfolioUSD(
-    address: string,
-  ): Promise<WalletPortfolioUSDResponse> {
-    const portfolio = await this.getPortfolio(address);
-    const tokenFlow = await this.getTokenFlow(address);
-    const portfolioEntries = Object.fromEntries(
-      Object.entries(portfolio).map(([token, entry]) => {
-        const normalizedEntry = this.normalizePortfolioEntry(entry);
-
-        return [
-          token,
-          {
-            amount: normalizedEntry.amount,
-            contractAddress:
-              normalizedEntry.contractAddress ??
-              tokenFlow.flow[token]?.contractAddress,
-          },
-        ];
-      }),
-    ) as Record<string, PortfolioTokenEntry>;
-
-    const contractAddresses = Array.from(
-      new Set(
-        Object.values(portfolioEntries)
-          .map((entry) => entry.contractAddress?.toLowerCase())
-          .filter((address): address is string => Boolean(address)),
-      ),
-    );
-
-    let priceMap: Record<string, number> = {};
-    let ethPrice = 0;
-
-    try {
-      [priceMap, ethPrice] = await Promise.all([
-        this.walletPricingService.fetchCoinGeckoTokenPrices(contractAddresses),
-        this.walletPricingService.fetchEthereumUsdPrice(),
-      ]);
-    } catch (error) {
-      this.logger.warn(
-        'CoinGecko pricing failed, returning zero USD values',
-        error instanceof Error ? error.stack : undefined,
-      );
-    }
-
-    return Object.fromEntries(
-      Object.entries(portfolioEntries).map(([token, entry]) => {
-        const amount = Number(entry.amount);
-        const normalizedContractAddress = entry.contractAddress?.toLowerCase();
-        const price =
-          token.toUpperCase() === 'ETH'
-            ? ethPrice
-            : normalizedContractAddress
-              ? priceMap[normalizedContractAddress] ?? 0
-              : 0;
-        const usdValue = Number.isFinite(amount) ? amount * price : 0;
-
-        return [
-          token,
-          {
-            amount: entry.amount,
-            usd: this.walletPricingService.formatUsdValue(usdValue),
-          },
-        ];
-      }),
-    );
-  }
-
   private formatHumanReadableBalance(net: bigint, decimals: number): string {
     if (net === 0n) {
       return '0';
@@ -342,36 +267,6 @@ export class WalletPortfolioService {
     }
 
     return `${sign}${wholePart.toString()}.${fractionalString}`;
-  }
-
-  private normalizePortfolioEntry(entry: unknown): PortfolioTokenEntry {
-    if (typeof entry === 'string') {
-      return {
-        amount: entry,
-      };
-    }
-
-    if (typeof entry === 'object' && entry !== null) {
-      const portfolioEntry = entry as {
-        amount?: unknown;
-        contractAddress?: unknown;
-      };
-
-      return {
-        amount:
-          typeof portfolioEntry.amount === 'string'
-            ? portfolioEntry.amount
-            : '0',
-        contractAddress:
-          typeof portfolioEntry.contractAddress === 'string'
-            ? portfolioEntry.contractAddress
-            : undefined,
-      };
-    }
-
-    return {
-      amount: '0',
-    };
   }
 
   private parseRawAmount(value: unknown): bigint | null {
