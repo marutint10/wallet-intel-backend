@@ -19,6 +19,7 @@ Today the module can do these things:
 - build trades from swaps
 - add historical prices to trades
 - infer a missing swap price from the priced counterpart trade
+- calculate FIFO-based realized PnL per token
 - compute token flow, net flow, portfolio, and portfolio USD value
 - return a wallet summary
 
@@ -68,6 +69,7 @@ It handles:
 - database persistence
 - trade building
 - trade pricing
+- FIFO realized PnL calculation
 - portfolio and summary calculations
 
 ### transaction.entity.ts
@@ -236,6 +238,18 @@ Builds trades from stored swap transactions.
 
 Builds trades and then adds historical prices.
 
+### GET /wallet/:address/pnl
+
+Builds FIFO-based realized PnL from priced trades.
+
+### Service method: getPnL(address)
+
+Builds FIFO-based realized PnL from priced trades.
+
+It returns data in this shape:
+
+- token => `{ realizedPnL }`
+
 ## 9. Detailed request flow for the main wallet endpoint
 
 This is the most important system flow.
@@ -376,7 +390,50 @@ When we do nothing:
 
 This keeps the inference conservative and avoids accidental bad pricing.
 
-## 13. How portfolio and USD views work
+## 13. How FIFO realized PnL works
+
+`getPnL()` uses the output of `getPricedTrades()`.
+
+Important rule:
+
+- trades are processed oldest to newest
+
+For each token, the system keeps a FIFO buy queue.
+
+Each buy lot stores:
+
+- amount
+- price
+
+### On BUY
+
+The buy lot is pushed into that token's queue.
+
+### On SELL
+
+The sell amount is matched against the oldest buy lots first.
+
+For each match:
+
+- `matchedAmount = min(sellAmount, oldestBuy.amount)`
+- `pnl += (sellPrice - buyPrice) * matchedAmount`
+
+Then:
+
+- reduce the oldest buy amount
+- reduce the remaining sell amount
+- remove the buy lot if it is fully consumed
+
+### Edge behavior
+
+- if a sell happens before any buy, the unmatched sell is skipped safely
+- partial sells are handled by reducing the oldest lot and continuing only if needed
+- unrealized PnL is not calculated here
+- average-cost logic is not used here
+
+This means the current PnL engine is strictly realized FIFO PnL.
+
+## 14. How portfolio and USD views work
 
 The flow is layered.
 
@@ -407,7 +464,7 @@ Current rules:
 - ERC-20 tokens use contract-address-based CoinGecko lookup
 - if no price is found, USD value becomes `0`
 
-## 14. Reliability and fallback behavior
+## 15. Reliability and fallback behavior
 
 The system is built to keep working even when external APIs are unstable.
 
@@ -421,7 +478,7 @@ Current protections:
 
 This is important because wallet analytics depends on third-party providers.
 
-## 15. Current assumptions and limits
+## 16. Current assumptions and limits
 
 These are important for future developers.
 
@@ -445,12 +502,17 @@ We partly solve this with counterpart price inference for simple 2-leg swaps.
 We only infer when there is a clear one-known one-missing pair.
 This avoids incorrect prices for complex transactions.
 
+### Realized PnL depends on historical prices
+
+FIFO PnL is only as good as the trade prices feeding into it.
+If a token still has no usable historical price, that trade will not contribute useful PnL.
+
 ### Database sync mode
 
 TypeORM is using `synchronize: true` right now.
 That is convenient during early development, but in a mature production setup we should move to migrations.
 
-## 16. How to extend this module safely
+## 17. How to extend this module safely
 
 If you add new wallet features, follow this order:
 
@@ -460,7 +522,7 @@ If you add new wallet features, follow this order:
 4. if you add a new transaction type or trade rule, update this document
 5. if you add new pricing logic, document the exact fallback order
 
-## 17. Suggested mental model for new developers
+## 18. Suggested mental model for new developers
 
 If you are new to this codebase, think of the wallet system in 3 layers:
 
@@ -474,11 +536,11 @@ Convert raw provider-specific data into our internal format and store it.
 
 ### Layer 3: analytics
 
-Build trades, pricing, flows, balances, and summaries from stored normalized data.
+Build trades, pricing, FIFO PnL, flows, balances, and summaries from stored normalized data.
 
 If you understand these 3 layers, the whole module becomes much easier to work with.
 
-## 18. Files a developer should read first
+## 19. Files a developer should read first
 
 If someone joins the project, this is the best reading order:
 
@@ -489,7 +551,7 @@ If someone joins the project, this is the best reading order:
 5. `src/app.module.ts`
 6. `src/config/configuration.ts`
 
-## 19. Update rule for this document
+## 20. Update rule for this document
 
 Whenever we change any of the below, update this file in the same PR or task:
 
@@ -497,6 +559,7 @@ Whenever we change any of the below, update this file in the same PR or task:
 - normalization rules
 - transaction classification logic
 - pricing logic
+- PnL logic
 - external provider usage
 - database schema for wallet data
 - portfolio or summary calculations
