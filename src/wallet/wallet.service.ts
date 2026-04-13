@@ -375,7 +375,10 @@ export class WalletService {
     const buyQueues = new Map<string, FifoBuyLot[]>();
     const realizedPnLByToken = new Map<string, number>();
     const realizedCostBasisByToken = new Map<string, number>();
-    const sellStatsByToken = new Map<string, { wins: number; losses: number }>();
+    const sellStatsByToken = new Map<
+      string,
+      { wins: number; losses: number; bestTrade: number; worstTrade: number }
+    >();
 
     for (const trade of sortedTrades) {
       if (!realizedPnLByToken.has(trade.token)) {
@@ -387,7 +390,12 @@ export class WalletService {
       }
 
       if (!sellStatsByToken.has(trade.token)) {
-        sellStatsByToken.set(trade.token, { wins: 0, losses: 0 });
+        sellStatsByToken.set(trade.token, {
+          wins: 0,
+          losses: 0,
+          bestTrade: 0,
+          worstTrade: 0,
+        });
       }
 
       const amount = this.parsePositiveNumber(trade.amount);
@@ -443,12 +451,22 @@ export class WalletService {
         const sellStats = sellStatsByToken.get(trade.token) ?? {
           wins: 0,
           losses: 0,
+          bestTrade: 0,
+          worstTrade: 0,
         };
 
         if (sellPnL > 0) {
           sellStats.wins += 1;
         } else {
           sellStats.losses += 1;
+        }
+
+        if (sellStats.wins + sellStats.losses === 1) {
+          sellStats.bestTrade = sellPnL;
+          sellStats.worstTrade = sellPnL;
+        } else {
+          sellStats.bestTrade = Math.max(sellStats.bestTrade, sellPnL);
+          sellStats.worstTrade = Math.min(sellStats.worstTrade, sellPnL);
         }
 
         sellStatsByToken.set(trade.token, sellStats);
@@ -462,7 +480,12 @@ export class WalletService {
     return Object.fromEntries(
       Array.from(realizedPnLByToken.entries()).map(([token, realizedPnL]) => {
         const costBasis = realizedCostBasisByToken.get(token) ?? 0;
-        const sellStats = sellStatsByToken.get(token) ?? { wins: 0, losses: 0 };
+        const sellStats = sellStatsByToken.get(token) ?? {
+          wins: 0,
+          losses: 0,
+          bestTrade: 0,
+          worstTrade: 0,
+        };
         const totalClosedTrades = sellStats.wins + sellStats.losses;
         const roundedRealizedPnL = this.roundDecimal(realizedPnL);
         const roi =
@@ -480,6 +503,8 @@ export class WalletService {
             realizedPnL: roundedRealizedPnL,
             roi,
             winRate,
+            bestTrade: this.roundDecimal(sellStats.bestTrade),
+            worstTrade: this.roundDecimal(sellStats.worstTrade),
           },
         ];
       }),
