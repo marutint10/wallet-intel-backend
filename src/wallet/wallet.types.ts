@@ -56,6 +56,7 @@ export interface Trade {
 
 export interface WalletTokenPnL {
   realizedPnL: number;
+  roi: number;
 }
 
 export interface WalletPnLResponse {
