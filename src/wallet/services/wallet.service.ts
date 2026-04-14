@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import {
   Trade,
   WalletHoldingsResponse,
+  WalletHoldTimeMetricsResponse,
   WalletLedgerResponse,
   WalletNetFlowResponse,
   WalletPnLResponse,
@@ -71,6 +72,12 @@ export class WalletService {
 
   async getHoldings(address: string): Promise<WalletHoldingsResponse> {
     return this.walletPortfolioService.getHoldings(address);
+  }
+
+  async getHoldTimeMetrics(
+    address: string,
+  ): Promise<WalletHoldTimeMetricsResponse> {
+    return this.walletAnalyticsService.getHoldTimeMetrics(address);
   }
 
   async getRiskMetrics(
