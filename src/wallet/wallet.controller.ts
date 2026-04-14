@@ -3,6 +3,7 @@ import { isEthereumAddress } from '../shared/validators/address.validator';
 import {
   StoredWalletTransactionsResponse,
   Trade,
+  WalletActivityMetricsResponse,
   WalletHoldingsResponse,
   WalletHoldTimeMetricsResponse,
   WalletLedgerResponse,
@@ -148,6 +149,17 @@ export class WalletController {
     }
 
     return this.walletService.getHoldTimeMetrics(address);
+  }
+
+  @Get(':address/activity-metrics')
+  async getActivityMetrics(
+    @Param('address') address: string,
+  ): Promise<WalletActivityMetricsResponse> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getActivityMetrics(address);
   }
 
   @Get(':address')
