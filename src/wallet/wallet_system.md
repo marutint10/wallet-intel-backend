@@ -296,12 +296,14 @@ Current response fields:
 - `currentPrice`
 - `pnl`
 - `roi`
+- `priceUnavailable`
 - `decimals?`
 - `contractAddress?`
 
 Important note:
 
 - `pnl` and `roi` on this endpoint are unrealized metrics for the current remaining position
+- when live pricing is unavailable, `currentPrice`, `usdValue`, `pnl`, and `roi` return `null`, and `priceUnavailable` returns `true`
 
 ### GET /wallet/:address/ledger
 
