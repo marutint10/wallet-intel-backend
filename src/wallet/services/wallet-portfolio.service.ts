@@ -84,23 +84,23 @@ export class WalletPortfolioService {
     ]);
     const holdingsWithUsd = holdings.map((holding) => ({
       holding,
-      usdValue: this.computeHoldingUsdValue(holding, ethPrice, tokenPrices),
+      currentPrice: this.getCurrentHoldingPrice(holding, ethPrice, tokenPrices),
+    })).map(({ holding, currentPrice }) => ({
+      holding,
+      currentPrice,
+      usdValue: this.computeHoldingUsdValue(holding.amount, currentPrice),
     }));
     const totalPortfolioValue = holdingsWithUsd.reduce(
-      (total, entry) => this.addDecimalStrings(total, entry.usdValue),
+      (total, entry) => this.addDecimalStrings(total, entry.usdValue ?? '0'),
       '0',
     );
 
-    return holdingsWithUsd.map(({ holding, usdValue }) => {
+    return holdingsWithUsd.map(({ holding, currentPrice, usdValue }) => {
       const analytics =
         holdingAnalytics.get(
           this.getHoldingKey(holding.token, holding.contractAddress),
         ) ?? null;
-      const currentPrice = this.getCurrentHoldingPrice(
-        holding,
-        ethPrice,
-        tokenPrices,
-      );
+      const priceUnavailable = currentPrice === null;
       const unrealizedPnl = this.computeUnrealizedPnl(
         holding.amount,
         currentPrice,
@@ -121,6 +121,7 @@ export class WalletPortfolioService {
           currentPrice,
           analytics?.avgBuyPrice ?? null,
         ),
+        priceUnavailable,
         decimals: holding.decimals,
         contractAddress: holding.contractAddress,
       };
@@ -352,7 +353,7 @@ export class WalletPortfolioService {
 
     if (tokenPricesResult.status === 'rejected') {
       this.logger.warn(
-        'Token pricing failed for holdings valuation, defaulting token usdValue to 0',
+        'Token pricing failed for holdings valuation, affected holdings will expose unavailable pricing',
         tokenPricesResult.reason instanceof Error
           ? tokenPricesResult.reason.stack
           : undefined,
@@ -361,7 +362,7 @@ export class WalletPortfolioService {
 
     if (ethPriceResult.status === 'rejected') {
       this.logger.warn(
-        'ETH pricing failed for holdings valuation, defaulting ETH usdValue to 0',
+        'ETH pricing failed for holdings valuation, ETH holdings will expose unavailable pricing',
         ethPriceResult.reason instanceof Error
           ? ethPriceResult.reason.stack
           : undefined,
@@ -699,24 +700,21 @@ export class WalletPortfolioService {
   }
 
   private computeHoldingUsdValue(
-    holding: WalletHoldingItem,
-    ethPrice: number,
-    tokenPrices: Record<string, number>,
-  ): string {
-    const price = this.getCurrentHoldingPrice(holding, ethPrice, tokenPrices);
-
-    if (price === '0') {
-      return '0';
+    amount: string,
+    currentPrice: string | null,
+  ): string | null {
+    if (!currentPrice) {
+      return null;
     }
 
-    return this.multiplyDecimalStrings(holding.amount, price);
+    return this.multiplyDecimalStrings(amount, currentPrice);
   }
 
   private getCurrentHoldingPrice(
     holding: WalletHoldingItem,
     ethPrice: number,
     tokenPrices: Record<string, number>,
-  ): string {
+  ): string | null {
     const price =
       holding.token.toUpperCase() === 'ETH'
         ? ethPrice
@@ -725,18 +723,18 @@ export class WalletPortfolioService {
           : 0;
 
     if (!Number.isFinite(price) || price <= 0) {
-      return '0';
+      return null;
     }
 
-    return this.normalizeDecimalString(price.toString()) ?? '0';
+    return this.normalizeDecimalString(price.toString());
   }
 
   private computeUnrealizedPnl(
     amount: string,
-    currentPrice: string,
+    currentPrice: string | null,
     avgBuyPrice: string | null,
   ): string | null {
-    if (!avgBuyPrice) {
+    if (!currentPrice || !avgBuyPrice) {
       return null;
     }
 
@@ -750,10 +748,10 @@ export class WalletPortfolioService {
   }
 
   private computeUnrealizedRoi(
-    currentPrice: string,
+    currentPrice: string | null,
     avgBuyPrice: string | null,
   ): string | null {
-    if (!avgBuyPrice) {
+    if (!currentPrice || !avgBuyPrice) {
       return null;
     }
 
@@ -814,9 +812,13 @@ export class WalletPortfolioService {
   }
 
   private computeAllocationPercentage(
-    usdValue: string,
+    usdValue: string | null,
     totalPortfolioValue: string,
   ): string {
+    if (!usdValue) {
+      return '0';
+    }
+
     const usdDecimal = this.parseDecimalString(usdValue);
     const totalDecimal = this.parseDecimalString(totalPortfolioValue);
 
