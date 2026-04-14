@@ -75,6 +75,27 @@ export interface WalletPnLResponse {
   [token: string]: WalletTokenPnL;
 }
 
+export interface WalletRiskMetricsResponse {
+  profitFactor: number;
+  maxDrawdown: number;
+  returnStdDev: number;
+  concentrationRisk: number;
+}
+
+export interface WalletRiskMetricsDebugResponse
+  extends WalletRiskMetricsResponse {
+  positivePnLTrades: number[];
+  negativePnLTrades: number[];
+  cumulativePnLCurve: number[];
+  tradeROIs: number[];
+  largestHoldingUsd: number;
+  totalPortfolioUsd: number;
+}
+
+export type WalletRiskMetricsResult =
+  | WalletRiskMetricsResponse
+  | WalletRiskMetricsDebugResponse;
+
 export interface TokenFlowAmount {
   in: string;
   out: string;
