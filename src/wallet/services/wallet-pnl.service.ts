@@ -7,7 +7,20 @@ import {
 import { WalletCoreService } from './wallet-core.service';
 import { PricedTrade, WalletPricingService } from './wallet-pricing.service';
 
-type FifoBuyLot = { amount: number; price: number };
+type FifoBuyLot = { amount: number; price: number; timestamp: number };
+
+export interface CompletedTradeLot {
+  token: string;
+  buyTimestamp: number;
+  sellTimestamp: number;
+  amount: number;
+  buyPrice: number;
+  sellPrice: number;
+  costBasis: number;
+  proceeds: number;
+  pnl: number;
+  holdHours: number;
+}
 
 export interface RealizedTradeMetrics {
   token: string;
@@ -19,6 +32,7 @@ export interface RealizedTradeMetrics {
 }
 
 interface PricedTradeAnalysis {
+  completedTradeLots: CompletedTradeLot[];
   realizedTradeMetrics: RealizedTradeMetrics[];
   realizedPnLByToken: Map<string, number>;
   realizedCostBasisByToken: Map<string, number>;
@@ -105,6 +119,12 @@ export class WalletPnlService {
     const pricedTrades = await this.getPricedTrades(address);
 
     return this.analyzePricedTrades(pricedTrades).realizedTradeMetrics;
+  }
+
+  async getCompletedTradeLots(address: string): Promise<CompletedTradeLot[]> {
+    const pricedTrades = await this.getPricedTrades(address);
+
+    return this.analyzePricedTrades(pricedTrades).completedTradeLots;
   }
 
   async getPnL(address: string): Promise<WalletPnLResponse> {
@@ -280,6 +300,7 @@ export class WalletPnlService {
       (left, right) => left.timestamp - right.timestamp,
     );
     const buyQueues = new Map<string, FifoBuyLot[]>();
+    const completedTradeLots: CompletedTradeLot[] = [];
     const realizedTradeMetrics: RealizedTradeMetrics[] = [];
     const realizedPnLByToken = new Map<string, number>();
     const realizedCostBasisByToken = new Map<string, number>();
@@ -320,6 +341,7 @@ export class WalletPnlService {
         queue.push({
           amount,
           price: trade.price,
+          timestamp: trade.timestamp,
         });
         buyQueues.set(trade.token, queue);
         continue;
@@ -345,6 +367,21 @@ export class WalletPnlService {
         sellCostBasis = this.roundDecimal(sellCostBasis + matchedCostBasis);
         sellProceeds = this.roundDecimal(sellProceeds + matchedProceeds);
         matchedAnyLots = true;
+
+        completedTradeLots.push({
+          token: trade.token,
+          buyTimestamp: oldestBuy.timestamp,
+          sellTimestamp: trade.timestamp,
+          amount: this.roundDecimal(matchedAmount),
+          buyPrice: this.roundDecimal(oldestBuy.price),
+          sellPrice: this.roundDecimal(trade.price),
+          costBasis: this.roundDecimal(matchedCostBasis),
+          proceeds: this.roundDecimal(matchedProceeds),
+          pnl: this.roundDecimal(matchedPnL),
+          holdHours: this.roundDecimal(
+            (trade.timestamp - oldestBuy.timestamp) / 3600,
+          ),
+        });
 
         realizedPnLByToken.set(
           trade.token,
@@ -405,6 +442,7 @@ export class WalletPnlService {
     }
 
     return {
+      completedTradeLots,
       realizedTradeMetrics,
       realizedPnLByToken,
       realizedCostBasisByToken,
