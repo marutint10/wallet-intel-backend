@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
+  WalletHoldTimeBuckets,
+  WalletHoldTimeMetricsResponse,
   WalletPortfolioResponse,
   WalletRiskMetricsDebugResponse,
   WalletRiskMetricsResult,
@@ -69,6 +71,35 @@ export class WalletAnalyticsService {
         concentrationSnapshot.totalPortfolioUsd,
       ),
     } satisfies WalletRiskMetricsDebugResponse;
+  }
+
+  async getHoldTimeMetrics(
+    address: string,
+  ): Promise<WalletHoldTimeMetricsResponse> {
+    const completedTradeLots =
+      await this.walletPnlService.getCompletedTradeLots(address);
+
+    if (completedTradeLots.length === 0) {
+      return {
+        avgHoldHours: 0,
+        medianHoldHours: 0,
+        holdBuckets: this.createEmptyHoldBuckets(),
+      };
+    }
+
+    const holdHours = completedTradeLots
+      .map((tradeLot) => this.roundDecimal(tradeLot.holdHours))
+      .sort((left, right) => left - right);
+
+    const avgHoldHours = this.roundDecimal(
+      holdHours.reduce((total, value) => total + value, 0) / holdHours.length,
+    );
+
+    return {
+      avgHoldHours,
+      medianHoldHours: this.computeMedian(holdHours),
+      holdBuckets: this.buildHoldBuckets(holdHours),
+    };
   }
 
   private computeProfitFactor(realizedTrades: RealizedTradeMetrics[]): number {
@@ -145,6 +176,54 @@ export class WalletAnalyticsService {
       values.length;
 
     return this.roundDecimal(Math.sqrt(variance));
+  }
+
+  private computeMedian(values: number[]): number {
+    if (values.length === 0) {
+      return 0;
+    }
+
+    const midpoint = Math.floor(values.length / 2);
+
+    if (values.length % 2 === 1) {
+      return this.roundDecimal(values[midpoint]);
+    }
+
+    return this.roundDecimal((values[midpoint - 1] + values[midpoint]) / 2);
+  }
+
+  private buildHoldBuckets(holdHours: number[]): WalletHoldTimeBuckets {
+    const buckets = this.createEmptyHoldBuckets();
+
+    for (const hours of holdHours) {
+      if (hours < 1) {
+        buckets.under1h += 1;
+        continue;
+      }
+
+      if (hours < 24) {
+        buckets.under24h += 1;
+        continue;
+      }
+
+      if (hours < 24 * 7) {
+        buckets.under7d += 1;
+        continue;
+      }
+
+      buckets.over7d += 1;
+    }
+
+    return buckets;
+  }
+
+  private createEmptyHoldBuckets(): WalletHoldTimeBuckets {
+    return {
+      under1h: 0,
+      under24h: 0,
+      under7d: 0,
+      over7d: 0,
+    };
   }
 
   private computeConcentrationRisk(portfolio: WalletPortfolioResponse): number {
