@@ -107,14 +107,15 @@ export type WalletHoldingsResponse = WalletHoldingItem[];
 export interface WalletPortfolioItem {
   token: string;
   amount: string;
-  usdValue: string;
+  usdValue: string | null;
   allocation: string;
   holdingSince: string | null;
   holdingDays: number | null;
   avgBuyPrice: string | null;
-  currentPrice: string;
+  currentPrice: string | null;
   pnl: string | null;
   roi: string | null;
+  priceUnavailable: boolean;
   decimals?: number;
   contractAddress?: string;
 }
