@@ -259,6 +259,9 @@ export class WalletPnlService {
     }
 
     const pnlEntries = Object.entries(pnlByToken);
+    const tokenPerformance = pnlEntries.map(([, metrics]) =>
+      this.classifyTokenByRealizedPnl(metrics.realizedPnL),
+    );
     const activeTokens = pnlEntries.filter(
       ([, metrics]) =>
         metrics.realizedPnL !== 0 ||
@@ -304,12 +307,19 @@ export class WalletPnlService {
       worstTradeCandidates.length > 0
         ? this.roundDecimal(Math.min(...worstTradeCandidates))
         : 0;
-    const profitableTokens = pnlEntries.filter(
-      ([, metrics]) => metrics.realizedPnL > 0,
+    const profitableTokens = tokenPerformance.filter(
+      (classification) => classification === 'profit',
     ).length;
-    const losingTokens = pnlEntries.filter(
-      ([, metrics]) => metrics.realizedPnL < 0,
+    const losingTokens = tokenPerformance.filter(
+      (classification) => classification === 'loss',
     ).length;
+    const totalTradedTokens = tokenPerformance.length;
+
+    if (profitableTokens + losingTokens > totalTradedTokens) {
+      this.logger.warn(
+        `Wallet summary token counts exceeded traded token count for ${walletAddress}`,
+      );
+    }
 
     return {
       address: walletAddress,
@@ -325,6 +335,20 @@ export class WalletPnlService {
       profitableTokens,
       losingTokens,
     };
+  }
+
+  private classifyTokenByRealizedPnl(
+    realizedPnl: number,
+  ): 'profit' | 'loss' | 'neutral' {
+    if (realizedPnl > 0) {
+      return 'profit';
+    }
+
+    if (realizedPnl < 0) {
+      return 'loss';
+    }
+
+    return 'neutral';
   }
 
   private isValidTradePrice(price: number): boolean {
