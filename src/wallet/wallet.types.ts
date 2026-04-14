@@ -82,6 +82,19 @@ export interface WalletRiskMetricsResponse {
   concentrationRisk: number;
 }
 
+export interface WalletHoldTimeBuckets {
+  under1h: number;
+  under24h: number;
+  under7d: number;
+  over7d: number;
+}
+
+export interface WalletHoldTimeMetricsResponse {
+  avgHoldHours: number;
+  medianHoldHours: number;
+  holdBuckets: WalletHoldTimeBuckets;
+}
+
 export interface WalletRiskMetricsDebugResponse
   extends WalletRiskMetricsResponse {
   positivePnLTrades: number[];
