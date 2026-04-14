@@ -6,11 +6,14 @@ import {
   WalletNetFlowResponse,
   WalletPnLResponse,
   WalletPortfolioResponse,
+  WalletRiskMetricsResult,
+  WalletRiskMetricsResponse,
   StoredWalletTransactionsResponse,
   WalletSummaryResponse,
   WalletTokenFlowResponse,
   WalletTransactionsResponse,
 } from '../wallet.types';
+import { WalletAnalyticsService } from './wallet-analytics.service';
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
@@ -21,6 +24,7 @@ export class WalletService {
     private readonly walletCoreService: WalletCoreService,
     private readonly walletPnlService: WalletPnlService,
     private readonly walletPortfolioService: WalletPortfolioService,
+    private readonly walletAnalyticsService: WalletAnalyticsService,
   ) {}
 
   async getWalletData(address: string): Promise<WalletTransactionsResponse> {
@@ -67,5 +71,12 @@ export class WalletService {
 
   async getHoldings(address: string): Promise<WalletHoldingsResponse> {
     return this.walletPortfolioService.getHoldings(address);
+  }
+
+  async getRiskMetrics(
+    address: string,
+    debug = false,
+  ): Promise<WalletRiskMetricsResult> {
+    return this.walletAnalyticsService.getRiskMetrics(address, debug);
   }
 }
