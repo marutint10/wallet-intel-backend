@@ -4,6 +4,7 @@ import {
   StoredWalletTransactionsResponse,
   Trade,
   WalletHoldingsResponse,
+  WalletHoldTimeMetricsResponse,
   WalletLedgerResponse,
   WalletNetFlowResponse,
   WalletPnLResponse,
@@ -136,6 +137,17 @@ export class WalletController {
     }
 
     return this.walletService.getRiskMetrics(address, debug === 'true');
+  }
+
+  @Get(':address/hold-time-metrics')
+  async getHoldTimeMetrics(
+    @Param('address') address: string,
+  ): Promise<WalletHoldTimeMetricsResponse> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getHoldTimeMetrics(address);
   }
 
   @Get(':address')
