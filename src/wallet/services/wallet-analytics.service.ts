@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
+  Trade,
+  WalletActivityMetricsResponse,
   WalletHoldTimeBuckets,
   WalletHoldTimeMetricsResponse,
   WalletPortfolioResponse,
@@ -99,6 +101,50 @@ export class WalletAnalyticsService {
       avgHoldHours,
       medianHoldHours: this.computeMedian(holdHours),
       holdBuckets: this.buildHoldBuckets(holdHours),
+    };
+  }
+
+  async getActivityMetrics(
+    address: string,
+  ): Promise<WalletActivityMetricsResponse> {
+    const trades = await this.walletPnlService.getTrades(address);
+
+    if (trades.length === 0) {
+      return {
+        tradesPerDay: 0,
+        avgTradeGapHours: 0,
+        burstinessScore: 0,
+        tradingSpanRatio: 0,
+      };
+    }
+
+    const sortedTrades = [...trades].sort(
+      (left, right) => left.timestamp - right.timestamp,
+    );
+    const activeTradingDays = this.countActiveTradingDays(sortedTrades);
+    const tradeGapHours = this.buildTradeGapHours(sortedTrades);
+    const avgTradeGapHours =
+      tradeGapHours.length > 0
+        ? this.roundDecimal(
+            tradeGapHours.reduce((total, value) => total + value, 0) /
+              tradeGapHours.length,
+          )
+        : 0;
+    const tradingSpanRatio = this.computeTradingSpanRatio(sortedTrades);
+
+    return {
+      tradesPerDay:
+        activeTradingDays > 0
+          ? this.roundDecimal(sortedTrades.length / activeTradingDays)
+          : 0,
+      avgTradeGapHours,
+      burstinessScore:
+        avgTradeGapHours > 0
+          ? this.roundDecimal(
+              this.computePopulationStdDev(tradeGapHours) / avgTradeGapHours,
+            )
+          : 0,
+      tradingSpanRatio,
     };
   }
 
@@ -215,6 +261,47 @@ export class WalletAnalyticsService {
     }
 
     return buckets;
+  }
+
+  private countActiveTradingDays(trades: Trade[]): number {
+    return new Set(
+      trades.map((trade) => new Date(trade.timestamp * 1000).toISOString().slice(0, 10)),
+    ).size;
+  }
+
+  private buildTradeGapHours(trades: Trade[]): number[] {
+    const gapHours: number[] = [];
+
+    for (let index = 1; index < trades.length; index += 1) {
+      gapHours.push(
+        this.roundDecimal(
+          (trades[index].timestamp - trades[index - 1].timestamp) / 3600,
+        ),
+      );
+    }
+
+    return gapHours;
+  }
+
+  private computeTradingSpanRatio(trades: Trade[]): number {
+    if (trades.length < 2) {
+      return 0;
+    }
+
+    const firstTradeTimestamp = trades[0].timestamp;
+    const lastTradeTimestamp = trades[trades.length - 1].timestamp;
+    const walletAgeSeconds = Math.max(
+      Math.floor(Date.now() / 1000) - firstTradeTimestamp,
+      0,
+    );
+
+    if (walletAgeSeconds === 0) {
+      return 0;
+    }
+
+    return this.roundDecimal(
+      (lastTradeTimestamp - firstTradeTimestamp) / walletAgeSeconds,
+    );
   }
 
   private createEmptyHoldBuckets(): WalletHoldTimeBuckets {
