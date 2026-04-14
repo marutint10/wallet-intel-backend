@@ -6,6 +6,7 @@ import {
   PnlService,
   PortfolioService,
   ScoringService,
+  WalletAnalyticsService,
   WalletCoreService,
   WalletPnlService,
   WalletPortfolioService,
@@ -18,6 +19,7 @@ import { TransactionEntity } from './transaction.entity';
   imports: [TypeOrmModule.forFeature([TransactionEntity])],
   controllers: [WalletController],
   providers: [
+    WalletAnalyticsService,
     WalletCoreService,
     WalletPricingService,
     WalletPnlService,

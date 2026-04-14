@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, Get, Param } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Param, Query } from '@nestjs/common';
 import { isEthereumAddress } from '../shared/validators/address.validator';
 import {
   StoredWalletTransactionsResponse,
@@ -8,6 +8,8 @@ import {
   WalletNetFlowResponse,
   WalletPnLResponse,
   WalletPortfolioResponse,
+  WalletRiskMetricsResult,
+  WalletRiskMetricsResponse,
   WalletSummaryResponse,
   WalletTokenFlowResponse,
   WalletTransactionsResponse,
@@ -122,6 +124,18 @@ export class WalletController {
     }
 
     return this.walletService.getPnL(address);
+  }
+
+  @Get(':address/risk-metrics')
+  async getRiskMetrics(
+    @Param('address') address: string,
+    @Query('debug') debug?: string,
+  ): Promise<WalletRiskMetricsResult> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getRiskMetrics(address, debug === 'true');
   }
 
   @Get(':address')
