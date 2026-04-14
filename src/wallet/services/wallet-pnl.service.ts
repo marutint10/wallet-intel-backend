@@ -9,6 +9,25 @@ import { PricedTrade, WalletPricingService } from './wallet-pricing.service';
 
 type FifoBuyLot = { amount: number; price: number };
 
+export interface RealizedTradeMetrics {
+  token: string;
+  timestamp: number;
+  pnl: number;
+  roi: number;
+  costBasis: number;
+  proceeds: number;
+}
+
+interface PricedTradeAnalysis {
+  realizedTradeMetrics: RealizedTradeMetrics[];
+  realizedPnLByToken: Map<string, number>;
+  realizedCostBasisByToken: Map<string, number>;
+  sellStatsByToken: Map<
+    string,
+    { wins: number; losses: number; bestTrade: number; worstTrade: number }
+  >;
+}
+
 @Injectable()
 export class WalletPnlService {
   private readonly logger = new Logger(WalletPnlService.name);
@@ -82,118 +101,19 @@ export class WalletPnlService {
     return this.walletPricingService.inferMissingSwapPrices(pricedTrades);
   }
 
+  async getRealizedTradeMetrics(address: string): Promise<RealizedTradeMetrics[]> {
+    const pricedTrades = await this.getPricedTrades(address);
+
+    return this.analyzePricedTrades(pricedTrades).realizedTradeMetrics;
+  }
+
   async getPnL(address: string): Promise<WalletPnLResponse> {
     const pricedTrades = await this.getPricedTrades(address);
-    const sortedTrades = [...pricedTrades].sort(
-      (left, right) => left.timestamp - right.timestamp,
-    );
-    const buyQueues = new Map<string, FifoBuyLot[]>();
-    const realizedPnLByToken = new Map<string, number>();
-    const realizedCostBasisByToken = new Map<string, number>();
-    const sellStatsByToken = new Map<
-      string,
-      { wins: number; losses: number; bestTrade: number; worstTrade: number }
-    >();
-
-    for (const trade of sortedTrades) {
-      if (!realizedPnLByToken.has(trade.token)) {
-        realizedPnLByToken.set(trade.token, 0);
-      }
-
-      if (!realizedCostBasisByToken.has(trade.token)) {
-        realizedCostBasisByToken.set(trade.token, 0);
-      }
-
-      if (!sellStatsByToken.has(trade.token)) {
-        sellStatsByToken.set(trade.token, {
-          wins: 0,
-          losses: 0,
-          bestTrade: 0,
-          worstTrade: 0,
-        });
-      }
-
-      const amount = this.walletPricingService.parsePositiveNumber(
-        trade.amount,
-      );
-
-      if (amount === null || !this.isValidTradePrice(trade.price)) {
-        continue;
-      }
-
-      const queue = buyQueues.get(trade.token) ?? [];
-
-      if (trade.type === 'BUY') {
-        queue.push({
-          amount,
-          price: trade.price,
-        });
-        buyQueues.set(trade.token, queue);
-        continue;
-      }
-
-      let sellAmount = amount;
-      let sellPnL = 0;
-      let matchedAnyLots = false;
-
-      while (sellAmount > 0 && queue.length > 0) {
-        const oldestBuy = queue[0];
-        const matchedAmount = Math.min(sellAmount, oldestBuy.amount);
-        const currentPnL = realizedPnLByToken.get(trade.token) ?? 0;
-        const currentCostBasis =
-          realizedCostBasisByToken.get(trade.token) ?? 0;
-        const matchedPnL = (trade.price - oldestBuy.price) * matchedAmount;
-        const matchedCostBasis = oldestBuy.price * matchedAmount;
-
-        sellPnL = this.roundDecimal(sellPnL + matchedPnL);
-        matchedAnyLots = true;
-
-        realizedPnLByToken.set(
-          trade.token,
-          this.roundDecimal(currentPnL + matchedPnL),
-        );
-        realizedCostBasisByToken.set(
-          trade.token,
-          this.roundDecimal(currentCostBasis + matchedCostBasis),
-        );
-
-        oldestBuy.amount = this.roundDecimal(oldestBuy.amount - matchedAmount);
-        sellAmount = this.roundDecimal(sellAmount - matchedAmount);
-
-        if (oldestBuy.amount <= 0) {
-          queue.shift();
-        }
-      }
-
-      if (matchedAnyLots) {
-        const sellStats = sellStatsByToken.get(trade.token) ?? {
-          wins: 0,
-          losses: 0,
-          bestTrade: 0,
-          worstTrade: 0,
-        };
-
-        if (sellPnL > 0) {
-          sellStats.wins += 1;
-        } else {
-          sellStats.losses += 1;
-        }
-
-        if (sellStats.wins + sellStats.losses === 1) {
-          sellStats.bestTrade = sellPnL;
-          sellStats.worstTrade = sellPnL;
-        } else {
-          sellStats.bestTrade = Math.max(sellStats.bestTrade, sellPnL);
-          sellStats.worstTrade = Math.min(sellStats.worstTrade, sellPnL);
-        }
-
-        sellStatsByToken.set(trade.token, sellStats);
-      }
-
-      if (queue.length > 0) {
-        buyQueues.set(trade.token, queue);
-      }
-    }
+    const {
+      realizedPnLByToken,
+      realizedCostBasisByToken,
+      sellStatsByToken,
+    } = this.analyzePricedTrades(pricedTrades);
 
     return Object.fromEntries(
       Array.from(realizedPnLByToken.entries()).map(([token, realizedPnL]) => {
@@ -353,6 +273,143 @@ export class WalletPnlService {
 
   private isValidTradePrice(price: number): boolean {
     return Number.isFinite(price) && price >= 0;
+  }
+
+  private analyzePricedTrades(pricedTrades: PricedTrade[]): PricedTradeAnalysis {
+    const sortedTrades = [...pricedTrades].sort(
+      (left, right) => left.timestamp - right.timestamp,
+    );
+    const buyQueues = new Map<string, FifoBuyLot[]>();
+    const realizedTradeMetrics: RealizedTradeMetrics[] = [];
+    const realizedPnLByToken = new Map<string, number>();
+    const realizedCostBasisByToken = new Map<string, number>();
+    const sellStatsByToken = new Map<
+      string,
+      { wins: number; losses: number; bestTrade: number; worstTrade: number }
+    >();
+
+    for (const trade of sortedTrades) {
+      if (!realizedPnLByToken.has(trade.token)) {
+        realizedPnLByToken.set(trade.token, 0);
+      }
+
+      if (!realizedCostBasisByToken.has(trade.token)) {
+        realizedCostBasisByToken.set(trade.token, 0);
+      }
+
+      if (!sellStatsByToken.has(trade.token)) {
+        sellStatsByToken.set(trade.token, {
+          wins: 0,
+          losses: 0,
+          bestTrade: 0,
+          worstTrade: 0,
+        });
+      }
+
+      const amount = this.walletPricingService.parsePositiveNumber(
+        trade.amount,
+      );
+
+      if (amount === null || !this.isValidTradePrice(trade.price)) {
+        continue;
+      }
+
+      const queue = buyQueues.get(trade.token) ?? [];
+
+      if (trade.type === 'BUY') {
+        queue.push({
+          amount,
+          price: trade.price,
+        });
+        buyQueues.set(trade.token, queue);
+        continue;
+      }
+
+      let sellAmount = amount;
+      let sellPnL = 0;
+      let sellCostBasis = 0;
+      let sellProceeds = 0;
+      let matchedAnyLots = false;
+
+      while (sellAmount > 0 && queue.length > 0) {
+        const oldestBuy = queue[0];
+        const matchedAmount = Math.min(sellAmount, oldestBuy.amount);
+        const currentPnL = realizedPnLByToken.get(trade.token) ?? 0;
+        const currentCostBasis =
+          realizedCostBasisByToken.get(trade.token) ?? 0;
+        const matchedPnL = (trade.price - oldestBuy.price) * matchedAmount;
+        const matchedCostBasis = oldestBuy.price * matchedAmount;
+        const matchedProceeds = trade.price * matchedAmount;
+
+        sellPnL = this.roundDecimal(sellPnL + matchedPnL);
+        sellCostBasis = this.roundDecimal(sellCostBasis + matchedCostBasis);
+        sellProceeds = this.roundDecimal(sellProceeds + matchedProceeds);
+        matchedAnyLots = true;
+
+        realizedPnLByToken.set(
+          trade.token,
+          this.roundDecimal(currentPnL + matchedPnL),
+        );
+        realizedCostBasisByToken.set(
+          trade.token,
+          this.roundDecimal(currentCostBasis + matchedCostBasis),
+        );
+
+        oldestBuy.amount = this.roundDecimal(oldestBuy.amount - matchedAmount);
+        sellAmount = this.roundDecimal(sellAmount - matchedAmount);
+
+        if (oldestBuy.amount <= 0) {
+          queue.shift();
+        }
+      }
+
+      if (matchedAnyLots) {
+        const sellStats = sellStatsByToken.get(trade.token) ?? {
+          wins: 0,
+          losses: 0,
+          bestTrade: 0,
+          worstTrade: 0,
+        };
+
+        if (sellPnL > 0) {
+          sellStats.wins += 1;
+        } else {
+          sellStats.losses += 1;
+        }
+
+        if (sellStats.wins + sellStats.losses === 1) {
+          sellStats.bestTrade = sellPnL;
+          sellStats.worstTrade = sellPnL;
+        } else {
+          sellStats.bestTrade = Math.max(sellStats.bestTrade, sellPnL);
+          sellStats.worstTrade = Math.min(sellStats.worstTrade, sellPnL);
+        }
+
+        sellStatsByToken.set(trade.token, sellStats);
+        realizedTradeMetrics.push({
+          token: trade.token,
+          timestamp: trade.timestamp,
+          pnl: this.roundDecimal(sellPnL),
+          roi:
+            sellCostBasis > 0
+              ? this.roundDecimal((sellPnL / sellCostBasis) * 100)
+              : 0,
+          costBasis: this.roundDecimal(sellCostBasis),
+          proceeds: this.roundDecimal(sellProceeds),
+        });
+      }
+
+      if (queue.length > 0) {
+        buyQueues.set(trade.token, queue);
+      }
+    }
+
+    return {
+      realizedTradeMetrics,
+      realizedPnLByToken,
+      realizedCostBasisByToken,
+      sellStatsByToken,
+    };
   }
 
   private roundDecimal(value: number, decimals = 12): number {
