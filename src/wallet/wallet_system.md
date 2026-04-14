@@ -96,6 +96,7 @@ Responsibilities:
 - compute realized FIFO PnL per token
 - compute realized ROI, win rate, best trade, and worst trade
 - compute wallet summary metrics from stored transactions and realized PnL
+- classify profitable and losing tokens from realized PnL sign only, with zero-PnL tokens treated as neutral
 
 ### WalletPortfolioService
 
@@ -370,6 +371,13 @@ Current fields:
 - profitable token count
 - losing token count
 
+Important notes:
+
+- profitable token count is the number of tokens in the realized `/pnl` output with `realizedPnL > 0`
+- losing token count is the number of tokens in the realized `/pnl` output with `realizedPnL < 0`
+- tokens with `realizedPnL = 0` are neutral and excluded from both counts
+- profitable token count plus losing token count cannot exceed the number of traded tokens represented in `/pnl`
+
 ## 9. Main ingestion flow
 
 This is the flow behind `GET /wallet/:address`.
@@ -557,6 +565,15 @@ These are used for:
 - unrealized `pnl`
 - unrealized `roi`
 
+If live pricing is unavailable for a holding, market-derived fields do not fall back to zero.
+That holding returns:
+
+- `currentPrice = null`
+- `usdValue = null`
+- `pnl = null`
+- `roi = null`
+- `priceUnavailable = true`
+
 ### Step 3: rebuild current holding lots from normalized history
 
 The service refreshes history best-effort, then reads stored normalized transactions in chronological order.
@@ -592,13 +609,14 @@ This protects the analytics from minor ingestion gaps or stale stored state.
 
 For each currently held token:
 
-- `usdValue = amount * currentPrice`
+- `usdValue = amount * currentPrice` when `currentPrice` exists
 - `allocation = usdValue / totalPortfolioValue * 100`
 - `holdingSince` = timestamp of the oldest remaining lot
 - `holdingDays` = days between `holdingSince` and now
 - `avgBuyPrice` = weighted average acquisition price of remaining lots only
-- `pnl = (currentPrice - avgBuyPrice) * amount`
-- `roi = ((currentPrice - avgBuyPrice) / avgBuyPrice) * 100`
+- `pnl = (currentPrice - avgBuyPrice) * amount` when both `currentPrice` and `avgBuyPrice` exist
+- `roi = ((currentPrice - avgBuyPrice) / avgBuyPrice) * 100` when both `currentPrice` and `avgBuyPrice` exist
+- `priceUnavailable = true` when live price lookup fails for the holding
 
 Important behavior:
 
@@ -606,6 +624,7 @@ Important behavior:
 - partial sells preserve the original acquisition date and basis of remaining lot fragments
 - if no usable remaining lots exist, holding analytics return `null`
 - if average buy price is unknown, unrealized `pnl` and `roi` return `null`
+- if current price is unavailable, `currentPrice`, `usdValue`, `pnl`, and `roi` return `null` instead of implying a real zero market price
 
 ## 17. Average buy price rules
 
