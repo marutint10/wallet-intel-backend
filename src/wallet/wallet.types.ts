@@ -95,6 +95,13 @@ export interface WalletHoldTimeMetricsResponse {
   holdBuckets: WalletHoldTimeBuckets;
 }
 
+export interface WalletActivityMetricsResponse {
+  tradesPerDay: number;
+  avgTradeGapHours: number;
+  burstinessScore: number;
+  tradingSpanRatio: number;
+}
+
 export interface WalletRiskMetricsDebugResponse
   extends WalletRiskMetricsResponse {
   positivePnLTrades: number[];
