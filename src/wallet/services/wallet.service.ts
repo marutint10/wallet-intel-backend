@@ -3,6 +3,8 @@ import {
   Trade,
   WalletActivityMetricsResponse,
   WalletContextResponse,
+  WalletDexMetricsResponse,
+  WalletDexMetricsResult,
   WalletFeaturesResponse,
   WalletHoldingsResponse,
   WalletHoldTimeMetricsResponse,
@@ -82,6 +84,13 @@ export class WalletService {
 
   async getWalletContext(address: string): Promise<WalletContextResponse> {
     return this.walletContextService.getWalletContext(address);
+  }
+
+  async getDexMetrics(
+    address: string,
+    debug = false,
+  ): Promise<WalletDexMetricsResult> {
+    return this.walletAnalyticsService.getDexMetrics(address, debug);
   }
 
   async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {
