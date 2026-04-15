@@ -66,8 +66,8 @@ export class WalletPricingService {
   private static readonly DEFILLAMA_MAX_429_RETRIES = 2;
   private static readonly DEFILLAMA_429_BACKOFF_BASE_MS = 2000;
   private static readonly DEFILLAMA_429_WINDOW_MS = 10000;
-  private static readonly DEFILLAMA_429_THRESHOLD = 3;
-  private static readonly DEFILLAMA_COOLDOWN_MS = 30000;
+  private static readonly DEFILLAMA_429_THRESHOLD = 5;
+  private static readonly DEFILLAMA_COOLDOWN_MS = 15000;
   private static readonly PRICE_FETCH_SUMMARY_IDLE_MS = 1000;
   private readonly logger = new Logger(WalletPricingService.name);
   private readonly coinGeckoApiKey: string;
@@ -82,7 +82,7 @@ export class WalletPricingService {
   );
   private defiLlamaRequestSequence: Promise<void> = Promise.resolve();
   private lastDefiLlamaRequestStartedAt = 0;
-  private defiLlama429Timestamps: number[] = [];
+  private defiLlama429Timestamps = new Map<string, number>();
   private defiLlamaCooldownUntil = 0;
   private activePriceFetchCount = 0;
   private priceFetchSummaryTimeout: NodeJS.Timeout | null = null;
@@ -331,7 +331,7 @@ export class WalletPricingService {
     const cacheKey = this.buildPriceCacheKey(`defillama:${coinKey}`, timestamp);
 
     return this.fetchHistoricalPriceWithCache(cacheKey, async () => {
-      return this.fetchDefiLlamaPriceUncached(token, coinKey, timestamp);
+      return this.fetchDefiLlamaPriceUncached(token, coinKey, timestamp, cacheKey);
     });
   }
 
@@ -532,6 +532,7 @@ export class WalletPricingService {
     token: string,
     coinKey: string,
     timestamp: number,
+    cacheKey: string,
   ): Promise<HistoricalPriceFetchResult> {
     const url = `${DEFILLAMA_API_BASE_URL}/prices/historical/${timestamp}/${coinKey}`;
 
@@ -601,7 +602,7 @@ export class WalletPricingService {
         }
 
         if (axios.isAxiosError(error) && error.response?.status === 429) {
-          const cooldownActivated = this.recordDefiLlamaRateLimit();
+          const cooldownActivated = this.recordDefiLlamaRateLimit(cacheKey);
 
           this.logger.warn(
             `[DefiLlama] HTTP 429 for ${token} at ${timestamp} (attempt ${attempt + 1}/${WalletPricingService.DEFILLAMA_MAX_429_RETRIES + 1})`,
@@ -661,25 +662,36 @@ export class WalletPricingService {
   }
 
   private isDefiLlamaCooldownActive(): boolean {
-    return this.defiLlamaCooldownUntil > Date.now();
+    if (
+      this.defiLlamaCooldownUntil > 0 &&
+      this.defiLlamaCooldownUntil <= Date.now()
+    ) {
+      this.resetDefiLlamaRateLimitState();
+      return false;
+    }
+
+    if (this.defiLlamaCooldownUntil <= 0) {
+      this.pruneDefiLlamaRateLimitEntries(Date.now());
+      return false;
+    }
+
+    this.pruneDefiLlamaRateLimitEntries(Date.now());
+
+    return true;
   }
 
-  private recordDefiLlamaRateLimit(): boolean {
+  private recordDefiLlamaRateLimit(cacheKey: string): boolean {
     const now = Date.now();
-    const windowStart = now - WalletPricingService.DEFILLAMA_429_WINDOW_MS;
-
-    this.defiLlama429Timestamps = this.defiLlama429Timestamps.filter(
-      (timestamp) => timestamp >= windowStart,
-    );
-    this.defiLlama429Timestamps.push(now);
+    this.pruneDefiLlamaRateLimitEntries(now);
+    this.defiLlama429Timestamps.set(cacheKey, now);
 
     if (
-      this.defiLlama429Timestamps.length >=
+      this.defiLlama429Timestamps.size >=
       WalletPricingService.DEFILLAMA_429_THRESHOLD
     ) {
       this.defiLlamaCooldownUntil =
         now + WalletPricingService.DEFILLAMA_COOLDOWN_MS;
-      this.defiLlama429Timestamps = [];
+      this.defiLlama429Timestamps.clear();
 
       this.logger.warn(
         `[DefiLlama] Entering global cooldown for ${WalletPricingService.DEFILLAMA_COOLDOWN_MS}ms after repeated HTTP 429 responses`,
@@ -689,6 +701,21 @@ export class WalletPricingService {
     }
 
     return false;
+  }
+
+  private pruneDefiLlamaRateLimitEntries(now: number): void {
+    const windowStart = now - WalletPricingService.DEFILLAMA_429_WINDOW_MS;
+
+    for (const [cacheKey, timestamp] of this.defiLlama429Timestamps.entries()) {
+      if (timestamp < windowStart) {
+        this.defiLlama429Timestamps.delete(cacheKey);
+      }
+    }
+  }
+
+  private resetDefiLlamaRateLimitState(): void {
+    this.defiLlamaCooldownUntil = 0;
+    this.defiLlama429Timestamps.clear();
   }
 
   private async trackHistoricalPriceFetch(
