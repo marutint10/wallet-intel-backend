@@ -329,9 +329,13 @@ export type WalletScoreResult = WalletScoreResponse | WalletScoreDebugResponse;
 
 export interface WalletClassification {
   address: string;
+  type: string;
   primaryType: string;
   primaryScore: number;
   confidence: 'low' | 'medium' | 'high';
+  description: string;
+  traits: string[];
+  riskProfile: 'conservative' | 'moderate' | 'aggressive';
   secondaryTypes: string[];
   allScores: Record<string, number>;
   classifiedAt: string;
