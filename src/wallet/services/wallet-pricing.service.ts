@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import pLimit = require('p-limit');
 import { Trade } from '../wallet.types';
 
 interface CoinGeckoTokenPriceResponse {
@@ -34,6 +35,11 @@ interface DefiLlamaPriceResponse {
   };
 }
 
+interface HistoricalPriceFetchResult {
+  value: number | null;
+  shouldCache: boolean;
+}
+
 const COINGECKO_API_BASE_URL = 'https://api.coingecko.com/api/v3';
 const DEFILLAMA_API_BASE_URL = 'https://coins.llama.fi';
 
@@ -41,8 +47,17 @@ export type PricedTrade = Trade & { price: number };
 
 @Injectable()
 export class WalletPricingService {
+  private static readonly DEFILLAMA_MAX_CONCURRENCY = 5;
+  private static readonly DEFILLAMA_REQUEST_DELAY_MS = 100;
   private readonly logger = new Logger(WalletPricingService.name);
   private readonly coinGeckoApiKey: string;
+  private readonly priceCache = new Map<string, number | null>();
+  private readonly inFlightRequests = new Map<string, Promise<number | null>>();
+  private readonly defiLlamaLimiter = pLimit(
+    WalletPricingService.DEFILLAMA_MAX_CONCURRENCY,
+  );
+  private defiLlamaRequestSequence: Promise<void> = Promise.resolve();
+  private lastDefiLlamaRequestStartedAt = 0;
 
   constructor(private readonly configService: ConfigService) {
     this.coinGeckoApiKey =
@@ -255,50 +270,65 @@ export class WalletPricingService {
     contractAddress: string | undefined,
     timestamp: number,
   ): Promise<number> {
-    try {
-      const coinKey = this.buildDefiLlamaCoinKey(token, contractAddress);
+    const coinKey = this.buildDefiLlamaCoinKey(token, contractAddress);
 
-      if (!coinKey) {
-        this.logger.debug(`Cannot build DeFi Llama key for ${token}`);
-        return 0;
-      }
-
-      const url = `${DEFILLAMA_API_BASE_URL}/prices/historical/${timestamp}/${coinKey}`;
-      this.logger.debug(`[DefiLlama] GET ${url}`);
-
-      const response = await axios.get<DefiLlamaPriceResponse>(url, {
-        timeout: 10000,
-      });
-
-      const coinData = response.data?.coins?.[coinKey];
-      const price = coinData?.price;
-
-      if (typeof price === 'number' && price > 0) {
-        this.logger.debug(
-          `[DefiLlama] ${token} @ ${timestamp} = $${price} (confidence: ${coinData.confidence})`,
-        );
-        return price;
-      }
-
-      this.logger.debug(
-        `[DefiLlama] No price data for ${token} at ${timestamp}`,
-      );
-
-      return 0;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        this.logger.warn(
-          `[DefiLlama] HTTP ${error.response?.status ?? 'NO_RESPONSE'} for ${token} at ${timestamp}`,
-        );
-      } else {
-        this.logger.warn(
-          `[DefiLlama] Failed for ${token} at ${timestamp}`,
-          error instanceof Error ? error.stack : undefined,
-        );
-      }
-
+    if (!coinKey) {
+      this.logger.debug(`Cannot build DeFi Llama key for ${token}`);
       return 0;
     }
+
+    const cacheKey = this.buildPriceCacheKey(`defillama:${coinKey}`, timestamp);
+
+    return this.fetchHistoricalPriceWithCache(cacheKey, async () => {
+      try {
+        const url = `${DEFILLAMA_API_BASE_URL}/prices/historical/${timestamp}/${coinKey}`;
+        this.logger.debug(`[DefiLlama] GET ${url}`);
+
+        const response = await this.runDefiLlamaRequest(() =>
+          axios.get<DefiLlamaPriceResponse>(url, {
+            timeout: 10000,
+          }),
+        );
+
+        const coinData = response.data?.coins?.[coinKey];
+        const price = coinData?.price;
+
+        if (typeof price === 'number' && price > 0) {
+          this.logger.debug(
+            `[DefiLlama] ${token} @ ${timestamp} = $${price} (confidence: ${coinData.confidence})`,
+          );
+          return {
+            value: price,
+            shouldCache: true,
+          };
+        }
+
+        this.logger.debug(
+          `[DefiLlama] No price data for ${token} at ${timestamp}`,
+        );
+
+        return {
+          value: null,
+          shouldCache: true,
+        };
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          this.logger.warn(
+            `[DefiLlama] HTTP ${error.response?.status ?? 'NO_RESPONSE'} for ${token} at ${timestamp}`,
+          );
+        } else {
+          this.logger.warn(
+            `[DefiLlama] Failed for ${token} at ${timestamp}`,
+            error instanceof Error ? error.stack : undefined,
+          );
+        }
+
+        return {
+          value: null,
+          shouldCache: false,
+        };
+      }
+    });
   }
 
   private buildDefiLlamaCoinKey(
@@ -330,25 +360,37 @@ export class WalletPricingService {
       return 0;
     }
 
-    try {
-      const date = this.formatTradeDate(timestamp);
-      const response = await axios.get<CoinGeckoHistoricalPriceResponse>(
-        `${COINGECKO_API_BASE_URL}/coins/${coinId}/history`,
-        {
-          params: {
-            date,
-            localization: false,
-            x_cg_demo_api_key: this.coinGeckoApiKey,
-          },
-          timeout: 10000,
-        },
-      );
+    const cacheKey = this.buildPriceCacheKey(`coingecko:${coinId}`, timestamp);
 
-      return this.extractHistoricalUsdPrice(response.data);
-    } catch {
-      this.logger.warn(`[CoinGecko fallback] Failed for ${token}`);
-      return 0;
-    }
+    return this.fetchHistoricalPriceWithCache(cacheKey, async () => {
+      try {
+        const date = this.formatTradeDate(timestamp);
+        const response = await axios.get<CoinGeckoHistoricalPriceResponse>(
+          `${COINGECKO_API_BASE_URL}/coins/${coinId}/history`,
+          {
+            params: {
+              date,
+              localization: false,
+              x_cg_demo_api_key: this.coinGeckoApiKey,
+            },
+            timeout: 10000,
+          },
+        );
+
+        const price = this.extractHistoricalUsdPrice(response.data);
+
+        return {
+          value: price > 0 ? price : null,
+          shouldCache: true,
+        };
+      } catch {
+        this.logger.warn(`[CoinGecko fallback] Failed for ${token}`);
+        return {
+          value: null,
+          shouldCache: false,
+        };
+      }
+    });
   }
 
   private extractHistoricalUsdPrice(
@@ -366,5 +408,81 @@ export class WalletPricingService {
     const year = date.getUTCFullYear();
 
     return `${day}-${month}-${year}`;
+  }
+
+  private buildPriceCacheKey(tokenIdentifier: string, timestamp: number): string {
+    return `${tokenIdentifier}:${timestamp}`;
+  }
+
+  private async fetchHistoricalPriceWithCache(
+    cacheKey: string,
+    fetcher: () => Promise<HistoricalPriceFetchResult>,
+  ): Promise<number> {
+    if (this.priceCache.has(cacheKey)) {
+      return this.priceCache.get(cacheKey) ?? 0;
+    }
+
+    const inFlightRequest = this.inFlightRequests.get(cacheKey);
+
+    if (inFlightRequest) {
+      return (await inFlightRequest) ?? 0;
+    }
+
+    const request = (async (): Promise<number | null> => {
+      const result = await fetcher();
+
+      if (result.shouldCache) {
+        this.priceCache.set(cacheKey, result.value);
+      }
+
+      return result.value;
+    })();
+
+    this.inFlightRequests.set(cacheKey, request);
+
+    try {
+      return (await request) ?? 0;
+    } finally {
+      this.inFlightRequests.delete(cacheKey);
+    }
+  }
+
+  private async runDefiLlamaRequest<T>(
+    request: () => Promise<T>,
+  ): Promise<T> {
+    return this.defiLlamaLimiter(async () => {
+      await this.waitForDefiLlamaRequestSlot();
+      return request();
+    });
+  }
+
+  private async waitForDefiLlamaRequestSlot(): Promise<void> {
+    const previousSequence = this.defiLlamaRequestSequence;
+    let releaseSequence!: () => void;
+
+    this.defiLlamaRequestSequence = new Promise<void>((resolve) => {
+      releaseSequence = resolve;
+    });
+
+    await previousSequence;
+
+    const now = Date.now();
+    const waitMs = Math.max(
+      0,
+      this.lastDefiLlamaRequestStartedAt +
+        WalletPricingService.DEFILLAMA_REQUEST_DELAY_MS -
+        now,
+    );
+
+    if (waitMs > 0) {
+      await this.delay(waitMs);
+    }
+
+    this.lastDefiLlamaRequestStartedAt = Date.now();
+    releaseSequence();
+  }
+
+  private async delay(milliseconds: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 }
