@@ -29,6 +29,10 @@ Current capabilities:
 - return live enriched portfolio analytics
 - return DB-backed reconstructed balances as a ledger view
 - return wallet summary metrics
+- return wallet risk metrics
+- return wallet hold-time metrics from completed FIFO trade lots
+- return wallet activity metrics from stored trade history
+- return aggregated wallet features combining summary and analytics views
 
 ## 2. Current architecture
 
@@ -56,6 +60,19 @@ Responsibilities:
 - delegate ingestion calls to `WalletCoreService`
 - delegate PnL calls to `WalletPnlService`
 - delegate holdings, ledger, and portfolio calls to `WalletPortfolioService`
+- delegate risk, hold-time, and activity analytics to `WalletAnalyticsService`
+- compose the unified wallet features response from existing service methods
+
+### WalletAnalyticsService
+
+This is the wallet-level analytics layer.
+
+Responsibilities:
+
+- compute risk metrics from realized trade PnL and portfolio concentration
+- compute hold-time metrics from completed FIFO buy/sell lot matches only
+- compute activity metrics from chronologically ordered stored trades
+- expose reusable analytics methods for the facade and controller layer
 
 ### WalletCoreService
 
@@ -95,6 +112,7 @@ Responsibilities:
 - attach historical prices to trades
 - compute realized FIFO PnL per token
 - compute realized ROI, win rate, best trade, and worst trade
+- expose completed FIFO matched trade lots for downstream analytics reuse
 - compute wallet summary metrics from stored transactions and realized PnL
 - classify profitable and losing tokens from realized PnL sign only, with zero-PnL tokens treated as neutral
 
@@ -378,6 +396,81 @@ Important notes:
 - tokens with `realizedPnL = 0` are neutral and excluded from both counts
 - profitable token count plus losing token count cannot exceed the number of traded tokens represented in `/pnl`
 
+### GET /wallet/:address/features
+
+Returns a nested wallet features response built from existing service methods.
+
+Current shape:
+
+- `summary`
+- `risk`
+- `holdTime`
+- `activity`
+
+Important notes:
+
+- this endpoint reuses the same summary and analytics methods used by the dedicated endpoints
+- the `risk` block returns the base risk response shape, not the optional debug extension
+
+### GET /wallet/:address/risk-metrics
+
+Returns wallet-level risk metrics derived from realized trades and current portfolio concentration.
+
+Current fields:
+
+- `profitFactor`
+- `maxDrawdown`
+- `returnStdDev`
+- `concentrationRisk`
+
+Current behavior notes:
+
+- if total positive realized PnL is greater than `0` and there are no losing trades, `profitFactor` returns capped value `10`
+- if both positive and negative realized PnL totals are `0`, `profitFactor` returns `0`
+- `GET /wallet/:address/risk-metrics?debug=true` returns the base response plus intermediate arrays and concentration inputs used for inspection
+
+### GET /wallet/:address/hold-time-metrics
+
+Returns hold-duration analytics for completed FIFO trade lots only.
+
+Current fields:
+
+- `avgHoldHours`
+- `medianHoldHours`
+- `holdBuckets`
+
+Current hold buckets:
+
+- `under1h`
+- `under24h`
+- `under7d`
+- `over7d`
+
+Important notes:
+
+- open or still-unclosed positions are ignored
+- chronological ordering is preserved by reusing the FIFO pairing flow from realized PnL processing
+
+### GET /wallet/:address/activity-metrics
+
+Returns trade-frequency and activity metrics built from stored trades.
+
+Current fields:
+
+- `tradesPerActiveDay`
+- `tradesPerLifetimeDay`
+- `avgTradeGapHours`
+- `burstinessScore`
+- `tradingSpanRatio`
+
+Current behavior notes:
+
+- `tradesPerActiveDay = total trades / active trading days`
+- `tradesPerLifetimeDay = total trades / wallet age in days`
+- `avgTradeGapHours` uses consecutive chronological trade gaps only
+- `burstinessScore = stddev(gaps) / mean(gaps)` with divide-by-zero protection
+- `tradingSpanRatio = (last trade timestamp - first trade timestamp) / wallet age`
+
 ## 9. Main ingestion flow
 
 This is the flow behind `GET /wallet/:address`.
@@ -537,6 +630,8 @@ The service also tracks:
 This endpoint is strictly realized PnL.
 It does not calculate unrealized position performance.
 
+Completed FIFO lot matches from this same queueing logic are also reused by `WalletAnalyticsService` for hold-time analytics.
+
 ## 16. Live portfolio analytics flow
 
 `WalletPortfolioService.getPortfolio()` is the enriched live holdings pipeline.
@@ -649,7 +744,8 @@ Current resilience rules:
 - Moralis client uses timeouts
 - Moralis history fetch retries once
 - cached DB data is used when refresh fails
-- current pricing failures degrade to zero price instead of crashing the whole response
+- missing historical trade pricing can remain `0`, and one missing swap leg may still be inferred from its priced counterpart
+- live holdings pricing failures do not force zero-valued market fields; portfolio items return `null` market-derived values and `priceUnavailable = true`
 - transfer-in estimated basis falls back to `null` when unsupported
 - duplicate inserts are ignored safely
 
@@ -681,12 +777,13 @@ Production should move to migrations.
 
 ## 20. Suggested mental model
 
-Think of the module as four layers:
+Think of the module as five layers:
 
 1. provider ingestion
 2. normalization and storage
 3. realized trade analytics
-4. live holdings and portfolio analytics
+4. wallet-level analytics
+5. live holdings and portfolio analytics
 
 That mental model matches the current service split.
 
@@ -699,9 +796,10 @@ Recommended reading order for a new developer:
 3. `src/wallet/services/wallet-core.service.ts`
 4. `src/wallet/services/wallet-pricing.service.ts`
 5. `src/wallet/services/wallet-pnl.service.ts`
-6. `src/wallet/services/wallet-portfolio.service.ts`
-7. `src/wallet/transaction.entity.ts`
-8. `src/wallet/wallet.types.ts`
+6. `src/wallet/services/wallet-analytics.service.ts`
+7. `src/wallet/services/wallet-portfolio.service.ts`
+8. `src/wallet/transaction.entity.ts`
+9. `src/wallet/wallet.types.ts`
 
 ## 22. Update rule for this document
 
@@ -713,6 +811,7 @@ Whenever any of the following change, update this file in the same task:
 - transaction classification logic
 - pricing lookup order
 - FIFO lot logic
+- wallet analytics fields and aggregation behavior
 - cost basis logic
 - portfolio analytics fields
 - database schema for wallet data
