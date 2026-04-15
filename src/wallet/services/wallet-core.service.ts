@@ -827,7 +827,7 @@ export class WalletCoreService {
 
     do {
       try {
-        const response = await this.callMoralisWithRetry(() =>
+        const response = await this.callMoralisWithRetry((apiKey) =>
           this.moralisClient.get<MoralisPaginatedResponse<T>>(path, {
             params: {
               chain: 'eth',
@@ -835,6 +835,7 @@ export class WalletCoreService {
               limit: 100,
               ...(cursor ? { cursor } : {}),
             },
+            headers: this.buildMoralisHeaders(apiKey),
           }),
         );
 
