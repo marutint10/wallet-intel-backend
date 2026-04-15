@@ -163,6 +163,110 @@ export interface WalletFeaturesResponse {
   activity: WalletActivityMetricsResponse;
 }
 
+export type WalletScoreConfidence = 'low' | 'medium' | 'high';
+
+export type WalletScoreGateStatus =
+  | 'Eligible'
+  | 'Not a Trader Wallet'
+  | 'Insufficient Data'
+  | 'No Trading Activity';
+
+export type WalletScoreBand =
+  | 'Unscored'
+  | 'Poor'
+  | 'Early'
+  | 'Developing'
+  | 'Skilled'
+  | 'Advanced'
+  | 'Elite';
+
+export interface WalletScoreDimensionBreakdown {
+  score: number;
+  maxScore: number;
+}
+
+export interface WalletScoreBreakdown {
+  profitability: WalletScoreDimensionBreakdown;
+  consistency: WalletScoreDimensionBreakdown;
+  riskManagement: WalletScoreDimensionBreakdown;
+  portfolioQuality: WalletScoreDimensionBreakdown;
+  experience: WalletScoreDimensionBreakdown;
+}
+
+export interface WalletScoreResponse {
+  address: string;
+  score: number;
+  confidence: WalletScoreConfidence;
+  band: WalletScoreBand;
+  breakdown: WalletScoreBreakdown;
+  gateStatus: WalletScoreGateStatus;
+  scoredAt: string;
+}
+
+export interface WalletScoreMetricDebug {
+  value: number;
+  score: number;
+  weightedContribution: number;
+}
+
+export interface WalletScoreDimensionDebugSummary {
+  raw: number;
+  final: number;
+  maxScore: number;
+}
+
+export interface WalletScoreProfitabilityDebug
+  extends WalletScoreDimensionDebugSummary {
+  totalRealizedPnL: WalletScoreMetricDebug;
+  avgROI: WalletScoreMetricDebug;
+  avgWinRate: WalletScoreMetricDebug;
+}
+
+export interface WalletScoreConsistencyDebug
+  extends WalletScoreDimensionDebugSummary {
+  tradingSpanRatio: WalletScoreMetricDebug;
+  burstinessScore: WalletScoreMetricDebug;
+  profitableTokenRate: WalletScoreMetricDebug;
+}
+
+export interface WalletScoreRiskManagementDebug
+  extends WalletScoreDimensionDebugSummary {
+  profitFactor: WalletScoreMetricDebug;
+  maxDrawdown: WalletScoreMetricDebug;
+  concentrationRisk: WalletScoreMetricDebug;
+  returnStdDev: WalletScoreMetricDebug;
+}
+
+export interface WalletScorePortfolioDebug
+  extends WalletScoreDimensionDebugSummary {
+  qualityAssetPercent: WalletScoreMetricDebug;
+  profitableTokenPercent: WalletScoreMetricDebug;
+  categoryDiversity: WalletScoreMetricDebug;
+  uniqueTokens: WalletScoreMetricDebug;
+  avgHoldHours: WalletScoreMetricDebug;
+}
+
+export interface WalletScoreExperienceDebug
+  extends WalletScoreDimensionDebugSummary {
+  totalSwaps: WalletScoreMetricDebug;
+  tradingSpanDays: WalletScoreMetricDebug;
+  dexDiversity: WalletScoreMetricDebug;
+}
+
+export interface WalletScoreDebugData {
+  profitability: WalletScoreProfitabilityDebug;
+  consistency: WalletScoreConsistencyDebug;
+  riskManagement: WalletScoreRiskManagementDebug;
+  portfolio: WalletScorePortfolioDebug;
+  experience: WalletScoreExperienceDebug;
+}
+
+export interface WalletScoreDebugResponse extends WalletScoreResponse {
+  debug: WalletScoreDebugData;
+}
+
+export type WalletScoreResult = WalletScoreResponse | WalletScoreDebugResponse;
+
 export interface WalletRiskMetricsDebugResponse
   extends WalletRiskMetricsResponse {
   positivePnLTrades: number[];
