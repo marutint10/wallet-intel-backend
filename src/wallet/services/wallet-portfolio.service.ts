@@ -9,7 +9,7 @@ import {
   WalletPortfolioResponse,
   WalletTokenFlowResponse,
 } from '../wallet.types';
-import { WalletCoreService } from './wallet-core.service';
+import { MoralisKeysExhaustedError, WalletCoreService } from './wallet-core.service';
 import { WalletPricingService } from './wallet-pricing.service';
 
 interface HoldingLot {
@@ -30,6 +30,16 @@ interface AlignedHoldingLots {
   fullyCovered: boolean;
 }
 
+interface HoldingsLoadResult {
+  holdings: WalletHoldingsResponse;
+  balancesAvailable: boolean;
+}
+
+export interface PortfolioLoadResult {
+  portfolio: WalletPortfolioResponse;
+  balancesAvailable: boolean;
+}
+
 @Injectable()
 export class WalletPortfolioService {
   private readonly logger = new Logger(WalletPortfolioService.name);
@@ -40,92 +50,83 @@ export class WalletPortfolioService {
   ) {}
 
   async getHoldings(address: string): Promise<WalletHoldingsResponse> {
-    const [nativeBalance, erc20Balances] = await Promise.all([
-      this.walletCoreService.getNativeBalance(address),
-      this.walletCoreService.getErc20Balances(address),
-    ]);
-
-    const holdings: WalletHoldingsResponse = [];
-    const nativeRawBalance = this.parseRawAmount(nativeBalance.balance);
-
-    if (nativeRawBalance && nativeRawBalance > 0n) {
-      holdings.push({
-        token: 'ETH',
-        amount: this.formatTokenBalance(nativeRawBalance, 18),
-        decimals: 18,
-      });
-    }
-
-    for (const balance of erc20Balances) {
-      const rawAmount = this.parseRawAmount(balance.balance);
-
-      if (!rawAmount || rawAmount === 0n) {
-        continue;
-      }
-
-      const decimals = this.toSafeDecimals(balance.decimals);
-
-      holdings.push({
-        token: this.resolveTokenLabel(balance),
-        amount: this.formatTokenBalance(rawAmount, decimals),
-        contractAddress: balance.token_address?.toLowerCase(),
-        decimals,
-      });
-    }
+    const { holdings } = await this.getHoldingsWithAvailability(address);
 
     return holdings;
   }
 
   async getPortfolio(address: string): Promise<WalletPortfolioResponse> {
-    const holdings = await this.getHoldings(address);
+    const { portfolio } = await this.getPortfolioWithAvailability(address);
+
+    return portfolio;
+  }
+
+  async getPortfolioWithAvailability(
+    address: string,
+  ): Promise<PortfolioLoadResult> {
+    const { holdings, balancesAvailable } =
+      await this.getHoldingsWithAvailability(address);
+
+    if (!balancesAvailable) {
+      return {
+        portfolio: [],
+        balancesAvailable: false,
+      };
+    }
+
     const [{ ethPrice, tokenPrices }, holdingAnalytics] = await Promise.all([
       this.fetchHoldingPrices(holdings),
       this.buildHoldingAnalyticsMap(address, holdings),
     ]);
-    const holdingsWithUsd = holdings.map((holding) => ({
-      holding,
-      currentPrice: this.getCurrentHoldingPrice(holding, ethPrice, tokenPrices),
-    })).map(({ holding, currentPrice }) => ({
-      holding,
-      currentPrice,
-      usdValue: this.computeHoldingUsdValue(holding.amount, currentPrice),
-    }));
+    const holdingsWithUsd = holdings
+      .map((holding) => ({
+        holding,
+        currentPrice: this.getCurrentHoldingPrice(holding, ethPrice, tokenPrices),
+      }))
+      .map(({ holding, currentPrice }) => ({
+        holding,
+        currentPrice,
+        usdValue: this.computeHoldingUsdValue(holding.amount, currentPrice),
+      }));
     const totalPortfolioValue = holdingsWithUsd.reduce(
       (total, entry) => this.addDecimalStrings(total, entry.usdValue ?? '0'),
       '0',
     );
 
-    return holdingsWithUsd.map(({ holding, currentPrice, usdValue }) => {
-      const analytics =
-        holdingAnalytics.get(
-          this.getHoldingKey(holding.token, holding.contractAddress),
-        ) ?? null;
-      const priceUnavailable = currentPrice === null;
-      const unrealizedPnl = this.computeUnrealizedPnl(
-        holding.amount,
-        currentPrice,
-        analytics?.avgBuyPrice ?? null,
-      );
-
-      return {
-        token: holding.token,
-        amount: holding.amount,
-        usdValue,
-        allocation: this.computeAllocationPercentage(usdValue, totalPortfolioValue),
-        holdingSince: analytics?.holdingSince ?? null,
-        holdingDays: analytics?.holdingDays ?? null,
-        avgBuyPrice: analytics?.avgBuyPrice ?? null,
-        currentPrice,
-        pnl: unrealizedPnl,
-        roi: this.computeUnrealizedRoi(
+    return {
+      portfolio: holdingsWithUsd.map(({ holding, currentPrice, usdValue }) => {
+        const analytics =
+          holdingAnalytics.get(
+            this.getHoldingKey(holding.token, holding.contractAddress),
+          ) ?? null;
+        const priceUnavailable = currentPrice === null;
+        const unrealizedPnl = this.computeUnrealizedPnl(
+          holding.amount,
           currentPrice,
           analytics?.avgBuyPrice ?? null,
-        ),
-        priceUnavailable,
-        decimals: holding.decimals,
-        contractAddress: holding.contractAddress,
-      };
-    });
+        );
+
+        return {
+          token: holding.token,
+          amount: holding.amount,
+          usdValue,
+          allocation: this.computeAllocationPercentage(usdValue, totalPortfolioValue),
+          holdingSince: analytics?.holdingSince ?? null,
+          holdingDays: analytics?.holdingDays ?? null,
+          avgBuyPrice: analytics?.avgBuyPrice ?? null,
+          currentPrice,
+          pnl: unrealizedPnl,
+          roi: this.computeUnrealizedRoi(
+            currentPrice,
+            analytics?.avgBuyPrice ?? null,
+          ),
+          priceUnavailable,
+          decimals: holding.decimals,
+          contractAddress: holding.contractAddress,
+        };
+      }),
+      balancesAvailable: true,
+    };
   }
 
   async getLedger(address: string): Promise<WalletLedgerResponse> {
@@ -238,6 +239,63 @@ export class WalletPortfolioService {
         (BigInt(amounts.in) - BigInt(amounts.out)).toString(),
       ]),
     );
+  }
+
+  private async getHoldingsWithAvailability(
+    address: string,
+  ): Promise<HoldingsLoadResult> {
+    try {
+      const [nativeBalance, erc20Balances] = await Promise.all([
+        this.walletCoreService.getNativeBalance(address),
+        this.walletCoreService.getErc20Balances(address),
+      ]);
+
+      const holdings: WalletHoldingsResponse = [];
+      const nativeRawBalance = this.parseRawAmount(nativeBalance.balance);
+
+      if (nativeRawBalance && nativeRawBalance > 0n) {
+        holdings.push({
+          token: 'ETH',
+          amount: this.formatTokenBalance(nativeRawBalance, 18),
+          decimals: 18,
+        });
+      }
+
+      for (const balance of erc20Balances) {
+        const rawAmount = this.parseRawAmount(balance.balance);
+
+        if (!rawAmount || rawAmount === 0n) {
+          continue;
+        }
+
+        const decimals = this.toSafeDecimals(balance.decimals);
+
+        holdings.push({
+          token: this.resolveTokenLabel(balance),
+          amount: this.formatTokenBalance(rawAmount, decimals),
+          contractAddress: balance.token_address?.toLowerCase(),
+          decimals,
+        });
+      }
+
+      return {
+        holdings,
+        balancesAvailable: true,
+      };
+    } catch (error) {
+      if (error instanceof MoralisKeysExhaustedError) {
+        this.logger.warn(
+          'Moralis balances unavailable because all API keys are exhausted; returning empty holdings data',
+        );
+
+        return {
+          holdings: [],
+          balancesAvailable: false,
+        };
+      }
+
+      throw error;
+    }
   }
 
   private formatHumanReadableBalance(net: bigint, decimals: number): string {

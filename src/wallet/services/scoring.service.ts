@@ -65,7 +65,7 @@ export class WalletScoringService {
 		address: string,
 		debug = false,
 	): Promise<WalletScoreResult> {
-		const [context, summary, activity, risk, holdTime, tokenCategories, dexMetrics, trades, portfolio] =
+		const [context, summary, activity, risk, holdTime, tokenCategories, dexMetrics, trades, portfolioResult] =
 			await Promise.all([
 				this.walletContextService.getWalletContext(address),
 				this.walletPnlService.getWalletSummary(address),
@@ -75,8 +75,10 @@ export class WalletScoringService {
 				this.walletAnalyticsService.getTokenCategoryMetrics(address),
 				this.walletAnalyticsService.getDexMetrics(address),
 				this.walletPnlService.getTrades(address),
-				this.walletPortfolioService.getPortfolio(address),
+				this.walletPortfolioService.getPortfolioWithAvailability(address),
 			]);
+
+		const { portfolio, balancesAvailable } = portfolioResult;
 
 		const tradingSpanDays = this.computeTradingSpanDays(trades);
 		const confidence = this.computeConfidence(
@@ -94,6 +96,7 @@ export class WalletScoringService {
 				band: 'Unscored',
 				breakdown: this.createEmptyBreakdown(),
 				gateStatus,
+				balancesAvailable,
 				scoredAt,
 			};
 
@@ -153,6 +156,7 @@ export class WalletScoringService {
 			band: this.resolveBand(score),
 			breakdown,
 			gateStatus,
+			balancesAvailable,
 			scoredAt,
 		};
 

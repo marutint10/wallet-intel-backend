@@ -15,7 +15,10 @@ const parseNumber = (value: string | undefined, fallback: number): number => {
 export default () => ({
   port: parseInt(process.env.PORT ?? '3000', 10),
   moralis: {
-    apiKey: process.env.MORALIS_API_KEY ?? '',
+    apiKey: process.env.MORALIS_API_KEY ?? process.env.MORALIS_API_KEY_1 ?? '',
+    apiKey1: process.env.MORALIS_API_KEY_1 ?? process.env.MORALIS_API_KEY ?? '',
+    apiKey2:
+      process.env.MORALIS_API_KEY_2 ?? process.env.MORALIS_API_URL_2 ?? '',
   },
   coingecko: {
     apiKey: process.env.COINGECKO_API_KEY ?? '',

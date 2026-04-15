@@ -17,6 +17,12 @@ import {
 } from '../wallet.types';
 import { TransactionEntity } from '../transaction.entity';
 
+export class MoralisKeysExhaustedError extends Error {
+  constructor() {
+    super('All Moralis API keys exhausted');
+  }
+}
+
 interface MoralisPaginatedResponse<T> {
   cursor?: string | null;
   page?: string;
@@ -123,23 +129,32 @@ function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
 
 @Injectable()
 export class WalletCoreService {
+  private static readonly MORALIS_RETRY_DELAY_MS = 500;
+  private static readonly MORALIS_KEY_EXHAUSTED_WINDOW_MS = 60 * 60 * 1000;
   private readonly logger = new Logger(WalletCoreService.name);
-  private readonly moralisApiKey: string;
+  private readonly moralisApiKey1: string;
+  private readonly moralisApiKey2: string;
   private readonly moralisClient: AxiosInstance;
+  private activeKeyIndex = 0;
+  private key1ExhaustedAt: number | null = null;
+  private key2ExhaustedAt: number | null = null;
 
   constructor(
     private readonly configService: ConfigService,
     @InjectRepository(TransactionEntity)
     private readonly transactionRepo: Repository<TransactionEntity>,
   ) {
-    this.moralisApiKey = this.configService.get<string>('moralis.apiKey') ?? '';
+    this.moralisApiKey1 = this.configService.get<string>('moralis.apiKey1') ?? '';
+    this.moralisApiKey2 = this.configService.get<string>('moralis.apiKey2') ?? '';
+    this.activeKeyIndex = this.resolveInitialActiveKeyIndex();
+
+    this.logger.log(`Moralis keys configured: ${this.getConfiguredMoralisKeyCount()}`);
 
     this.moralisClient = axios.create({
       baseURL: 'https://deep-index.moralis.io/api/v2.2',
       timeout: 15000,
       headers: {
         Accept: 'application/json',
-        'X-API-Key': this.moralisApiKey,
       },
     });
   }
@@ -148,13 +163,14 @@ export class WalletCoreService {
     this.ensureMoralisApiKey();
 
     try {
-      const response = await this.callMoralisWithRetry(() =>
+      const response = await this.callMoralisWithRetry((apiKey) =>
         this.moralisClient.get<MoralisNativeBalanceResponse>(
           `/${address}/balance`,
           {
             params: {
               chain: 'eth',
             },
+            headers: this.buildMoralisHeaders(apiKey),
           },
         ),
       );
@@ -162,6 +178,11 @@ export class WalletCoreService {
       return response.data;
     } catch (error) {
       this.logMoralisRequestFailure('native balance', error);
+
+      if (error instanceof MoralisKeysExhaustedError) {
+        throw error;
+      }
+
       throw new BadGatewayException('Unable to fetch wallet holdings');
     }
   }
@@ -170,17 +191,23 @@ export class WalletCoreService {
     this.ensureMoralisApiKey();
 
     try {
-      const response = await this.callMoralisWithRetry(() =>
+      const response = await this.callMoralisWithRetry((apiKey) =>
         this.moralisClient.get<MoralisErc20Balance[]>(`/${address}/erc20`, {
           params: {
             chain: 'eth',
           },
+          headers: this.buildMoralisHeaders(apiKey),
         }),
       );
 
       return Array.isArray(response.data) ? response.data : [];
     } catch (error) {
       this.logMoralisRequestFailure('ERC-20 balances', error);
+
+      if (error instanceof MoralisKeysExhaustedError) {
+        throw error;
+      }
+
       throw new BadGatewayException('Unable to fetch wallet holdings');
     }
   }
@@ -410,8 +437,10 @@ export class WalletCoreService {
   }
 
   private ensureMoralisApiKey(): void {
-    if (!this.moralisApiKey) {
-      throw new InternalServerErrorException('MORALIS_API_KEY is not configured');
+    if (!this.getMoralisApiKey(0) && !this.getMoralisApiKey(1)) {
+      throw new InternalServerErrorException(
+        'No Moralis API keys are configured',
+      );
     }
   }
 
@@ -847,15 +876,55 @@ export class WalletCoreService {
     return items;
   }
 
-  private async callMoralisWithRetry<T>(fn: () => Promise<T>): Promise<T> {
-    try {
-      return await fn();
-    } catch (error) {
-      this.logger.warn('Moralis failed, retrying once...');
+  private async callMoralisWithRetry<T>(
+    fn: (apiKey: string) => Promise<T>,
+  ): Promise<T> {
+    this.ensureMoralisApiKey();
 
-      await new Promise((resolve) => setTimeout(resolve, 500));
+    let keyIndex = this.getAvailableKeyIndex(this.activeKeyIndex);
 
-      return fn();
+    if (keyIndex === null) {
+      this.logger.error('All Moralis API keys exhausted');
+      throw new MoralisKeysExhaustedError();
+    }
+
+    this.activeKeyIndex = keyIndex;
+    let hasRetriedTransientError = false;
+
+    while (true) {
+      const apiKey = this.getMoralisApiKey(keyIndex);
+
+      try {
+        return await fn(apiKey);
+      } catch (error) {
+        if (this.isMoralisQuotaExhausted(error)) {
+          this.markKeyExhausted(keyIndex);
+
+          const nextKeyIndex = this.getAvailableKeyIndex(keyIndex === 0 ? 1 : 0);
+
+          if (nextKeyIndex !== null && nextKeyIndex !== keyIndex) {
+            this.logger.warn(
+              `Moralis API key ${keyIndex + 1} exhausted, switching to key ${nextKeyIndex + 1}`,
+            );
+            this.activeKeyIndex = nextKeyIndex;
+            keyIndex = nextKeyIndex;
+            hasRetriedTransientError = false;
+            continue;
+          }
+
+          this.logger.error('All Moralis API keys exhausted');
+          throw new MoralisKeysExhaustedError();
+        }
+
+        if (!hasRetriedTransientError && this.isMoralisTransientError(error)) {
+          hasRetriedTransientError = true;
+          this.logger.warn('Moralis failed, retrying once with the same key...');
+          await this.delay(WalletCoreService.MORALIS_RETRY_DELAY_MS);
+          continue;
+        }
+
+        throw error;
+      }
     }
   }
 
@@ -923,6 +992,11 @@ export class WalletCoreService {
   }
 
   private logMoralisRequestFailure(operation: string, error: unknown): void {
+    if (error instanceof MoralisKeysExhaustedError) {
+      this.logger.error(`${operation} unavailable: All Moralis API keys exhausted`);
+      return;
+    }
+
     if (axios.isAxiosError(error)) {
       const status = error.response?.status;
       const message = this.extractMoralisMessage(error);
@@ -934,5 +1008,90 @@ export class WalletCoreService {
     }
 
     this.logger.error(`Moralis failed for ${operation}`);
+  }
+
+  private resolveInitialActiveKeyIndex(): number {
+    return this.getAvailableKeyIndex(0) ?? 0;
+  }
+
+  private getConfiguredMoralisKeyCount(): number {
+    return [this.moralisApiKey1, this.moralisApiKey2].filter(
+      (apiKey) => apiKey.length > 0,
+    ).length;
+  }
+
+  private getMoralisApiKey(index: number): string {
+    return index === 0 ? this.moralisApiKey1 : this.moralisApiKey2;
+  }
+
+  private buildMoralisHeaders(apiKey: string): Record<string, string> {
+    return {
+      'X-API-Key': apiKey,
+    };
+  }
+
+  private getAvailableKeyIndex(preferredIndex: number): number | null {
+    const orderedIndices = preferredIndex === 1 ? [1, 0] : [0, 1];
+
+    for (const index of orderedIndices) {
+      if (!this.getMoralisApiKey(index)) {
+        continue;
+      }
+
+      if (this.isKeyRecentlyExhausted(index)) {
+        continue;
+      }
+
+      return index;
+    }
+
+    return null;
+  }
+
+  private isKeyRecentlyExhausted(index: number): boolean {
+    const exhaustedAt = index === 0 ? this.key1ExhaustedAt : this.key2ExhaustedAt;
+
+    if (exhaustedAt === null) {
+      return false;
+    }
+
+    return Date.now() - exhaustedAt < WalletCoreService.MORALIS_KEY_EXHAUSTED_WINDOW_MS;
+  }
+
+  private markKeyExhausted(index: number): void {
+    const exhaustedAt = Date.now();
+
+    if (index === 0) {
+      this.key1ExhaustedAt = exhaustedAt;
+      return;
+    }
+
+    this.key2ExhaustedAt = exhaustedAt;
+  }
+
+  private isMoralisQuotaExhausted(error: unknown): boolean {
+    return axios.isAxiosError(error) && error.response?.status === 401;
+  }
+
+  private isMoralisTransientError(error: unknown): boolean {
+    if (!axios.isAxiosError(error)) {
+      return false;
+    }
+
+    const status = error.response?.status;
+
+    if (status === 429 || (typeof status === 'number' && status >= 500)) {
+      return true;
+    }
+
+    return (
+      !error.response ||
+      error.code === 'ECONNABORTED' ||
+      error.code === 'ETIMEDOUT'
+    );
+  }
+
+  private async delay(milliseconds: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 }

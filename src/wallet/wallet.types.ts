@@ -200,6 +200,7 @@ export interface WalletScoreResponse {
   band: WalletScoreBand;
   breakdown: WalletScoreBreakdown;
   gateStatus: WalletScoreGateStatus;
+  balancesAvailable: boolean;
   scoredAt: string;
 }
 
