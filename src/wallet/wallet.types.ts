@@ -271,6 +271,16 @@ export interface WalletScoreDebugResponse extends WalletScoreResponse {
 
 export type WalletScoreResult = WalletScoreResponse | WalletScoreDebugResponse;
 
+export interface WalletClassification {
+  address: string;
+  primaryType: string;
+  primaryScore: number;
+  confidence: 'low' | 'medium' | 'high';
+  secondaryTypes: string[];
+  allScores: Record<string, number>;
+  classifiedAt: string;
+}
+
 export interface WalletRiskMetricsDebugResponse
   extends WalletRiskMetricsResponse {
   positivePnLTrades: number[];
