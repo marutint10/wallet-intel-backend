@@ -41,11 +41,6 @@ interface InvertedScoreBracket {
 	score: number;
 }
 
-interface PortfolioQualityScoreResult {
-	score: number;
-	debug: WalletScorePortfolioDebug;
-}
-
 interface ScoreDimensionResult<TDebug extends WalletScoreDimensionDebugSummary> {
 	score: number;
 	debug: TDebug;
@@ -118,12 +113,13 @@ export class WalletScoringService {
 			tokenCategories,
 			portfolio,
 		);
-		const profitabilityResult = this.scoreProfitability(summary);
-		const consistencyResult = this.scoreConsistency(summary, activity);
-		const riskManagementResult = this.scoreRiskManagement(risk);
+		const profitabilityResult = this.scoreProfitability(summary, risk);
+		const consistencyResult = this.scoreConsistency(summary, activity, risk);
+		const riskManagementResult = this.scoreRiskManagement(risk, summary, tokenCategories);
 		const experienceResult = this.scoreExperience(
 			summary,
 			tradingSpanDays,
+			activity,
 			dexMetrics,
 		);
 
@@ -213,38 +209,50 @@ export class WalletScoringService {
 
 	private scoreProfitability(
 		summary: WalletSummaryResponse,
+		risk: WalletRiskMetricsResponse,
 	): ScoreDimensionResult<WalletScoreProfitabilityDebug> {
 		const totalRealizedPnL = this.createMetricDebug(
 			summary.totalRealizedPnL,
 			this.bracketScore(summary.totalRealizedPnL, [
-				{ min: 5000, score: 12 },
-				{ min: 1000, score: 9 },
-				{ min: 100, score: 6 },
-				{ min: 1, score: 3 },
+				{ min: 5000, score: 10 },
+				{ min: 1000, score: 7 },
+				{ min: 100, score: 4 },
+				{ min: 1, score: 2 },
 			]),
 		);
 		const avgROI = this.createMetricDebug(
 			summary.avgROI,
 			this.bracketScore(summary.avgROI, [
-				{ min: 50, score: 10 },
+				{ min: 50, score: 9 },
 				{ min: 25, score: 7 },
 				{ min: 10, score: 4 },
 				{ min: 1, score: 2 },
 			]),
 		);
-		const avgWinRate = this.createMetricDebug(
-			summary.avgWinRate,
-			this.bracketScore(summary.avgWinRate, [
-				{ min: 70, score: 8 },
-				{ min: 55, score: 6 },
-				{ min: 45, score: 4 },
-				{ min: 35, score: 2 },
+		const profitFactor = this.createMetricDebug(
+			risk.profitFactor,
+			this.bracketScore(risk.profitFactor, [
+				{ min: 3, score: 6 },
+				{ min: 2, score: 5 },
+				{ min: 1.5, score: 3 },
+				{ min: 1, score: 1 },
+			]),
+		);
+		const bestWorstRatioValue = this.computeBestWorstRatio(summary);
+		const bestWorstRatio = this.createMetricDebug(
+			bestWorstRatioValue,
+			this.bracketScore(bestWorstRatioValue, [
+				{ min: 3, score: 5 },
+				{ min: 2, score: 4 },
+				{ min: 1, score: 3 },
+				{ min: 0.5, score: 1 },
 			]),
 		);
 		const raw =
 			totalRealizedPnL.weightedContribution +
 			avgROI.weightedContribution +
-			avgWinRate.weightedContribution;
+			profitFactor.weightedContribution +
+			bestWorstRatio.weightedContribution;
 
 		return {
 			score: raw,
@@ -255,7 +263,8 @@ export class WalletScoringService {
 				),
 				totalRealizedPnL,
 				avgROI,
-				avgWinRate,
+				profitFactor,
+				bestWorstRatio,
 			},
 		};
 	}
@@ -263,24 +272,33 @@ export class WalletScoringService {
 	private scoreConsistency(
 		summary: WalletSummaryResponse,
 		activity: WalletActivityMetricsResponse,
+		risk: WalletRiskMetricsResponse,
 	): ScoreDimensionResult<WalletScoreConsistencyDebug> {
 		const profitableTokenRateValue = this.computeProfitableTokenRate(summary);
-		const tradingSpanRatio = this.createMetricDebug(
-			activity.tradingSpanRatio,
-			this.bracketScore(activity.tradingSpanRatio, [
-				{ min: 0.6, score: 10 },
-				{ min: 0.35, score: 7 },
-				{ min: 0.15, score: 4 },
-				{ min: 0.05, score: 2 },
+		const avgWinRate = this.createMetricDebug(
+			summary.avgWinRate,
+			this.bracketScore(summary.avgWinRate, [
+				{ min: 70, score: 7 },
+				{ min: 55, score: 5 },
+				{ min: 45, score: 3 },
+				{ min: 35, score: 1 },
+			]),
+		);
+		const returnStdDev = this.createMetricDebug(
+			risk.returnStdDev,
+			this.invertedBracketScore(risk.returnStdDev, [
+				{ max: 15, score: 4 },
+				{ max: 30, score: 3 },
+				{ max: 50, score: 2 },
+				{ max: 80, score: 1 },
 			]),
 		);
 		const burstinessScore = this.createMetricDebug(
 			activity.burstinessScore,
 			this.invertedBracketScore(activity.burstinessScore, [
-				{ max: 0.5, score: 4 },
-				{ max: 1, score: 3 },
-				{ max: 1.5, score: 2 },
-				{ max: 2.5, score: 1 },
+				{ max: 0.5, score: 3 },
+				{ max: 1, score: 2 },
+				{ max: 1.5, score: 1 },
 			]),
 		);
 		const profitableTokenRate = this.createMetricDebug(
@@ -292,7 +310,8 @@ export class WalletScoringService {
 			]),
 		);
 		const raw =
-			tradingSpanRatio.weightedContribution +
+			avgWinRate.weightedContribution +
+			returnStdDev.weightedContribution +
 			burstinessScore.weightedContribution +
 			profitableTokenRate.weightedContribution;
 
@@ -303,7 +322,8 @@ export class WalletScoringService {
 					raw,
 					WalletScoringService.CONSISTENCY_MAX,
 				),
-				tradingSpanRatio,
+				avgWinRate,
+				returnStdDev,
 				burstinessScore,
 				profitableTokenRate,
 			},
@@ -312,47 +332,60 @@ export class WalletScoringService {
 
 	private scoreRiskManagement(
 		risk: WalletRiskMetricsResponse,
+		summary: WalletSummaryResponse,
+		tokenCategories: WalletTokenCategoryMetricsResponse,
 	): ScoreDimensionResult<WalletScoreRiskManagementDebug> {
-		const profitFactor = this.createMetricDebug(
-			risk.profitFactor,
-			this.bracketScore(risk.profitFactor, [
-				{ min: 2, score: 5 },
-				{ min: 1.5, score: 4 },
-				{ min: 1.2, score: 2 },
-				{ min: 1, score: 1 },
-			]),
-		);
+		const drawdownRatio = risk.maxDrawdown / Math.max(summary.totalRealizedPnL, 1);
 		const maxDrawdown = this.createMetricDebug(
-			risk.maxDrawdown,
-			this.invertedBracketScore(risk.maxDrawdown, [
-				{ max: 15, score: 7 },
-				{ max: 30, score: 5 },
-				{ max: 50, score: 3 },
-				{ max: 70, score: 1 },
+			drawdownRatio,
+			this.invertedBracketScore(drawdownRatio, [
+				{ max: 0.1, score: 6 },
+				{ max: 0.25, score: 4 },
+				{ max: 0.5, score: 2 },
+				{ max: 1.0, score: 1 },
 			]),
 		);
 		const concentrationRisk = this.createMetricDebug(
 			risk.concentrationRisk,
 			this.invertedBracketScore(risk.concentrationRisk, [
-				{ max: 20, score: 5 },
-				{ max: 35, score: 4 },
-				{ max: 50, score: 3 },
+				{ max: 20, score: 4 },
+				{ max: 35, score: 3 },
+				{ max: 50, score: 2 },
 				{ max: 70, score: 1 },
 			]),
 		);
-		const returnStdDev = this.createMetricDebug(
-			risk.returnStdDev,
-			this.invertedBracketScore(risk.returnStdDev, [
-				{ max: 20, score: 3 },
+		const memecoinTradePercent = this.createMetricDebug(
+			tokenCategories.memecoinTradePercent,
+			this.invertedBracketScore(tokenCategories.memecoinTradePercent, [
+				{ max: 10, score: 4 },
+				{ max: 25, score: 3 },
 				{ max: 40, score: 2 },
-				{ max: 70, score: 1 },
+				{ max: 60, score: 1 },
+			]),
+		);
+		const stablecoinHoldingPercent = this.createMetricDebug(
+			tokenCategories.stablecoinHoldingPercent,
+			this.bracketScore(tokenCategories.stablecoinHoldingPercent, [
+				{ min: 20, score: 3 },
+				{ min: 10, score: 2 },
+				{ min: 5, score: 1 },
+			]),
+		);
+		const worstTradeImpactValue = this.computeWorstTradeImpact(summary);
+		const worstTradeImpact = this.createMetricDebug(
+			worstTradeImpactValue,
+			this.invertedBracketScore(worstTradeImpactValue, [
+				{ max: 0.1, score: 3 },
+				{ max: 0.3, score: 2 },
+				{ max: 0.5, score: 1 },
 			]),
 		);
 		const raw =
-			profitFactor.weightedContribution +
 			maxDrawdown.weightedContribution +
 			concentrationRisk.weightedContribution +
-			returnStdDev.weightedContribution;
+			memecoinTradePercent.weightedContribution +
+			stablecoinHoldingPercent.weightedContribution +
+			worstTradeImpact.weightedContribution;
 
 		return {
 			score: raw,
@@ -361,10 +394,11 @@ export class WalletScoringService {
 					raw,
 					WalletScoringService.RISK_MANAGEMENT_MAX,
 				),
-				profitFactor,
 				maxDrawdown,
 				concentrationRisk,
-				returnStdDev,
+				memecoinTradePercent,
+				stablecoinHoldingPercent,
+				worstTradeImpact,
 			},
 		};
 	}
@@ -485,24 +519,33 @@ export class WalletScoringService {
 	private scoreExperience(
 		summary: WalletSummaryResponse,
 		tradingSpanDays: number,
+		activity: WalletActivityMetricsResponse,
 		dexMetrics: WalletDexMetricsResponse,
 	): ScoreDimensionResult<WalletScoreExperienceDebug> {
-		const totalSwaps = this.createMetricDebug(
-			summary.total_swaps,
-			this.bracketScore(summary.total_swaps, [
-				{ min: 100, score: 7 },
-				{ min: 50, score: 5 },
-				{ min: 15, score: 3 },
-				{ min: 5, score: 1 },
-			]),
-		);
 		const tradingSpanDaysMetric = this.createMetricDebug(
 			tradingSpanDays,
 			this.bracketScore(tradingSpanDays, [
-				{ min: 180, score: 6 },
-				{ min: 90, score: 5 },
-				{ min: 30, score: 3 },
+				{ min: 180, score: 5 },
+				{ min: 90, score: 4 },
+				{ min: 30, score: 2 },
 				{ min: 7, score: 1 },
+			]),
+		);
+		const tradingSpanRatio = this.createMetricDebug(
+			activity.tradingSpanRatio,
+			this.bracketScore(activity.tradingSpanRatio, [
+				{ min: 0.6, score: 3 },
+				{ min: 0.35, score: 2 },
+				{ min: 0.15, score: 1 },
+			]),
+		);
+		const totalSwaps = this.createMetricDebug(
+			summary.total_swaps,
+			this.bracketScore(summary.total_swaps, [
+				{ min: 100, score: 5 },
+				{ min: 50, score: 4 },
+				{ min: 15, score: 2 },
+				{ min: 5, score: 1 },
 			]),
 		);
 		const dexDiversity = this.createMetricDebug(
@@ -513,8 +556,9 @@ export class WalletScoringService {
 			]),
 		);
 		const raw =
-			totalSwaps.weightedContribution +
 			tradingSpanDaysMetric.weightedContribution +
+			tradingSpanRatio.weightedContribution +
+			totalSwaps.weightedContribution +
 			dexDiversity.weightedContribution;
 
 		return {
@@ -524,8 +568,9 @@ export class WalletScoringService {
 					raw,
 					WalletScoringService.EXPERIENCE_MAX,
 				),
-				totalSwaps,
 				tradingSpanDays: tradingSpanDaysMetric,
+				tradingSpanRatio,
+				totalSwaps,
 				dexDiversity,
 			},
 		};
@@ -540,14 +585,16 @@ export class WalletScoringService {
 				),
 				totalRealizedPnL: this.createMetricDebug(0, 0),
 				avgROI: this.createMetricDebug(0, 0),
-				avgWinRate: this.createMetricDebug(0, 0),
+				profitFactor: this.createMetricDebug(0, 0),
+				bestWorstRatio: this.createMetricDebug(0, 0),
 			},
 			consistency: {
 				...this.createDimensionDebugSummary(
 					0,
 					WalletScoringService.CONSISTENCY_MAX,
 				),
-				tradingSpanRatio: this.createMetricDebug(0, 0),
+				avgWinRate: this.createMetricDebug(0, 0),
+				returnStdDev: this.createMetricDebug(0, 0),
 				burstinessScore: this.createMetricDebug(0, 0),
 				profitableTokenRate: this.createMetricDebug(0, 0),
 			},
@@ -556,10 +603,11 @@ export class WalletScoringService {
 					0,
 					WalletScoringService.RISK_MANAGEMENT_MAX,
 				),
-				profitFactor: this.createMetricDebug(0, 0),
 				maxDrawdown: this.createMetricDebug(0, 0),
 				concentrationRisk: this.createMetricDebug(0, 0),
-				returnStdDev: this.createMetricDebug(0, 0),
+				memecoinTradePercent: this.createMetricDebug(0, 0),
+				stablecoinHoldingPercent: this.createMetricDebug(0, 0),
+				worstTradeImpact: this.createMetricDebug(0, 0),
 			},
 			portfolio: {
 				...this.createDimensionDebugSummary(
@@ -577,8 +625,9 @@ export class WalletScoringService {
 					0,
 					WalletScoringService.EXPERIENCE_MAX,
 				),
-				totalSwaps: this.createMetricDebug(0, 0),
 				tradingSpanDays: this.createMetricDebug(0, 0),
+				tradingSpanRatio: this.createMetricDebug(0, 0),
+				totalSwaps: this.createMetricDebug(0, 0),
 				dexDiversity: this.createMetricDebug(0, 0),
 			},
 		};
@@ -600,7 +649,7 @@ export class WalletScoringService {
 		score: number,
 	): WalletScoreMetricDebug {
 		return {
-			value: this.roundDecimal(value),
+			value: Number.isFinite(value) ? this.roundDecimal(value) : null,
 			score,
 			weightedContribution: score,
 		};
@@ -707,7 +756,9 @@ export class WalletScoringService {
 			return 0;
 		}
 
-		for (const bracket of brackets) {
+		const sorted = [...brackets].sort((a, b) => b.min - a.min);
+
+		for (const bracket of sorted) {
 			if (value >= bracket.min) {
 				return bracket.score;
 			}
@@ -724,7 +775,9 @@ export class WalletScoringService {
 			return 0;
 		}
 
-		for (const bracket of brackets) {
+		const sorted = [...brackets].sort((a, b) => a.max - b.max);
+
+		for (const bracket of sorted) {
 			if (value <= bracket.max) {
 				return bracket.score;
 			}
@@ -733,9 +786,26 @@ export class WalletScoringService {
 		return 0;
 	}
 
+	private computeBestWorstRatio(summary: WalletSummaryResponse): number {
+		const absWorst = Math.abs(summary.worstTrade);
+
+		if (absWorst === 0) {
+			return summary.bestTrade > 0 ? 10 : 0;
+		}
+
+		return this.roundDecimal(summary.bestTrade / absWorst);
+	}
+
+	private computeWorstTradeImpact(summary: WalletSummaryResponse): number {
+		const absWorst = Math.abs(summary.worstTrade);
+		const denominator = Math.max(summary.totalRealizedPnL, 1);
+
+		return this.roundDecimal(absWorst / denominator);
+	}
+
 	private roundDecimal(value: number, decimals = 2): number {
 		if (!Number.isFinite(value)) {
-			return 0;
+			return NaN;
 		}
 
 		return Number(value.toFixed(decimals));

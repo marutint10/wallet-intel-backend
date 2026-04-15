@@ -204,7 +204,7 @@ export interface WalletScoreResponse {
 }
 
 export interface WalletScoreMetricDebug {
-  value: number;
+  value: number | null;
   score: number;
   weightedContribution: number;
 }
@@ -219,22 +219,25 @@ export interface WalletScoreProfitabilityDebug
   extends WalletScoreDimensionDebugSummary {
   totalRealizedPnL: WalletScoreMetricDebug;
   avgROI: WalletScoreMetricDebug;
-  avgWinRate: WalletScoreMetricDebug;
+  profitFactor: WalletScoreMetricDebug;
+  bestWorstRatio: WalletScoreMetricDebug;
 }
 
 export interface WalletScoreConsistencyDebug
   extends WalletScoreDimensionDebugSummary {
-  tradingSpanRatio: WalletScoreMetricDebug;
+  avgWinRate: WalletScoreMetricDebug;
+  returnStdDev: WalletScoreMetricDebug;
   burstinessScore: WalletScoreMetricDebug;
   profitableTokenRate: WalletScoreMetricDebug;
 }
 
 export interface WalletScoreRiskManagementDebug
   extends WalletScoreDimensionDebugSummary {
-  profitFactor: WalletScoreMetricDebug;
   maxDrawdown: WalletScoreMetricDebug;
   concentrationRisk: WalletScoreMetricDebug;
-  returnStdDev: WalletScoreMetricDebug;
+  memecoinTradePercent: WalletScoreMetricDebug;
+  stablecoinHoldingPercent: WalletScoreMetricDebug;
+  worstTradeImpact: WalletScoreMetricDebug;
 }
 
 export interface WalletScorePortfolioDebug
@@ -248,8 +251,9 @@ export interface WalletScorePortfolioDebug
 
 export interface WalletScoreExperienceDebug
   extends WalletScoreDimensionDebugSummary {
-  totalSwaps: WalletScoreMetricDebug;
   tradingSpanDays: WalletScoreMetricDebug;
+  tradingSpanRatio: WalletScoreMetricDebug;
+  totalSwaps: WalletScoreMetricDebug;
   dexDiversity: WalletScoreMetricDebug;
 }
 
