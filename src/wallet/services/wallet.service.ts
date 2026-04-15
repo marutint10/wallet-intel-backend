@@ -16,6 +16,7 @@ import {
   WalletRiskMetricsResponse,
   StoredWalletTransactionsResponse,
   WalletSummaryResponse,
+  WalletTokenCategoryMetricsResponse,
   WalletTokenFlowResponse,
   WalletTransactionsResponse,
 } from '../wallet.types';
@@ -91,6 +92,12 @@ export class WalletService {
     debug = false,
   ): Promise<WalletDexMetricsResult> {
     return this.walletAnalyticsService.getDexMetrics(address, debug);
+  }
+
+  async getTokenCategoryMetrics(
+    address: string,
+  ): Promise<WalletTokenCategoryMetricsResponse> {
+    return this.walletAnalyticsService.getTokenCategoryMetrics(address);
   }
 
   async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {
