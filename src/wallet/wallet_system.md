@@ -36,6 +36,7 @@ Current capabilities:
 - return DEX router usage analytics from stored swap recipients
 - return token category analytics from priced trades and current portfolio holdings
 - return aggregated wallet features combining summary and analytics views
+- return a V1 smart-money score using fixed bracket scoring on existing analytics outputs
 
 ## 2. Current architecture
 
@@ -65,6 +66,7 @@ Responsibilities:
 - delegate holdings, ledger, and portfolio calls to `WalletPortfolioService`
 - delegate risk, hold-time, and activity analytics to `WalletAnalyticsService`
 - delegate wallet archetype/context detection to `WalletContextService`
+- delegate V1 smart-money scoring to `WalletScoringService`
 - compose the unified wallet features response from existing service methods
 
 ### WalletAnalyticsService
@@ -91,6 +93,18 @@ Responsibilities:
 - classify whether the wallet qualifies as a trader from summary swap count
 - infer simple operational-treasury and bot-like subtypes from summary and activity metrics
 - return reasoning and confidence for downstream scoring decisions
+
+### WalletScoringService
+
+This is the V1 smart-money scoring layer.
+
+Responsibilities:
+
+- reuse existing context, summary, activity, risk, DEX, and token-category service methods
+- apply score gate rules before scoring ineligible wallets
+- compute a fixed-bracket score across profitability, consistency, risk management, portfolio quality, and experience
+- assign a confidence level from swap count and trading-span coverage
+- return a structured score response with dimension breakdowns
 
 ### WalletCoreService
 
@@ -153,7 +167,6 @@ The following services still exist as placeholders for future architecture work:
 
 - `PortfolioService`
 - `PnlService`
-- `ScoringService`
 - `ClassificationService`
 
 They are registered in the module but are not the main runtime path for current wallet analytics.
@@ -167,6 +180,7 @@ They are registered in the module but are not the main runtime path for current 
 - `WalletPricingService`
 - `WalletPnlService`
 - `WalletPortfolioService`
+- `WalletScoringService`
 - `WalletService`
 - the placeholder services listed above
 - the TypeORM repository for `TransactionEntity`
@@ -451,6 +465,28 @@ Current behavior notes:
 - `walletSubtype = Operational/Treasury` when `txCount > 50`, `transferRatio > 80%`, and `swaps <= 2`
 - `walletSubtype = Automated/Bot-like` when `tradesPerActiveDay > 20` and `avgTradeGapHours < 1`
 - Gnosis Safe subtype takes precedence over the treasury and bot-like heuristic labels because it is a stronger structural signal
+
+### GET /wallet/:address/score
+
+Returns the V1 smart-money score derived from existing analytics endpoints and context classification.
+
+Current fields:
+
+- `address`
+- `score`
+- `confidence`
+- `band`
+- `breakdown`
+- `gateStatus`
+- `scoredAt`
+
+Current behavior notes:
+
+- gate order is `Not a Trader Wallet` -> `Insufficient Data` -> `No Trading Activity`
+- gated wallets return `score = 0`, `band = Unscored`, and zeroed dimension breakdowns
+- confidence uses fixed thresholds: `high` for `swaps >= 50` and `tradingSpanDays >= 90`, `medium` for `swaps >= 15` and `tradingSpanDays >= 30`, else `low`
+- the total score is the sum of five weighted dimensions: profitability `30`, consistency `20`, risk management `20`, portfolio quality `15`, experience `15`
+- bracket scoring is fixed and does not recompute underlying analytics beyond lightweight derivations such as trading span days from existing trade history
 
 ### GET /wallet/:address/risk-metrics
 
