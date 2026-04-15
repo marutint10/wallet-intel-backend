@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import {
   Trade,
   WalletActivityMetricsResponse,
+  WalletFeaturesResponse,
   WalletHoldingsResponse,
   WalletHoldTimeMetricsResponse,
   WalletLedgerResponse,
@@ -53,6 +54,27 @@ export class WalletService {
 
   async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
     return this.walletPnlService.getWalletSummary(address);
+  }
+
+  async getWalletFeatures(address: string): Promise<WalletFeaturesResponse> {
+    const [summary, riskMetrics, holdTime, activity] = await Promise.all([
+      this.getWalletSummary(address),
+      this.getRiskMetrics(address),
+      this.getHoldTimeMetrics(address),
+      this.getActivityMetrics(address),
+    ]);
+
+    return {
+      summary,
+      risk: {
+        profitFactor: riskMetrics.profitFactor,
+        maxDrawdown: riskMetrics.maxDrawdown,
+        returnStdDev: riskMetrics.returnStdDev,
+        concentrationRisk: riskMetrics.concentrationRisk,
+      },
+      holdTime,
+      activity,
+    };
   }
 
   async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {

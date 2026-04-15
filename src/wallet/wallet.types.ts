@@ -96,10 +96,18 @@ export interface WalletHoldTimeMetricsResponse {
 }
 
 export interface WalletActivityMetricsResponse {
-  tradesPerDay: number;
+  tradesPerActiveDay: number;
+  tradesPerLifetimeDay: number;
   avgTradeGapHours: number;
   burstinessScore: number;
   tradingSpanRatio: number;
+}
+
+export interface WalletFeaturesResponse {
+  summary: WalletSummaryResponse;
+  risk: WalletRiskMetricsResponse;
+  holdTime: WalletHoldTimeMetricsResponse;
+  activity: WalletActivityMetricsResponse;
 }
 
 export interface WalletRiskMetricsDebugResponse

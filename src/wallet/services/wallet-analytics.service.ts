@@ -111,7 +111,8 @@ export class WalletAnalyticsService {
 
     if (trades.length === 0) {
       return {
-        tradesPerDay: 0,
+        tradesPerActiveDay: 0,
+        tradesPerLifetimeDay: 0,
         avgTradeGapHours: 0,
         burstinessScore: 0,
         tradingSpanRatio: 0,
@@ -122,6 +123,7 @@ export class WalletAnalyticsService {
       (left, right) => left.timestamp - right.timestamp,
     );
     const activeTradingDays = this.countActiveTradingDays(sortedTrades);
+    const walletAgeDays = this.computeWalletAgeDays(sortedTrades);
     const tradeGapHours = this.buildTradeGapHours(sortedTrades);
     const avgTradeGapHours =
       tradeGapHours.length > 0
@@ -133,9 +135,13 @@ export class WalletAnalyticsService {
     const tradingSpanRatio = this.computeTradingSpanRatio(sortedTrades);
 
     return {
-      tradesPerDay:
+      tradesPerActiveDay:
         activeTradingDays > 0
           ? this.roundDecimal(sortedTrades.length / activeTradingDays)
+          : 0,
+      tradesPerLifetimeDay:
+        walletAgeDays > 0
+          ? this.roundDecimal(sortedTrades.length / walletAgeDays)
           : 0,
       avgTradeGapHours,
       burstinessScore:
@@ -173,6 +179,10 @@ export class WalletAnalyticsService {
     );
 
     if (totalNegativePnl === 0) {
+      if (totalPositivePnl > 0) {
+        return 10;
+      }
+
       return 0;
     }
 
@@ -302,6 +312,24 @@ export class WalletAnalyticsService {
     return this.roundDecimal(
       (lastTradeTimestamp - firstTradeTimestamp) / walletAgeSeconds,
     );
+  }
+
+  private computeWalletAgeDays(trades: Trade[]): number {
+    if (trades.length === 0) {
+      return 0;
+    }
+
+    const firstTradeTimestamp = trades[0].timestamp;
+    const walletAgeSeconds = Math.max(
+      Math.floor(Date.now() / 1000) - firstTradeTimestamp,
+      0,
+    );
+
+    if (walletAgeSeconds === 0) {
+      return 0;
+    }
+
+    return this.roundDecimal(walletAgeSeconds / (24 * 3600));
   }
 
   private createEmptyHoldBuckets(): WalletHoldTimeBuckets {
