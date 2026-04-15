@@ -2,6 +2,9 @@ import { Injectable } from '@nestjs/common';
 import {
   Trade,
   WalletActivityMetricsResponse,
+  WalletDexMetricsDebugResponse,
+  WalletDexMetricsResponse,
+  WalletDexMetricsResult,
   WalletHoldTimeBuckets,
   WalletHoldTimeMetricsResponse,
   WalletPortfolioResponse,
@@ -9,10 +12,12 @@ import {
   WalletRiskMetricsResult,
   WalletRiskMetricsResponse,
 } from '../wallet.types';
+import { DEX_ROUTERS, UNKNOWN_DEX_LABEL } from '../constants/dex-routers';
 import {
   RealizedTradeMetrics,
   WalletPnlService,
 } from './wallet-pnl.service';
+import { WalletCoreService } from './wallet-core.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
 
 interface PortfolioConcentrationSnapshot {
@@ -24,6 +29,7 @@ interface PortfolioConcentrationSnapshot {
 @Injectable()
 export class WalletAnalyticsService {
   constructor(
+    private readonly walletCoreService: WalletCoreService,
     private readonly walletPnlService: WalletPnlService,
     private readonly walletPortfolioService: WalletPortfolioService,
   ) {}
@@ -151,6 +157,84 @@ export class WalletAnalyticsService {
             )
           : 0,
       tradingSpanRatio,
+    };
+  }
+
+  async getDexMetrics(
+    address: string,
+    debug = false,
+  ): Promise<WalletDexMetricsResult> {
+    const transactions = await this.walletCoreService.getTransactionEntities(address);
+    const swapTransactions = transactions.filter(
+      (transaction) => transaction.type === 'swap',
+    );
+
+    if (swapTransactions.length === 0) {
+      const emptyMetrics: WalletDexMetricsResponse = {
+        tradesPerDex: {},
+        primaryDex: null,
+        primaryDexShare: 0,
+        dexDiversity: 0,
+        unknownDexPercent: 0,
+      };
+
+      if (!debug) {
+        return emptyMetrics;
+      }
+
+      return {
+        ...emptyMetrics,
+        unknownRouterAddresses: [],
+      };
+    }
+
+    const tradesPerDex = new Map<string, number>();
+    const unknownRouterCounts = new Map<string, number>();
+
+    for (const transaction of swapTransactions) {
+      const routerAddress = transaction.to_address?.toLowerCase() ?? '';
+      const dexName = DEX_ROUTERS[routerAddress] ?? UNKNOWN_DEX_LABEL;
+
+      tradesPerDex.set(dexName, (tradesPerDex.get(dexName) ?? 0) + 1);
+
+      if (dexName === UNKNOWN_DEX_LABEL) {
+        unknownRouterCounts.set(
+          routerAddress || '(empty)',
+          (unknownRouterCounts.get(routerAddress || '(empty)') ?? 0) + 1,
+        );
+      }
+    }
+
+    const tradesPerDexObject = Object.fromEntries(tradesPerDex.entries());
+    const primaryDexEntry = Array.from(tradesPerDex.entries()).sort(
+      (left, right) => right[1] - left[1],
+    )[0] ?? null;
+    const unknownTrades = tradesPerDex.get(UNKNOWN_DEX_LABEL) ?? 0;
+    const matchedDexNames = Array.from(tradesPerDex.keys()).filter(
+      (dexName) => dexName !== UNKNOWN_DEX_LABEL,
+    );
+
+    const metrics: WalletDexMetricsResponse = {
+      tradesPerDex: tradesPerDexObject,
+      primaryDex: primaryDexEntry?.[0] ?? null,
+      primaryDexShare: primaryDexEntry
+        ? this.roundDecimal((primaryDexEntry[1] / swapTransactions.length) * 100)
+        : 0,
+      dexDiversity: matchedDexNames.length,
+      unknownDexPercent: this.roundDecimal(
+        (unknownTrades / swapTransactions.length) * 100,
+      ),
+    };
+
+    if (!debug) {
+      return metrics;
+    }
+
+    return {
+      ...metrics,
+      unknownRouterAddresses: Array.from(unknownRouterCounts.entries())
+        .map(([address, count]) => ({ address, count }))
+        .sort((left, right) => right.count - left.count),
     };
   }
 
