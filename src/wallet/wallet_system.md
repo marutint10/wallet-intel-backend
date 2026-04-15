@@ -33,6 +33,7 @@ Current capabilities:
 - return wallet risk metrics
 - return wallet hold-time metrics from completed FIFO trade lots
 - return wallet activity metrics from stored trade history
+- return DEX router usage analytics from stored swap recipients
 - return aggregated wallet features combining summary and analytics views
 
 ## 2. Current architecture
@@ -74,6 +75,7 @@ Responsibilities:
 - compute risk metrics from realized trade PnL and portfolio concentration
 - compute hold-time metrics from completed FIFO buy/sell lot matches only
 - compute activity metrics from chronologically ordered stored trades
+- compute DEX router usage metrics from stored swap transaction recipients
 - expose reusable analytics methods for the facade and controller layer
 
 ### WalletContextService
@@ -506,6 +508,26 @@ Current behavior notes:
 - `avgTradeGapHours` uses consecutive chronological trade gaps only
 - `burstinessScore = stddev(gaps) / mean(gaps)` with divide-by-zero protection
 - `tradingSpanRatio = (last trade timestamp - first trade timestamp) / wallet age`
+
+### GET /wallet/:address/dex-metrics
+
+Returns DEX router usage metrics built from stored normalized swap transactions.
+
+Current fields:
+
+- `tradesPerDex`
+- `primaryDex`
+- `primaryDexShare`
+- `dexDiversity`
+- `unknownDexPercent`
+
+Current behavior notes:
+
+- the service inspects `to_address` on each stored swap transaction as the router target
+- known Ethereum DEX router addresses are matched from a lowercase lookup table
+- unmatched swap recipients are counted under `Unknown`
+- `dexDiversity` excludes `Unknown`
+- `GET /wallet/:address/dex-metrics?debug=true` also returns `unknownRouterAddresses`, grouped by unmatched `to_address` frequency descending
 
 ## 9. Main ingestion flow
 
