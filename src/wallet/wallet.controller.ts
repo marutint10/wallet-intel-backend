@@ -5,6 +5,7 @@ import {
   Trade,
   WalletActivityMetricsResponse,
   WalletContextResponse,
+  WalletDexMetricsResult,
   WalletFeaturesResponse,
   WalletHoldingsResponse,
   WalletHoldTimeMetricsResponse,
@@ -110,6 +111,18 @@ export class WalletController {
     }
 
     return this.walletService.getWalletContext(address);
+  }
+
+  @Get(':address/dex-metrics')
+  async getDexMetrics(
+    @Param('address') address: string,
+    @Query('debug') debug?: string,
+  ): Promise<WalletDexMetricsResult> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getDexMetrics(address, debug === 'true');
   }
 
   @Get(':address/transactions')
