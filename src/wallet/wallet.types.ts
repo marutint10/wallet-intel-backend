@@ -103,6 +103,28 @@ export interface WalletActivityMetricsResponse {
   tradingSpanRatio: number;
 }
 
+export interface WalletDexMetricsResponse {
+  tradesPerDex: Record<string, number>;
+  primaryDex: string | null;
+  primaryDexShare: number;
+  dexDiversity: number;
+  unknownDexPercent: number;
+}
+
+export interface UnknownRouterAddressCount {
+  address: string;
+  count: number;
+}
+
+export interface WalletDexMetricsDebugResponse
+  extends WalletDexMetricsResponse {
+  unknownRouterAddresses: UnknownRouterAddressCount[];
+}
+
+export type WalletDexMetricsResult =
+  | WalletDexMetricsResponse
+  | WalletDexMetricsDebugResponse;
+
 export type WalletType = 'EOA' | 'Contract';
 
 export type WalletSubtype =
