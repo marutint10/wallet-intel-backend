@@ -335,7 +335,7 @@ export class WalletScoringService {
 		summary: WalletSummaryResponse,
 		tokenCategories: WalletTokenCategoryMetricsResponse,
 	): ScoreDimensionResult<WalletScoreRiskManagementDebug> {
-		const drawdownRatio = risk.maxDrawdown / Math.max(summary.totalRealizedPnL, 1);
+		const drawdownRatio = risk.maxDrawdown / Math.max(summary.totalRealizedPnL, 100);
 		const maxDrawdown = this.createMetricDebug(
 			drawdownRatio,
 			this.invertedBracketScore(drawdownRatio, [
@@ -433,9 +433,10 @@ export class WalletScoringService {
 		const avgHoldHours = this.createMetricDebug(
 			holdTime.avgHoldHours,
 			this.bracketScore(holdTime.avgHoldHours, [
-				{ min: 168, score: 1 },
-				{ min: 72, score: 1 },
-				{ min: 24, score: 1 },
+				{ min: 720, score: 1.0 },
+				{ min: 168, score: 0.75 },
+				{ min: 72, score: 0.5 },
+				{ min: 24, score: 0.25 },
 			]),
 		);
 		const profitableTokenPercentMetric = this.createMetricDebug(
@@ -449,9 +450,9 @@ export class WalletScoringService {
 		const uniqueTokensMetric = this.createMetricDebug(
 			uniqueTokens,
 			this.bracketScore(uniqueTokens, [
-				{ min: 8, score: 2 },
-				{ min: 5, score: 2 },
-				{ min: 2, score: 1 },
+				{ min: 10, score: 2.0 },
+				{ min: 6, score: 1.5 },
+				{ min: 3, score: 1.0 },
 			]),
 		);
 		const rawPortfolioScore =
