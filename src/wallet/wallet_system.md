@@ -34,6 +34,7 @@ Current capabilities:
 - return wallet hold-time metrics from completed FIFO trade lots
 - return wallet activity metrics from stored trade history
 - return DEX router usage analytics from stored swap recipients
+- return token category analytics from priced trades and current portfolio holdings
 - return aggregated wallet features combining summary and analytics views
 
 ## 2. Current architecture
@@ -76,6 +77,7 @@ Responsibilities:
 - compute hold-time metrics from completed FIFO buy/sell lot matches only
 - compute activity metrics from chronologically ordered stored trades
 - compute DEX router usage metrics from stored swap transaction recipients
+- compute token category analytics from existing priced trade and portfolio methods
 - expose reusable analytics methods for the facade and controller layer
 
 ### WalletContextService
@@ -528,6 +530,33 @@ Current behavior notes:
 - unmatched swap recipients are counted under `Unknown`
 - `dexDiversity` excludes `Unknown`
 - `GET /wallet/:address/dex-metrics?debug=true` also returns `unknownRouterAddresses`, grouped by unmatched `to_address` frequency descending
+
+### GET /wallet/:address/token-categories
+
+Returns token category analytics built from existing priced trades and current portfolio holdings.
+
+Current fields:
+
+- `tradesByCategory`
+- `historicalVolumeByCategory`
+- `dominantTradingCategory`
+- `categoryDiversity`
+- `memecoinTradePercent`
+- `blueChipTradePercent`
+- `stablecoinTradePercent`
+- `currentHoldingsByCategory`
+- `dominantHoldingCategory`
+- `memecoinHoldingPercent`
+- `blueChipHoldingPercent`
+- `stablecoinHoldingPercent`
+
+Current behavior notes:
+
+- each priced trade is classified with `classifyToken(contractAddress, token)`
+- category volume uses `price * amount` and ignores trades without usable price
+- current holdings allocation aggregates `usdValue` by category and ignores `null` holdings values
+- stablecoin trade share is volume-based, while memecoin and blue chip trade shares are trade-count-based
+- holdings percentages are USD-allocation based and ignore holdings with unavailable `usdValue`
 
 ## 9. Main ingestion flow
 
