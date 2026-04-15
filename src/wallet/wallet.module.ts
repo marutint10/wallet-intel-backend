@@ -5,13 +5,13 @@ import {
   ClassificationService,
   PnlService,
   PortfolioService,
-  ScoringService,
   WalletAnalyticsService,
   WalletContextService,
   WalletCoreService,
   WalletPnlService,
   WalletPortfolioService,
   WalletPricingService,
+  WalletScoringService,
   WalletService,
 } from './services';
 import { TransactionEntity } from './transaction.entity';
@@ -29,7 +29,7 @@ import { TransactionEntity } from './transaction.entity';
     WalletService,
     PortfolioService,
     PnlService,
-    ScoringService,
+    WalletScoringService,
     ClassificationService,
   ],
 })
