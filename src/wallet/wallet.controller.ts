@@ -15,6 +15,7 @@ import {
   WalletPortfolioResponse,
   WalletRiskMetricsResult,
   WalletRiskMetricsResponse,
+  WalletScoreResult,
   WalletSummaryResponse,
   WalletTokenCategoryMetricsResponse,
   WalletTokenFlowResponse,
@@ -112,6 +113,18 @@ export class WalletController {
     }
 
     return this.walletService.getWalletContext(address);
+  }
+
+  @Get(':address/score')
+  async getWalletScore(
+    @Param('address') address: string,
+    @Query('debug') debug?: string,
+  ): Promise<WalletScoreResult> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getWalletScore(address, debug === 'true');
   }
 
   @Get(':address/dex-metrics')
