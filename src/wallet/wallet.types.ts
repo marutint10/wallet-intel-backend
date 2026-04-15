@@ -167,9 +167,11 @@ export type WalletScoreConfidence = 'low' | 'medium' | 'high';
 
 export type WalletScoreGateStatus =
   | 'Eligible'
+  | 'Eligible (Holder)'
   | 'Not a Trader Wallet'
   | 'Insufficient Data'
-  | 'No Trading Activity';
+  | 'No Trading Activity'
+  | 'Empty Wallet';
 
 export type WalletScoreBand =
   | 'Unscored'
@@ -185,13 +187,24 @@ export interface WalletScoreDimensionBreakdown {
   maxScore: number;
 }
 
-export interface WalletScoreBreakdown {
+export interface TraderWalletScoreBreakdown {
   profitability: WalletScoreDimensionBreakdown;
   consistency: WalletScoreDimensionBreakdown;
   riskManagement: WalletScoreDimensionBreakdown;
   portfolioQuality: WalletScoreDimensionBreakdown;
   experience: WalletScoreDimensionBreakdown;
 }
+
+export interface HolderWalletScoreBreakdown {
+  portfolioQuality: WalletScoreDimensionBreakdown;
+  conviction: WalletScoreDimensionBreakdown;
+  portfolioSize: WalletScoreDimensionBreakdown;
+  assetSelection: WalletScoreDimensionBreakdown;
+}
+
+export type WalletScoreBreakdown =
+  | TraderWalletScoreBreakdown
+  | HolderWalletScoreBreakdown;
 
 export interface WalletScoreResponse {
   address: string;
@@ -258,13 +271,55 @@ export interface WalletScoreExperienceDebug
   dexDiversity: WalletScoreMetricDebug;
 }
 
-export interface WalletScoreDebugData {
+export interface WalletHolderScorePortfolioQualityDebug
+  extends WalletScoreDimensionDebugSummary {
+  qualityAssetPercent: WalletScoreMetricDebug;
+  categoryDiversity: WalletScoreMetricDebug;
+  uniqueTokenCount: WalletScoreMetricDebug;
+  memecoinHoldingPercent: WalletScoreMetricDebug;
+}
+
+export interface WalletHolderScoreConvictionDebug
+  extends WalletScoreDimensionDebugSummary {
+  avgHoldingDays: WalletScoreMetricDebug;
+  longestHoldDays: WalletScoreMetricDebug;
+  holdingsInProfitPercent: WalletScoreMetricDebug;
+  avgUnrealizedROI: WalletScoreMetricDebug;
+}
+
+export interface WalletHolderScorePortfolioSizeDebug
+  extends WalletScoreDimensionDebugSummary {
+  totalPortfolioUsd: WalletScoreMetricDebug;
+  largestPositionUsd: WalletScoreMetricDebug;
+  nonDustCount: WalletScoreMetricDebug;
+  portfolioSizeMultiplier: WalletScoreMetricDebug;
+}
+
+export interface WalletHolderScoreAssetSelectionDebug
+  extends WalletScoreDimensionDebugSummary {
+  blueChipHoldingPercent: WalletScoreMetricDebug;
+  stablecoinHoldingPercent: WalletScoreMetricDebug;
+  hasEth: WalletScoreMetricDebug;
+}
+
+export interface TraderWalletScoreDebugData {
   profitability: WalletScoreProfitabilityDebug;
   consistency: WalletScoreConsistencyDebug;
   riskManagement: WalletScoreRiskManagementDebug;
   portfolio: WalletScorePortfolioDebug;
   experience: WalletScoreExperienceDebug;
 }
+
+export interface HolderWalletScoreDebugData {
+  portfolioQuality: WalletHolderScorePortfolioQualityDebug;
+  conviction: WalletHolderScoreConvictionDebug;
+  portfolioSize: WalletHolderScorePortfolioSizeDebug;
+  assetSelection: WalletHolderScoreAssetSelectionDebug;
+}
+
+export type WalletScoreDebugData =
+  | TraderWalletScoreDebugData
+  | HolderWalletScoreDebugData;
 
 export interface WalletScoreDebugResponse extends WalletScoreResponse {
   debug: WalletScoreDebugData;
