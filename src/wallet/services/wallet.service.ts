@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import {
   Trade,
   WalletActivityMetricsResponse,
+  WalletContextResponse,
   WalletFeaturesResponse,
   WalletHoldingsResponse,
   WalletHoldTimeMetricsResponse,
@@ -17,6 +18,7 @@ import {
   WalletTransactionsResponse,
 } from '../wallet.types';
 import { WalletAnalyticsService } from './wallet-analytics.service';
+import { WalletContextService } from './wallet-context.service';
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
@@ -28,6 +30,7 @@ export class WalletService {
     private readonly walletPnlService: WalletPnlService,
     private readonly walletPortfolioService: WalletPortfolioService,
     private readonly walletAnalyticsService: WalletAnalyticsService,
+    private readonly walletContextService: WalletContextService,
   ) {}
 
   async getWalletData(address: string): Promise<WalletTransactionsResponse> {
@@ -75,6 +78,10 @@ export class WalletService {
       holdTime,
       activity,
     };
+  }
+
+  async getWalletContext(address: string): Promise<WalletContextResponse> {
+    return this.walletContextService.getWalletContext(address);
   }
 
   async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {

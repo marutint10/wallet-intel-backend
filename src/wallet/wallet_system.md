@@ -29,6 +29,7 @@ Current capabilities:
 - return live enriched portfolio analytics
 - return DB-backed reconstructed balances as a ledger view
 - return wallet summary metrics
+- return wallet context classification before higher-level scoring
 - return wallet risk metrics
 - return wallet hold-time metrics from completed FIFO trade lots
 - return wallet activity metrics from stored trade history
@@ -61,6 +62,7 @@ Responsibilities:
 - delegate PnL calls to `WalletPnlService`
 - delegate holdings, ledger, and portfolio calls to `WalletPortfolioService`
 - delegate risk, hold-time, and activity analytics to `WalletAnalyticsService`
+- delegate wallet archetype/context detection to `WalletContextService`
 - compose the unified wallet features response from existing service methods
 
 ### WalletAnalyticsService
@@ -73,6 +75,18 @@ Responsibilities:
 - compute hold-time metrics from completed FIFO buy/sell lot matches only
 - compute activity metrics from chronologically ordered stored trades
 - expose reusable analytics methods for the facade and controller layer
+
+### WalletContextService
+
+This is the pre-scoring wallet context layer.
+
+Responsibilities:
+
+- detect whether an address behaves like an `EOA` or `Contract` from on-chain bytecode
+- detect likely Gnosis Safe wallets with a Safe proxy bytecode heuristic when possible
+- classify whether the wallet qualifies as a trader from summary swap count
+- infer simple operational-treasury and bot-like subtypes from summary and activity metrics
+- return reasoning and confidence for downstream scoring decisions
 
 ### WalletCoreService
 
@@ -160,6 +174,7 @@ Current config values:
 - `PORT`
 - `MORALIS_API_KEY`
 - `COINGECKO_API_KEY`
+- `ETH_RPC_URL`
 - `DATABASE_URL`
 
 The app is currently Ethereum-focused.
@@ -411,6 +426,27 @@ Important notes:
 
 - this endpoint reuses the same summary and analytics methods used by the dedicated endpoints
 - the `risk` block returns the base risk response shape, not the optional debug extension
+
+### GET /wallet/:address/context
+
+Returns wallet archetype/context classification intended to run before smart-money scoring.
+
+Current fields:
+
+- `walletType`
+- `walletSubtype`
+- `isTraderWallet`
+- `classificationConfidence`
+- `reasoning`
+
+Current behavior notes:
+
+- `walletType` is derived from `eth_getCode`: bytecode present => `Contract`, otherwise `EOA`
+- Gnosis Safe detection uses a heuristic bytecode pattern check for the Safe proxy `masterCopy()` selector
+- `isTraderWallet = true` when `total_swaps >= 3`
+- `walletSubtype = Operational/Treasury` when `txCount > 50`, `transferRatio > 80%`, and `swaps <= 2`
+- `walletSubtype = Automated/Bot-like` when `tradesPerActiveDay > 20` and `avgTradeGapHours < 1`
+- Gnosis Safe subtype takes precedence over the treasury and bot-like heuristic labels because it is a stronger structural signal
 
 ### GET /wallet/:address/risk-metrics
 

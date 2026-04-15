@@ -7,6 +7,7 @@ import {
   PortfolioService,
   ScoringService,
   WalletAnalyticsService,
+  WalletContextService,
   WalletCoreService,
   WalletPnlService,
   WalletPortfolioService,
@@ -20,6 +21,7 @@ import { TransactionEntity } from './transaction.entity';
   controllers: [WalletController],
   providers: [
     WalletAnalyticsService,
+    WalletContextService,
     WalletCoreService,
     WalletPricingService,
     WalletPnlService,

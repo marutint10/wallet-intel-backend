@@ -6,6 +6,9 @@ export default () => ({
   coingecko: {
     apiKey: process.env.COINGECKO_API_KEY ?? '',
   },
+  rpc: {
+    url: process.env.ETH_RPC_URL ?? 'https://ethereum-rpc.publicnode.com',
+  },
   database: {
     url: process.env.DATABASE_URL ?? '',
   },

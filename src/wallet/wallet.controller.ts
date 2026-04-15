@@ -4,6 +4,7 @@ import {
   StoredWalletTransactionsResponse,
   Trade,
   WalletActivityMetricsResponse,
+  WalletContextResponse,
   WalletFeaturesResponse,
   WalletHoldingsResponse,
   WalletHoldTimeMetricsResponse,
@@ -98,6 +99,17 @@ export class WalletController {
     }
 
     return this.walletService.getWalletFeatures(address);
+  }
+
+  @Get(':address/context')
+  async getWalletContext(
+    @Param('address') address: string,
+  ): Promise<WalletContextResponse> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getWalletContext(address);
   }
 
   @Get(':address/transactions')

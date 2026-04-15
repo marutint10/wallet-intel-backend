@@ -103,6 +103,22 @@ export interface WalletActivityMetricsResponse {
   tradingSpanRatio: number;
 }
 
+export type WalletType = 'EOA' | 'Contract';
+
+export type WalletSubtype =
+  | 'Gnosis Safe'
+  | 'Operational/Treasury'
+  | 'Automated/Bot-like'
+  | null;
+
+export interface WalletContextResponse {
+  walletType: WalletType;
+  walletSubtype: WalletSubtype;
+  isTraderWallet: boolean;
+  classificationConfidence: number;
+  reasoning: string[];
+}
+
 export interface WalletFeaturesResponse {
   summary: WalletSummaryResponse;
   risk: WalletRiskMetricsResponse;
