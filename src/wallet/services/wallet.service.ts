@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import {
   Trade,
   WalletActivityMetricsResponse,
+  WalletClassification,
   WalletContextResponse,
   WalletDexMetricsResponse,
   WalletDexMetricsResult,
@@ -22,6 +23,7 @@ import {
   WalletTransactionsResponse,
 } from '../wallet.types';
 import { WalletAnalyticsService } from './wallet-analytics.service';
+import { ClassificationService } from './classification.service';
 import { WalletContextService } from './wallet-context.service';
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPnlService } from './wallet-pnl.service';
@@ -37,6 +39,7 @@ export class WalletService {
     private readonly walletAnalyticsService: WalletAnalyticsService,
     private readonly walletContextService: WalletContextService,
     private readonly walletScoringService: WalletScoringService,
+    private readonly classificationService: ClassificationService,
   ) {}
 
   async getWalletData(address: string): Promise<WalletTransactionsResponse> {
@@ -92,6 +95,10 @@ export class WalletService {
 
   async getWalletScore(address: string, debug = false): Promise<WalletScoreResult> {
     return this.walletScoringService.getWalletScore(address, debug);
+  }
+
+  async getClassification(address: string): Promise<WalletClassification> {
+    return this.classificationService.getClassification(address);
   }
 
   async getDexMetrics(
