@@ -4,6 +4,7 @@ import {
   StoredWalletTransactionsResponse,
   Trade,
   WalletActivityMetricsResponse,
+  WalletClassification,
   WalletContextResponse,
   WalletDexMetricsResult,
   WalletFeaturesResponse,
@@ -127,6 +128,15 @@ export class WalletController {
     return this.walletService.getWalletScore(address, debug === 'true');
   }
 
+  @Get(':address/classification')
+  async getClassification(
+    @Param('address') address: string,
+  ): Promise<WalletClassification> {
+    this.validateAddress(address);
+
+    return this.walletService.getClassification(address);
+  }
+
   @Get(':address/dex-metrics')
   async getDexMetrics(
     @Param('address') address: string,
@@ -233,5 +243,11 @@ export class WalletController {
     }
 
     return this.walletService.getWalletData(address);
+  }
+
+  private validateAddress(address: string): void {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
   }
 }
