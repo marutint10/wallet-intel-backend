@@ -11,8 +11,10 @@ import {
   WalletRiskMetricsDebugResponse,
   WalletRiskMetricsResult,
   WalletRiskMetricsResponse,
+  WalletTokenCategoryMetricsResponse,
 } from '../wallet.types';
 import { DEX_ROUTERS, UNKNOWN_DEX_LABEL } from '../constants/dex-routers';
+import { TokenCategory, classifyToken } from '../constants/token-categories';
 import {
   RealizedTradeMetrics,
   WalletPnlService,
@@ -235,6 +237,131 @@ export class WalletAnalyticsService {
       unknownRouterAddresses: Array.from(unknownRouterCounts.entries())
         .map(([address, count]) => ({ address, count }))
         .sort((left, right) => right.count - left.count),
+    };
+  }
+
+  async getTokenCategoryMetrics(
+    address: string,
+  ): Promise<WalletTokenCategoryMetricsResponse> {
+    const [pricedTrades, portfolio] = await Promise.all([
+      this.walletPnlService.getPricedTrades(address),
+      this.walletPortfolioService.getPortfolio(address),
+    ]);
+    const tradesByCategory = new Map<string, number>();
+    const volumeByCategory = new Map<string, number>();
+    const currentHoldingsByCategory = new Map<string, number>();
+
+    for (const trade of pricedTrades) {
+      const category = classifyToken(
+        trade.contractAddress,
+        trade.token,
+      ).category;
+      const categoryLabel = category.toString();
+
+      tradesByCategory.set(
+        categoryLabel,
+        (tradesByCategory.get(categoryLabel) ?? 0) + 1,
+      );
+
+      const tradeAmount = Number(trade.amount);
+
+      if (
+        Number.isFinite(trade.price) &&
+        trade.price > 0 &&
+        Number.isFinite(tradeAmount)
+      ) {
+        volumeByCategory.set(
+          categoryLabel,
+          this.roundDecimal(
+            (volumeByCategory.get(categoryLabel) ?? 0) + trade.price * tradeAmount,
+          ),
+        );
+      }
+    }
+
+    for (const holding of portfolio) {
+      if (!holding.usdValue) {
+        continue;
+      }
+
+      const usdValue = Number(holding.usdValue);
+
+      if (!Number.isFinite(usdValue)) {
+        continue;
+      }
+
+      const category = classifyToken(
+        holding.contractAddress,
+        holding.token,
+      ).category;
+      const categoryLabel = category.toString();
+
+      currentHoldingsByCategory.set(
+        categoryLabel,
+        this.roundDecimal(
+          (currentHoldingsByCategory.get(categoryLabel) ?? 0) + usdValue,
+        ),
+      );
+    }
+
+    const totalTrades = pricedTrades.length;
+    const totalVolume = Array.from(volumeByCategory.values()).reduce(
+      (total, value) => total + value,
+      0,
+    );
+    const totalHoldingsUsd = Array.from(currentHoldingsByCategory.values()).reduce(
+      (total, value) => total + value,
+      0,
+    );
+    const dominantTradingCategoryEntry = Array.from(tradesByCategory.entries()).sort(
+      (left, right) => right[1] - left[1],
+    )[0] ?? null;
+    const dominantHoldingCategoryEntry = Array.from(
+      currentHoldingsByCategory.entries(),
+    ).sort((left, right) => right[1] - left[1])[0] ?? null;
+    const memecoinTrades = tradesByCategory.get(TokenCategory.MEMECOIN) ?? 0;
+    const blueChipTrades = tradesByCategory.get(TokenCategory.BLUE_CHIP) ?? 0;
+    const stablecoinVolume = volumeByCategory.get(TokenCategory.STABLECOIN) ?? 0;
+    const memecoinHoldings =
+      currentHoldingsByCategory.get(TokenCategory.MEMECOIN) ?? 0;
+    const blueChipHoldings =
+      currentHoldingsByCategory.get(TokenCategory.BLUE_CHIP) ?? 0;
+    const stablecoinHoldings =
+      currentHoldingsByCategory.get(TokenCategory.STABLECOIN) ?? 0;
+
+    return {
+      tradesByCategory: Object.fromEntries(tradesByCategory.entries()),
+      historicalVolumeByCategory: Object.fromEntries(volumeByCategory.entries()),
+      dominantTradingCategory: dominantTradingCategoryEntry?.[0] ?? null,
+      categoryDiversity: tradesByCategory.size,
+      memecoinTradePercent:
+        totalTrades > 0
+          ? this.roundDecimal((memecoinTrades / totalTrades) * 100)
+          : 0,
+      blueChipTradePercent:
+        totalTrades > 0
+          ? this.roundDecimal((blueChipTrades / totalTrades) * 100)
+          : 0,
+      stablecoinTradePercent:
+        totalVolume > 0
+          ? this.roundDecimal((stablecoinVolume / totalVolume) * 100)
+          : 0,
+      currentHoldingsByCategory: Object.fromEntries(
+        currentHoldingsByCategory.entries(),
+      ),
+      dominantHoldingCategory: dominantHoldingCategoryEntry?.[0] ?? null,
+      memecoinHoldingPercent:
+        totalHoldingsUsd > 0
+          ? this.roundDecimal((memecoinHoldings / totalHoldingsUsd) * 100)
+          : 0,
+      blueChipHoldingPercent:
+        totalHoldingsUsd > 0
+          ? this.roundDecimal((blueChipHoldings / totalHoldingsUsd) * 100)
+          : 0,
+      stablecoinHoldingPercent:
+        totalHoldingsUsd > 0
+          ? this.roundDecimal((stablecoinHoldings / totalHoldingsUsd) * 100)
+          : 0,
     };
   }
 
