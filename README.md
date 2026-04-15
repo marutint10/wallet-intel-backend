@@ -15,10 +15,13 @@ npm install
 ```env
 MORALIS_API_KEY=your_key_here
 DATABASE_URL=your_postgres_connection
+DATABASE_CONNECTION_TIMEOUT_MS=10000
 PORT=3000
 ```
 
 3. Start PostgreSQL and ensure `DATABASE_URL` is valid.
+
+If you are using Supabase, prefer the pooler connection string with `sslmode=require` on Windows or any IPv4-only network. The direct `db.<project-ref>.supabase.co:5432` endpoint is IPv6-only and will time out if your machine cannot reach IPv6.
 
 4. Run the server:
 
