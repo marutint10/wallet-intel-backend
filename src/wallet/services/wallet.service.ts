@@ -14,6 +14,7 @@ import {
   WalletPortfolioResponse,
   WalletRiskMetricsResult,
   WalletRiskMetricsResponse,
+  WalletScoreResult,
   StoredWalletTransactionsResponse,
   WalletSummaryResponse,
   WalletTokenCategoryMetricsResponse,
@@ -25,6 +26,7 @@ import { WalletContextService } from './wallet-context.service';
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
+import { WalletScoringService } from './scoring.service';
 
 @Injectable()
 export class WalletService {
@@ -34,6 +36,7 @@ export class WalletService {
     private readonly walletPortfolioService: WalletPortfolioService,
     private readonly walletAnalyticsService: WalletAnalyticsService,
     private readonly walletContextService: WalletContextService,
+    private readonly walletScoringService: WalletScoringService,
   ) {}
 
   async getWalletData(address: string): Promise<WalletTransactionsResponse> {
@@ -85,6 +88,10 @@ export class WalletService {
 
   async getWalletContext(address: string): Promise<WalletContextResponse> {
     return this.walletContextService.getWalletContext(address);
+  }
+
+  async getWalletScore(address: string, debug = false): Promise<WalletScoreResult> {
+    return this.walletScoringService.getWalletScore(address, debug);
   }
 
   async getDexMetrics(
