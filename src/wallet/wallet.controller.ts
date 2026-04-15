@@ -16,6 +16,7 @@ import {
   WalletRiskMetricsResult,
   WalletRiskMetricsResponse,
   WalletSummaryResponse,
+  WalletTokenCategoryMetricsResponse,
   WalletTokenFlowResponse,
   WalletTransactionsResponse,
 } from './wallet.types';
@@ -123,6 +124,17 @@ export class WalletController {
     }
 
     return this.walletService.getDexMetrics(address, debug === 'true');
+  }
+
+  @Get(':address/token-categories')
+  async getTokenCategoryMetrics(
+    @Param('address') address: string,
+  ): Promise<WalletTokenCategoryMetricsResponse> {
+    if (!isEthereumAddress(address)) {
+      throw new BadRequestException('Invalid Ethereum wallet address');
+    }
+
+    return this.walletService.getTokenCategoryMetrics(address);
   }
 
   @Get(':address/transactions')
