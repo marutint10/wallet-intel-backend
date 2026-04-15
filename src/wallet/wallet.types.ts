@@ -111,6 +111,21 @@ export interface WalletDexMetricsResponse {
   unknownDexPercent: number;
 }
 
+export interface WalletTokenCategoryMetricsResponse {
+  tradesByCategory: Record<string, number>;
+  historicalVolumeByCategory: Record<string, number>;
+  dominantTradingCategory: string | null;
+  categoryDiversity: number;
+  memecoinTradePercent: number;
+  blueChipTradePercent: number;
+  stablecoinTradePercent: number;
+  currentHoldingsByCategory: Record<string, number>;
+  dominantHoldingCategory: string | null;
+  memecoinHoldingPercent: number;
+  blueChipHoldingPercent: number;
+  stablecoinHoldingPercent: number;
+}
+
 export interface UnknownRouterAddressCount {
   address: string;
   count: number;
