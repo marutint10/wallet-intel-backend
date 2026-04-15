@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { TokenCategory } from '../constants/token-categories';
 import {
 	Trade,
@@ -51,6 +51,8 @@ interface ClassificationInputs {
 
 @Injectable()
 export class ClassificationService {
+	private readonly logger = new Logger(ClassificationService.name);
+
 	constructor(
 		private readonly walletPnlService: WalletPnlService,
 		private readonly walletAnalyticsService: WalletAnalyticsService,
@@ -72,6 +74,13 @@ export class ClassificationService {
 		const normalizedAddress = summary.address ?? address.toLowerCase();
 
 		if (summary.total_swaps < 3) {
+			this.logger.debug({
+				address: normalizedAddress,
+				classificationScores: {},
+				selectedPrimary: 'Insufficient Data',
+				confidence: 'low',
+			});
+
 			return {
 				address: normalizedAddress,
 				primaryType: 'Insufficient Data',
@@ -132,12 +141,21 @@ export class ClassificationService {
 		const [primaryType, primaryScore] = rankedScores[0] ?? ['Diamond Hand', 0];
 		const secondScore = rankedScores[1]?.[1] ?? 0;
 		const primaryThreshold = primaryScore * 0.6;
+		const confidence = this.computeConfidence(primaryScore, secondScore);
+		const allScores = Object.fromEntries(scoreEntries);
+
+		this.logger.debug({
+			address: normalizedAddress,
+			classificationScores: allScores,
+			selectedPrimary: primaryType,
+			confidence,
+		});
 
 		return {
 			address: normalizedAddress,
 			primaryType,
 			primaryScore,
-			confidence: this.computeConfidence(primaryScore, secondScore),
+			confidence,
 			secondaryTypes:
 				primaryScore > 0
 					? rankedScores
@@ -146,7 +164,7 @@ export class ClassificationService {
 							.slice(0, 2)
 							.map(([type]) => type)
 					: [],
-			allScores: Object.fromEntries(scoreEntries),
+			allScores,
 			classifiedAt: new Date().toISOString(),
 		};
 	}
@@ -176,8 +194,10 @@ export class ClassificationService {
 	private scoreDiamondHand(input: ClassificationInputs): number {
 		const over7dRatio =
 			input.totalHolds > 0 ? input.holdTime.holdBuckets.over7d / input.totalHolds : 0;
+		const maxScore = input.holdTime.medianHoldHours < 168 ? 30 : 100;
 
-		return this.weightedScore([
+		return Math.min(
+			this.weightedScore([
 			{
 				score: this.scoreGreaterThan(input.holdTime.medianHoldHours, [
 					{ threshold: 2160, score: 100 },
@@ -213,7 +233,9 @@ export class ClassificationService {
 				]),
 				weight: 0.1,
 			},
-		]);
+			]),
+			maxScore,
+		);
 	}
 
 	private scoreSwingTrader(input: ClassificationInputs): number {
@@ -257,20 +279,24 @@ export class ClassificationService {
 	}
 
 	private scoreDayTrader(input: ClassificationInputs): number {
+		if (input.holdTime.medianHoldHours > 48) {
+			return 0;
+		}
+
 		return this.weightedScore([
 			{
 				score: this.scoreRange(input.holdTime.medianHoldHours, [
 					{ min: 1, max: 24, score: 100 },
 					{ min: 0.5, max: 48, score: 50 },
 				]),
-				weight: 0.35,
+				weight: 0.45,
 			},
 			{
 				score: this.scoreGreaterThan(input.activity.tradesPerActiveDay, [
 					{ threshold: 3, score: 100 },
 					{ threshold: 2, score: 60 },
 				]),
-				weight: 0.25,
+				weight: 0.2,
 			},
 			{
 				score: this.scoreGreaterThan(input.activity.tradingSpanRatio, [
@@ -278,7 +304,7 @@ export class ClassificationService {
 					{ threshold: 0.3, score: 60 },
 					{ threshold: 0.15, score: 30 },
 				]),
-				weight: 0.2,
+				weight: 0.15,
 			},
 			{
 				score: this.scoreGreaterThan(input.summary.total_swaps, [
@@ -292,6 +318,10 @@ export class ClassificationService {
 	}
 
 	private scoreSniper(input: ClassificationInputs): number {
+		if (input.holdTime.medianHoldHours > 4) {
+			return 0;
+		}
+
 		return this.weightedScore([
 			{
 				score: this.scoreLessThan(input.holdTime.medianHoldHours, [
@@ -332,6 +362,10 @@ export class ClassificationService {
 	}
 
 	private scoreDegenApe(input: ClassificationInputs): number {
+		if (input.tokenCategories.memecoinTradePercent < 10) {
+			return 0;
+		}
+
 		return this.weightedScore([
 			{
 				score: this.scoreGreaterThan(input.tokenCategories.memecoinTradePercent, [
@@ -414,6 +448,13 @@ export class ClassificationService {
 	}
 
 	private scoreWhale(input: ClassificationInputs): number {
+		const hasWhaleScaleSignal =
+			input.summary.totalRealizedPnL > 10000 || input.avgTradeSize > 1000;
+
+		if (!hasWhaleScaleSignal) {
+			return 0;
+		}
+
 		return this.weightedScore([
 			{
 				score: this.scoreGreaterThan(input.summary.totalRealizedPnL, [
@@ -446,6 +487,10 @@ export class ClassificationService {
 	}
 
 	private scorePaperHand(input: ClassificationInputs): number {
+		if (input.summary.avgWinRate > 50) {
+			return 0;
+		}
+
 		return this.weightedScore([
 			{
 				score: this.scoreLessThan(input.holdTime.medianHoldHours, [
@@ -519,16 +564,13 @@ export class ClassificationService {
 	}
 
 	private scoreDefiStrategist(input: ClassificationInputs): number {
-		const dominantDefiScore =
-			input.tokenCategories.dominantTradingCategory === TokenCategory.DEFI
-				? 100
-				: input.tokenCategories.blueChipTradePercent + input.defiTradePercent > 60
-					? 70
-					: 0;
+		if (input.tokenCategories.dominantTradingCategory !== TokenCategory.DEFI) {
+			return 0;
+		}
 
 		return this.weightedScore([
 			{
-				score: dominantDefiScore,
+				score: 100,
 				weight: 0.3,
 			},
 			{
