@@ -44,7 +44,7 @@ interface DefiLlamaPriceResponse {
 interface HistoricalPriceFetchResult {
   value: number | null;
   shouldCache: boolean;
-  status: 'success' | 'no-data' | 'error' | 'rate-limited' | 'cooldown';
+  status: 'success' | 'no-data' | 'error' | 'rate-limited' | 'cooldown' | 'cached-no-data';
 }
 
 interface PriceFetchBatchSummary {
@@ -122,6 +122,13 @@ export class WalletPricingService {
         return defiLlamaResult.value ?? 0;
       }
 
+      if (defiLlamaResult.status === 'cached-no-data') {
+        this.logger.debug(
+          `Price cache hit (null): skipping CoinGecko fallback for ${token} at ${timestamp}`,
+        );
+        return 0;
+      }
+
       if (
         defiLlamaResult.status === 'rate-limited' ||
         defiLlamaResult.status === 'cooldown'
@@ -165,9 +172,15 @@ export class WalletPricingService {
         return defiLlamaResult.value ?? 0;
       }
 
-      this.logger.warn(
-        `No DefiLlama historical market price found for ${token} at ${timestamp}`,
-      );
+      if (defiLlamaResult.status !== 'cached-no-data') {
+        this.logger.warn(
+          `No DefiLlama historical market price found for ${token} at ${timestamp}`,
+        );
+      } else {
+        this.logger.debug(
+          `Price cache hit (null): no market price for ${token} at ${timestamp}`,
+        );
+      }
 
       return 0;
     });
@@ -543,14 +556,18 @@ export class WalletPricingService {
     const cached = this.priceCache.get(cacheKey);
 
     if (cached && cached.expiresAt > Date.now()) {
-      this.logger.debug(
-        `Price cache hit: ${cacheKey} ($${cached.price} via ${cached.source})`,
-      );
+      if (cached.price !== null) {
+        this.logger.debug(
+          `Price cache hit: ${cacheKey} ($${cached.price} via ${cached.source})`,
+        );
+      } else {
+        this.logger.debug(`Price cache hit (null): ${cacheKey}`);
+      }
 
       return {
         value: cached.price,
         shouldCache: true,
-        status: cached.price === null ? 'no-data' : 'success',
+        status: cached.price === null ? 'cached-no-data' : 'success',
       };
     }
 
