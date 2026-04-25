@@ -580,7 +580,12 @@ export class WalletPortfolioService {
         | 'stake'
         | 'unstake'
         | 'staking_wrap'
-        | 'staking_unwrap';
+        | 'staking_unwrap'
+        | 'yield_split'
+        | 'yield_merge'
+        | 'receipt_mint'
+        | 'receipt_burn'
+        | 'protocol_transform';
       timestamp: Date;
       inputs: NormalizedTokenAmount[];
       outputs: NormalizedTokenAmount[];
@@ -604,7 +609,12 @@ export class WalletPortfolioService {
         | 'stake'
         | 'unstake'
         | 'staking_wrap'
-        | 'staking_unwrap';
+        | 'staking_unwrap'
+        | 'yield_split'
+        | 'yield_merge'
+        | 'receipt_mint'
+        | 'receipt_burn'
+        | 'protocol_transform';
       timestamp: Date;
       inputs: NormalizedTokenAmount[];
       outputs: NormalizedTokenAmount[];
@@ -645,7 +655,12 @@ export class WalletPortfolioService {
       | 'stake'
       | 'unstake'
       | 'staking_wrap'
-      | 'staking_unwrap',
+      | 'staking_unwrap'
+      | 'yield_split'
+      | 'yield_merge'
+      | 'receipt_mint'
+      | 'receipt_burn'
+      | 'protocol_transform',
     priceCache: Map<string, string | null>,
   ): Promise<void> {
     const rawAmount = this.parseRawAmount(entry.amount);
@@ -808,7 +823,12 @@ export class WalletPortfolioService {
       | 'stake'
       | 'unstake'
       | 'staking_wrap'
-      | 'staking_unwrap',
+      | 'staking_unwrap'
+      | 'yield_split'
+      | 'yield_merge'
+      | 'receipt_mint'
+      | 'receipt_burn'
+      | 'protocol_transform',
     priceCache: Map<string, string | null>,
   ): Promise<string | null> {
     const cacheKey = `${transactionType}:${this.getHoldingKey(entry.token, entry.contractAddress)}:${timestamp.toISOString()}`;
