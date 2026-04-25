@@ -11,6 +11,7 @@ import {
 } from '../wallet.types';
 import { MoralisKeysExhaustedError, WalletCoreService } from './wallet-core.service';
 import { WalletPricingService } from './wallet-pricing.service';
+import { HybridHoldingsService } from './hybrid-holdings.service';
 
 interface HoldingLot {
   amount: bigint;
@@ -47,6 +48,7 @@ export class WalletPortfolioService {
   constructor(
     private readonly walletCoreService: WalletCoreService,
     private readonly walletPricingService: WalletPricingService,
+    private readonly hybridHoldingsService: HybridHoldingsService,
   ) {}
 
   async getHoldings(address: string): Promise<WalletHoldingsResponse> {
@@ -244,6 +246,25 @@ export class WalletPortfolioService {
   private async getHoldingsWithAvailability(
     address: string,
   ): Promise<HoldingsLoadResult> {
+    this.logger.log(`Using hybrid holdings source for ${address.toLowerCase()}`);
+
+    try {
+      const holdings = await this.hybridHoldingsService.getHoldings(address);
+
+      this.logger.log(
+        `Hybrid success for ${address.toLowerCase()} with ${holdings.length} holdings`,
+      );
+
+      return {
+        holdings,
+        balancesAvailable: true,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Hybrid fallback to Moralis for ${address.toLowerCase()}: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+    }
+
     try {
       const [nativeBalance, erc20Balances] = await Promise.all([
         this.walletCoreService.getNativeBalance(address),
