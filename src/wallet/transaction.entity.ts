@@ -48,6 +48,15 @@ export class TransactionEntity {
       'receipt_mint',
       'receipt_burn',
       'protocol_transform',
+      'bridge_out',
+      'bridge_in',
+      'lending_deposit',
+      'lending_withdraw',
+      'borrow',
+      'repay',
+      'vault_deposit',
+      'vault_withdraw',
+      'reward_claim',
     ],
   })
   type!:
@@ -65,7 +74,16 @@ export class TransactionEntity {
     | 'yield_merge'
     | 'receipt_mint'
     | 'receipt_burn'
-    | 'protocol_transform';
+    | 'protocol_transform'
+    | 'bridge_out'
+    | 'bridge_in'
+    | 'lending_deposit'
+    | 'lending_withdraw'
+    | 'borrow'
+    | 'repay'
+    | 'vault_deposit'
+    | 'vault_withdraw'
+    | 'reward_claim';
 
   @Column({ type: 'jsonb' })
   inputs!: NormalizedTokenAmount[];
