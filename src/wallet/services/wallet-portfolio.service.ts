@@ -585,7 +585,16 @@ export class WalletPortfolioService {
         | 'yield_merge'
         | 'receipt_mint'
         | 'receipt_burn'
-        | 'protocol_transform';
+        | 'protocol_transform'
+        | 'bridge_out'
+        | 'bridge_in'
+        | 'lending_deposit'
+        | 'lending_withdraw'
+        | 'borrow'
+        | 'repay'
+        | 'vault_deposit'
+        | 'vault_withdraw'
+        | 'reward_claim';
       timestamp: Date;
       inputs: NormalizedTokenAmount[];
       outputs: NormalizedTokenAmount[];
@@ -614,7 +623,16 @@ export class WalletPortfolioService {
         | 'yield_merge'
         | 'receipt_mint'
         | 'receipt_burn'
-        | 'protocol_transform';
+        | 'protocol_transform'
+        | 'bridge_out'
+        | 'bridge_in'
+        | 'lending_deposit'
+        | 'lending_withdraw'
+        | 'borrow'
+        | 'repay'
+        | 'vault_deposit'
+        | 'vault_withdraw'
+        | 'reward_claim';
       timestamp: Date;
       inputs: NormalizedTokenAmount[];
       outputs: NormalizedTokenAmount[];
@@ -660,7 +678,16 @@ export class WalletPortfolioService {
       | 'yield_merge'
       | 'receipt_mint'
       | 'receipt_burn'
-      | 'protocol_transform',
+      | 'protocol_transform'
+      | 'bridge_out'
+      | 'bridge_in'
+      | 'lending_deposit'
+      | 'lending_withdraw'
+      | 'borrow'
+      | 'repay'
+      | 'vault_deposit'
+      | 'vault_withdraw'
+      | 'reward_claim',
     priceCache: Map<string, string | null>,
   ): Promise<void> {
     const rawAmount = this.parseRawAmount(entry.amount);
@@ -828,7 +855,16 @@ export class WalletPortfolioService {
       | 'yield_merge'
       | 'receipt_mint'
       | 'receipt_burn'
-      | 'protocol_transform',
+      | 'protocol_transform'
+      | 'bridge_out'
+      | 'bridge_in'
+      | 'lending_deposit'
+      | 'lending_withdraw'
+      | 'borrow'
+      | 'repay'
+      | 'vault_deposit'
+      | 'vault_withdraw'
+      | 'reward_claim',
     priceCache: Map<string, string | null>,
   ): Promise<string | null> {
     const cacheKey = `${transactionType}:${this.getHoldingKey(entry.token, entry.contractAddress)}:${timestamp.toISOString()}`;
