@@ -19,7 +19,7 @@ Current capabilities:
 - normalize ERC-20 and native ETH activity into one internal format
 - persist normalized transactions in Postgres
 - serve stored normalized transactions
-- classify normalized transactions as `transfer` or `swap`
+- classify normalized transactions as `transfer`, `swap`, `wrap`, `unwrap`, `liquidity_add`, or `liquidity_remove`
 - build trades from swap transactions
 - attach historical prices to trades
 - infer one missing swap-leg price from the priced counterpart trade
@@ -148,7 +148,9 @@ Responsibilities:
 - fetch ERC-20 transfers and wallet history
 - refresh only new blocks when DB data already exists
 - normalize raw provider payloads into `NormalizedTransaction`
-- persist normalized transactions into Postgres
+- classify each normalized transaction into one of six types using a priority-ordered rule set: `wrap`, `unwrap`, `liquidity_add`, `liquidity_remove`, `transfer`, or `swap`
+- emit `debug`-level logs for wrap, unwrap, liquidity_add, and liquidity_remove detections keyed by transaction hash
+- persist normalized transactions into Postgres; only non-`unknown` transactions are saved
 - return stored normalized transactions
 - expose transaction entities to downstream services
 - build trade entries from normalized token amounts
@@ -310,7 +312,7 @@ Important stored fields:
 - timestamp
 - from address
 - to address
-- type: `transfer` or `swap`
+- type: `transfer`, `swap`, `wrap`, `unwrap`, `liquidity_add`, or `liquidity_remove`
 - inputs: tokens leaving the wallet
 - outputs: tokens entering the wallet
 
@@ -757,7 +759,7 @@ During normalization we:
 - push outgoing assets into `inputs`
 - push incoming assets into `outputs`
 - merge repeated token entries inside the same transaction
-- classify the transaction as `transfer` or `swap`
+- classify the transaction into one of the six supported types
 
 ### Step 5: save and return stored view
 
@@ -767,13 +769,23 @@ This keeps the output stable regardless of the raw provider payload.
 
 ## 10. Transaction classification rules
 
-Current rules are intentionally lightweight.
+Rules are applied in priority order. The first match wins.
 
-- inputs + outputs with different tokens => `swap`
-- only one side present => `transfer`
-- inputs + outputs of the same token => `transfer`
+**wrap** — single input token is `ETH`, single output token is `WETH`
 
-This works well for many common wallet events, but it is still a heuristic.
+**unwrap** — single input token is `WETH`, single output token is `ETH`
+
+**liquidity_add** — two or more distinct input tokens and exactly one output token whose symbol matches the LP token pattern: `LP`, `UNI-V2`, `PAIR`, `POOL`, `BPT`, `SLP`, `Cake-LP` (case-insensitive)
+
+**liquidity_remove** — exactly one input token whose symbol matches the LP token pattern above, and two or more distinct output tokens
+
+**transfer** — same single token on both input and output sides, or only one side present
+
+**swap** — any other combination of different-token inputs and outputs
+
+**unknown** — no inputs and no outputs; these transactions are not persisted
+
+Wrap, unwrap, liquidity_add, and liquidity_remove transactions are stored but are **never** converted into trades. Only `swap` transactions feed the PnL pipeline. This ensures LP deposits, LP withdrawals, WETH wraps, and unwraps no longer inflate realized PnL, swap counts, or trader classification signals.
 
 ## 11. How live holdings work
 
