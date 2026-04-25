@@ -53,6 +53,12 @@ interface PriceFetchBatchSummary {
   requestsMade: number;
 }
 
+interface PriceCacheEntry {
+  price: number | null;
+  source: string;
+  expiresAt: number;
+}
+
 const COINGECKO_API_BASE_URL = 'https://api.coingecko.com/api/v3';
 const DEFILLAMA_API_BASE_URL = 'https://coins.llama.fi';
 
@@ -69,10 +75,13 @@ export class WalletPricingService {
   private static readonly DEFILLAMA_429_THRESHOLD = 5;
   private static readonly DEFILLAMA_COOLDOWN_MS = 15000;
   private static readonly PRICE_FETCH_SUMMARY_IDLE_MS = 1000;
+  private static readonly HISTORICAL_PRICE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+  private static readonly LIVE_PRICE_CACHE_TTL_MS = 5 * 60 * 1000;
   private readonly logger = new Logger(WalletPricingService.name);
   private readonly coinGeckoApiKey: string;
-  private readonly priceCache = new Map<string, number | null>();
+  private readonly priceCache = new Map<string, PriceCacheEntry>();
   private readonly inFlightRequests = new Map<string, Promise<number | null>>();
+  private readonly inFlightLiveRequests = new Map<string, Promise<number>>();
   private readonly inFlightRequestResults = new Map<
     string,
     Promise<HistoricalPriceFetchResult>
@@ -176,11 +185,36 @@ export class WalletPricingService {
       return {};
     }
 
+    const result: Record<string, number> = {};
+    const uncachedAddresses: string[] = [];
+    const now = Date.now();
+
+    for (const address of contractAddresses) {
+      const normalizedAddress = address.toLowerCase();
+      const cacheKey = `live:ethereum:${normalizedAddress}`;
+      const cached = this.priceCache.get(cacheKey);
+
+      if (cached && cached.expiresAt > now) {
+        this.logger.debug(`Price cache hit: ${cacheKey} ($${cached.price})`);
+
+        if (cached.price !== null) {
+          result[normalizedAddress] = cached.price;
+        }
+      } else {
+        this.logger.debug(`Price cache miss: ${cacheKey}`);
+        uncachedAddresses.push(address);
+      }
+    }
+
+    if (uncachedAddresses.length === 0) {
+      return result;
+    }
+
     const response = await axios.get<CoinGeckoTokenPriceResponse>(
       `${COINGECKO_API_BASE_URL}/simple/token_price/ethereum`,
       {
         params: {
-          contract_addresses: contractAddresses.join(','),
+          contract_addresses: uncachedAddresses.join(','),
           vs_currencies: 'usd',
           x_cg_demo_api_key: this.coinGeckoApiKey,
         },
@@ -188,12 +222,36 @@ export class WalletPricingService {
       },
     );
 
-    return Object.fromEntries(
-      Object.entries(response.data).map(([contractAddress, value]) => [
-        contractAddress.toLowerCase(),
-        typeof value.usd === 'number' ? value.usd : 0,
-      ]),
-    );
+    const fetchedAt = Date.now();
+
+    for (const [contractAddress, value] of Object.entries(response.data)) {
+      const normalizedAddress = contractAddress.toLowerCase();
+      const price = typeof value.usd === 'number' ? value.usd : 0;
+      result[normalizedAddress] = price;
+
+      const cacheKey = `live:ethereum:${normalizedAddress}`;
+      this.priceCache.set(cacheKey, {
+        price: price > 0 ? price : null,
+        source: 'coingecko',
+        expiresAt: fetchedAt + WalletPricingService.LIVE_PRICE_CACHE_TTL_MS,
+      });
+      this.logger.debug(`Price cache set: ${cacheKey} = $${price}`);
+    }
+
+    for (const address of uncachedAddresses) {
+      const normalizedAddress = address.toLowerCase();
+
+      if (!(normalizedAddress in result)) {
+        const cacheKey = `live:ethereum:${normalizedAddress}`;
+        this.priceCache.set(cacheKey, {
+          price: null,
+          source: 'coingecko',
+          expiresAt: fetchedAt + WalletPricingService.LIVE_PRICE_CACHE_TTL_MS,
+        });
+      }
+    }
+
+    return result;
   }
 
   async fetchEthereumUsdPrice(): Promise<number> {
@@ -202,21 +260,57 @@ export class WalletPricingService {
       return 0;
     }
 
-    const response = await axios.get<CoinGeckoEthPriceResponse>(
-      `${COINGECKO_API_BASE_URL}/simple/price`,
-      {
-        params: {
-          ids: 'ethereum',
-          vs_currencies: 'usd',
-          x_cg_demo_api_key: this.coinGeckoApiKey,
-        },
-        timeout: 10000,
-      },
-    );
+    const cacheKey = 'live:ethereum:eth';
+    const cached = this.priceCache.get(cacheKey);
 
-    return typeof response.data.ethereum?.usd === 'number'
-      ? response.data.ethereum.usd
-      : 0;
+    if (cached && cached.expiresAt > Date.now()) {
+      this.logger.debug(`Price cache hit: ${cacheKey} ($${cached.price})`);
+      return cached.price ?? 0;
+    }
+
+    this.logger.debug(`Price cache miss: ${cacheKey}`);
+
+    const inFlight = this.inFlightLiveRequests.get(cacheKey);
+
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const request = (async (): Promise<number> => {
+      const response = await axios.get<CoinGeckoEthPriceResponse>(
+        `${COINGECKO_API_BASE_URL}/simple/price`,
+        {
+          params: {
+            ids: 'ethereum',
+            vs_currencies: 'usd',
+            x_cg_demo_api_key: this.coinGeckoApiKey,
+          },
+          timeout: 10000,
+        },
+      );
+
+      const price =
+        typeof response.data.ethereum?.usd === 'number'
+          ? response.data.ethereum.usd
+          : 0;
+
+      this.priceCache.set(cacheKey, {
+        price: price > 0 ? price : null,
+        source: 'coingecko',
+        expiresAt: Date.now() + WalletPricingService.LIVE_PRICE_CACHE_TTL_MS,
+      });
+      this.logger.debug(`Price cache set: ${cacheKey} = $${price}`);
+
+      return price;
+    })();
+
+    this.inFlightLiveRequests.set(cacheKey, request);
+
+    try {
+      return await request;
+    } finally {
+      this.inFlightLiveRequests.delete(cacheKey);
+    }
   }
 
   inferMissingSwapPrices(pricedTrades: PricedTrade[]): PricedTrade[] {
@@ -330,7 +424,7 @@ export class WalletPricingService {
 
     const cacheKey = this.buildPriceCacheKey(`defillama:${coinKey}`, timestamp);
 
-    return this.fetchHistoricalPriceWithCache(cacheKey, async () => {
+    return this.fetchHistoricalPriceWithCache(cacheKey, 'defillama', async () => {
       return this.fetchDefiLlamaPriceUncached(token, coinKey, timestamp, cacheKey);
     });
   }
@@ -378,7 +472,7 @@ export class WalletPricingService {
 
     const cacheKey = this.buildPriceCacheKey(`coingecko:${coinId}`, timestamp);
 
-    return this.fetchHistoricalPriceWithCache(cacheKey, async () => {
+    return this.fetchHistoricalPriceWithCache(cacheKey, 'coingecko', async () => {
       try {
         const date = this.formatTradeDate(timestamp);
         const url = `${COINGECKO_API_BASE_URL}/coins/${coinId}/history`;
@@ -437,22 +531,30 @@ export class WalletPricingService {
   }
 
   private buildPriceCacheKey(tokenIdentifier: string, timestamp: number): string {
-    return `${tokenIdentifier}:${timestamp}`;
+    const roundedTs = Math.floor(timestamp / 3600) * 3600;
+    return `${tokenIdentifier}:${roundedTs}`;
   }
 
   private async fetchHistoricalPriceWithCache(
     cacheKey: string,
+    source: string,
     fetcher: () => Promise<HistoricalPriceFetchResult>,
   ): Promise<HistoricalPriceFetchResult> {
-    if (this.priceCache.has(cacheKey)) {
-      const cachedValue = this.priceCache.get(cacheKey) ?? null;
+    const cached = this.priceCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > Date.now()) {
+      this.logger.debug(
+        `Price cache hit: ${cacheKey} ($${cached.price} via ${cached.source})`,
+      );
 
       return {
-        value: cachedValue,
+        value: cached.price,
         shouldCache: true,
-        status: cachedValue === null ? 'no-data' : 'success',
+        status: cached.price === null ? 'no-data' : 'success',
       };
     }
+
+    this.logger.debug(`Price cache miss: ${cacheKey}`);
 
     const inFlightRequest = this.inFlightRequestResults.get(cacheKey);
 
@@ -464,7 +566,14 @@ export class WalletPricingService {
       const result = await fetcher();
 
       if (result.shouldCache) {
-        this.priceCache.set(cacheKey, result.value);
+        this.priceCache.set(cacheKey, {
+          price: result.value,
+          source,
+          expiresAt: Date.now() + WalletPricingService.HISTORICAL_PRICE_CACHE_TTL_MS,
+        });
+        this.logger.debug(
+          `Price cache set: ${cacheKey} = $${result.value} via ${source}`,
+        );
       }
 
       return result;
