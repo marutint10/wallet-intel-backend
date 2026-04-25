@@ -30,6 +30,7 @@ Current capabilities:
 - return DB-backed reconstructed balances as a ledger view
 - return wallet summary metrics
 - return wallet context classification before higher-level scoring
+- return higher-level wallet behavior classification for trader and holder wallets
 - return wallet risk metrics
 - return wallet hold-time metrics from completed FIFO trade lots
 - return wallet activity metrics from stored trade history
@@ -66,6 +67,7 @@ Responsibilities:
 - delegate holdings, ledger, and portfolio calls to `WalletPortfolioService`
 - delegate risk, hold-time, and activity analytics to `WalletAnalyticsService`
 - delegate wallet archetype/context detection to `WalletContextService`
+- delegate wallet behavior classification to `ClassificationService`
 - delegate V1 smart-money scoring to `WalletScoringService`
 - compose the unified wallet features response from existing service methods
 
@@ -101,10 +103,23 @@ This is the V1 smart-money scoring layer.
 Responsibilities:
 
 - reuse existing context, summary, activity, risk, DEX, and token-category service methods
-- apply score gate rules before scoring ineligible wallets
-- compute a fixed-bracket score across profitability, consistency, risk management, portfolio quality, and experience
-- assign a confidence level from swap count and trading-span coverage
+- apply score gate rules before scoring ineligible trader wallets
+- score trader wallets across profitability, consistency, risk management, portfolio quality, and experience
+- score holder wallets across portfolio quality, conviction, portfolio size, and asset selection
+- return `balancesAvailable` so downstream consumers can distinguish empty holdings from unavailable live balances
+- assign confidence from swap count and trading-span coverage for traders, and from portfolio breadth, size, and holding duration for holders
 - return a structured score response with dimension breakdowns
+
+### ClassificationService
+
+This is the higher-level behavior-classification layer.
+
+Responsibilities:
+
+- classify trader wallets into narrative archetypes such as `Diamond Hand`, `Swing Trader`, `Sniper`, or `DeFi Strategist`
+- classify holder wallets into archetypes such as `Blue Chip Maximalist`, `Diversified Holder`, or `Dust Wallet`
+- fall back to `Empty Wallet` when live balances are unavailable or no positive-value holdings exist for non-trader wallets
+- return a structured classification response with confidence, traits, risk profile, secondary types, and score breakdowns per archetype
 
 ### WalletCoreService
 
@@ -167,7 +182,6 @@ The following services still exist as placeholders for future architecture work:
 
 - `PortfolioService`
 - `PnlService`
-- `ClassificationService`
 
 They are registered in the module but are not the main runtime path for current wallet analytics.
 
@@ -176,10 +190,13 @@ They are registered in the module but are not the main runtime path for current 
 `WalletModule` registers:
 
 - `WalletController`
+- `WalletAnalyticsService`
+- `WalletContextService`
 - `WalletCoreService`
 - `WalletPricingService`
 - `WalletPnlService`
 - `WalletPortfolioService`
+- `ClassificationService`
 - `WalletScoringService`
 - `WalletService`
 - the placeholder services listed above
@@ -478,15 +495,48 @@ Current fields:
 - `band`
 - `breakdown`
 - `gateStatus`
+- `balancesAvailable`
 - `scoredAt`
 
 Current behavior notes:
 
-- gate order is `Not a Trader Wallet` -> `Insufficient Data` -> `No Trading Activity`
-- gated wallets return `score = 0`, `band = Unscored`, and zeroed dimension breakdowns
-- confidence uses fixed thresholds: `high` for `swaps >= 50` and `tradingSpanDays >= 90`, `medium` for `swaps >= 15` and `tradingSpanDays >= 30`, else `low`
-- the total score is the sum of five weighted dimensions: profitability `30`, consistency `20`, risk management `20`, portfolio quality `15`, experience `15`
-- bracket scoring is fixed and does not recompute underlying analytics beyond lightweight derivations such as trading span days from existing trade history
+- trader gate order is `Not a Trader Wallet` -> `Insufficient Data` -> `No Trading Activity`
+- trader wallets that pass gating return `gateStatus = Eligible`
+- non-trader wallets with positive-value holdings are scored on a holder path and return `gateStatus = Eligible (Holder)`
+- non-trader wallets with no positive-value holdings return `gateStatus = Empty Wallet`, `score = 0`, `band = Unscored`, and zeroed holder breakdowns
+- trader confidence uses fixed thresholds: `high` for `swaps >= 50` and `tradingSpanDays >= 90`, `medium` for `swaps >= 15` and `tradingSpanDays >= 30`, else `low`
+- trader scoring uses five weighted dimensions: profitability `30`, consistency `20`, risk management `20`, portfolio quality `15`, experience `15`
+- holder scoring uses four weighted dimensions: portfolio quality `35`, conviction `30`, portfolio size `20`, asset selection `15`
+- holder scores are scaled by a portfolio-size multiplier before band assignment
+- `balancesAvailable` is `false` when live balances could not be loaded, which lets score consumers distinguish provider availability problems from a true empty wallet
+- `GET /wallet/:address/score?debug=true` returns the base response plus per-dimension debug metrics for the active scoring path
+
+### GET /wallet/:address/classification
+
+Returns a higher-level wallet behavior classification built on top of context, analytics, and holdings data.
+
+Current fields:
+
+- `address`
+- `type`
+- `primaryType`
+- `primaryScore`
+- `confidence`
+- `description`
+- `traits`
+- `riskProfile`
+- `secondaryTypes`
+- `allScores`
+- `classifiedAt`
+
+Current behavior notes:
+
+- trader wallets are classified with a weighted-archetype system over summary, hold-time, activity, DEX, risk, and token-category signals
+- holder wallets are classified with a weighted-archetype system over live portfolio composition, holding duration, unrealized posture, and category exposure
+- non-trader wallets with no positive-value holdings, or with unavailable live balances, fall back to `Empty Wallet`
+- the response returns the winning archetype in both `type` and `primaryType`
+- `traits` is capped to the top five narrative traits for the selected archetype
+- `secondaryTypes` contains up to two additional nearby archetypes when their scores remain materially close to the winner
 
 ### GET /wallet/:address/risk-metrics
 
