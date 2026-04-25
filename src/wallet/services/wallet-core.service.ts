@@ -17,6 +17,7 @@ import {
 } from '../wallet.types';
 import { TransactionEntity } from '../transaction.entity';
 import { HybridHoldingsService } from './hybrid-holdings.service';
+import { TX_FETCH_LIMIT } from '../../config/constants';
 
 export class MoralisKeysExhaustedError extends Error {
   constructor() {
@@ -151,6 +152,7 @@ export class WalletCoreService {
     this.activeKeyIndex = this.resolveInitialActiveKeyIndex();
 
     this.logger.log(`Moralis keys configured: ${this.getConfiguredMoralisKeyCount()}`);
+    this.logger.log(`TX_FETCH_LIMIT active: ${TX_FETCH_LIMIT}`);
 
     this.moralisClient = axios.create({
       baseURL: 'https://deep-index.moralis.io/api/v2.2',
@@ -293,6 +295,10 @@ export class WalletCoreService {
         this.hybridHoldingsService.clearCache(walletAddress);
       }
 
+      this.logger.log(
+        `Wallet sync completed with ${normalizedTransactions.length} records (incremental)`,
+      );
+
       return this.getStoredWalletData(address, walletAddress);
     }
 
@@ -327,6 +333,10 @@ export class WalletCoreService {
     if (insertedTransactionCount > 0) {
       this.hybridHoldingsService.clearCache(walletAddress);
     }
+
+    this.logger.log(
+      `Wallet sync completed with ${normalizedTransactions.length} records (full)`,
+    );
 
     return this.getStoredWalletData(address, walletAddress);
   }
@@ -873,6 +883,15 @@ export class WalletCoreService {
         );
 
         items.push(...filteredResult.items);
+
+        if (items.length >= TX_FETCH_LIMIT) {
+          const trimmed = items.splice(TX_FETCH_LIMIT);
+          this.logger.log(
+            `Fetched ${TX_FETCH_LIMIT} transactions, stopping pagination` +
+              (trimmed.length > 0 ? ` (trimmed ${trimmed.length} overflow records)` : ''),
+          );
+          break;
+        }
 
         shouldContinue =
           !options?.firstPageOnly &&
