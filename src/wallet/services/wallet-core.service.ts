@@ -16,6 +16,7 @@ import {
   WalletTransactionsResponse,
 } from '../wallet.types';
 import { TransactionEntity } from '../transaction.entity';
+import { HybridHoldingsService } from './hybrid-holdings.service';
 
 export class MoralisKeysExhaustedError extends Error {
   constructor() {
@@ -143,6 +144,7 @@ export class WalletCoreService {
     private readonly configService: ConfigService,
     @InjectRepository(TransactionEntity)
     private readonly transactionRepo: Repository<TransactionEntity>,
+    private readonly hybridHoldingsService: HybridHoldingsService,
   ) {
     this.moralisApiKey1 = this.configService.get<string>('moralis.apiKey1') ?? '';
     this.moralisApiKey2 = this.configService.get<string>('moralis.apiKey2') ?? '';
@@ -282,7 +284,14 @@ export class WalletCoreService {
         newNativeTransactions,
       );
 
-      await this.saveNormalizedTransactions(address, normalizedTransactions);
+      const insertedTransactionCount = await this.saveNormalizedTransactions(
+        address,
+        normalizedTransactions,
+      );
+
+      if (insertedTransactionCount > 0) {
+        this.hybridHoldingsService.clearCache(walletAddress);
+      }
 
       return this.getStoredWalletData(address, walletAddress);
     }
@@ -310,7 +319,14 @@ export class WalletCoreService {
       nativeTransactions,
     );
 
-    await this.saveNormalizedTransactions(address, normalizedTransactions);
+    const insertedTransactionCount = await this.saveNormalizedTransactions(
+      address,
+      normalizedTransactions,
+    );
+
+    if (insertedTransactionCount > 0) {
+      this.hybridHoldingsService.clearCache(walletAddress);
+    }
 
     return this.getStoredWalletData(address, walletAddress);
   }
@@ -534,7 +550,7 @@ export class WalletCoreService {
   private async saveNormalizedTransactions(
     address: string,
     transactions: NormalizedTransaction[],
-  ): Promise<void> {
+  ): Promise<number> {
     const transactionsToSave = transactions.filter(
       (
         transaction,
@@ -543,11 +559,11 @@ export class WalletCoreService {
     );
 
     if (transactionsToSave.length === 0) {
-      return;
+      return 0;
     }
 
     try {
-      await this.transactionRepo
+      const insertResult = await this.transactionRepo
         .createQueryBuilder()
         .insert()
         .into(TransactionEntity)
@@ -565,7 +581,19 @@ export class WalletCoreService {
           })),
         )
         .orIgnore()
+        .returning('id')
         .execute();
+
+      await this.hybridHoldingsService.syncKnownTokens(
+        address.toLowerCase(),
+        transactionsToSave,
+      );
+
+      if (Array.isArray(insertResult.raw)) {
+        return insertResult.raw.length;
+      }
+
+      return insertResult.identifiers.length;
     } catch (error) {
       this.logger.error(
         `Failed to persist normalized transactions for wallet ${address}`,
