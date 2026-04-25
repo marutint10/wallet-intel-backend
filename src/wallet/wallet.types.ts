@@ -384,6 +384,8 @@ export interface WalletHoldingItem {
 
 export type WalletHoldingsResponse = WalletHoldingItem[];
 
+export type PortfolioDisplayTier = 'core' | 'secondary' | 'hidden';
+
 export interface WalletPortfolioItem {
   token: string;
   amount: string;
@@ -398,6 +400,8 @@ export interface WalletPortfolioItem {
   priceUnavailable: boolean;
   decimals?: number;
   contractAddress?: string;
+  displayTier: PortfolioDisplayTier;
+  hiddenReason?: string;
 }
 
 export type WalletPortfolioResponse = WalletPortfolioItem[];
