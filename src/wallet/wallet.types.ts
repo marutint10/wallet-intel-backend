@@ -10,6 +10,7 @@ export interface NormalizedTokenAmount {
   amount: string;
   decimals?: number;
   contractAddress?: string;
+  tokenName?: string;
 }
 
 export interface NormalizedTransaction {
@@ -18,7 +19,18 @@ export interface NormalizedTransaction {
   timestamp: string;
   from: string;
   to: string;
-  type: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove' | 'unknown';
+  type:
+    | 'transfer'
+    | 'swap'
+    | 'wrap'
+    | 'unwrap'
+    | 'liquidity_add'
+    | 'liquidity_remove'
+    | 'stake'
+    | 'unstake'
+    | 'staking_wrap'
+    | 'staking_unwrap'
+    | 'unknown';
   inputs: NormalizedTokenAmount[];
   outputs: NormalizedTokenAmount[];
 }
