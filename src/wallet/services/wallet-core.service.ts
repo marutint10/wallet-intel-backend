@@ -90,7 +90,12 @@ export interface MoralisErc20Balance {
 function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
   const map = new Map<
     string,
-    { amount: bigint; decimals?: number; contractAddress?: string }
+    {
+      amount: bigint;
+      decimals?: number;
+      contractAddress?: string;
+      tokenName?: string;
+    }
   >();
 
   for (const entry of entries) {
@@ -105,6 +110,7 @@ function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
         amount: BigInt(entry.amount),
         decimals: entry.decimals,
         contractAddress: entry.contractAddress?.toLowerCase(),
+        tokenName: entry.tokenName,
       });
 
       continue;
@@ -119,6 +125,10 @@ function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
     if (!current.contractAddress && entry.contractAddress) {
       current.contractAddress = entry.contractAddress.toLowerCase();
     }
+
+    if (!current.tokenName && entry.tokenName) {
+      current.tokenName = entry.tokenName;
+    }
   }
 
   return Array.from(map.entries()).map(([token, entry]) => ({
@@ -126,6 +136,7 @@ function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
     amount: entry.amount.toString(),
     decimals: entry.decimals,
     contractAddress: entry.contractAddress,
+    tokenName: entry.tokenName,
   }));
 }
 
@@ -134,6 +145,25 @@ export class WalletCoreService {
   private static readonly MORALIS_RETRY_DELAY_MS = 500;
   private static readonly MORALIS_KEY_EXHAUSTED_WINDOW_MS = 60 * 60 * 1000;
   private static readonly LP_TOKEN_PATTERN = /\bLP\b|UNI-V2|PAIR|POOL|BPT|\bSLP\b|Cake-LP/i;
+  private static readonly STAKING_BASE_ASSET_SYMBOLS = new Set(['ETH', 'WETH']);
+  private static readonly STAKING_DERIVATIVE_SYMBOLS = new Set([
+    'STETH',
+    'WSTETH',
+    'EZETH',
+    'RSWETH',
+    'WEETH',
+    'METH',
+    'CBETH',
+    'RETH',
+  ]);
+  private static readonly STAKING_DERIVATIVE_NAME_MATCHES = [
+    'RENZO RESTAKED ETH',
+    'RESTAKED ETH',
+  ];
+  private static readonly WRAPPED_STAKING_DERIVATIVE_SYMBOLS = new Set([
+    'WSTETH',
+    'WEETH',
+  ]);
   private readonly logger = new Logger(WalletCoreService.name);
   private readonly moralisApiKey1: string;
   private readonly moralisApiKey2: string;
@@ -565,13 +595,29 @@ export class WalletCoreService {
     const transactionsToSave = transactions.filter(
       (
         transaction,
-      ): transaction is NormalizedTransaction & { type: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove' } =>
+      ): transaction is NormalizedTransaction & {
+        type:
+          | 'transfer'
+          | 'swap'
+          | 'wrap'
+          | 'unwrap'
+          | 'liquidity_add'
+          | 'liquidity_remove'
+          | 'stake'
+          | 'unstake'
+          | 'staking_wrap'
+          | 'staking_unwrap';
+      } =>
         transaction.type === 'transfer' ||
         transaction.type === 'swap' ||
         transaction.type === 'wrap' ||
         transaction.type === 'unwrap' ||
         transaction.type === 'liquidity_add' ||
-        transaction.type === 'liquidity_remove',
+        transaction.type === 'liquidity_remove' ||
+        transaction.type === 'stake' ||
+        transaction.type === 'unstake' ||
+        transaction.type === 'staking_wrap' ||
+        transaction.type === 'staking_unwrap',
     );
 
     if (transactionsToSave.length === 0) {
@@ -695,6 +741,7 @@ export class WalletCoreService {
               ? this.toNumber(transfer.token_decimals)
               : undefined,
           contractAddress: transfer.address?.toLowerCase(),
+          tokenName: transfer.token_name,
         },
       );
     }
@@ -810,6 +857,57 @@ export class WalletCoreService {
       return 'transfer';
     }
 
+    const singleInputEntry =
+      inputTokens.size === 1 ? transaction.inputs[0] : undefined;
+    const singleOutputEntry =
+      outputTokens.size === 1 ? transaction.outputs[0] : undefined;
+
+    // --- STAKING WRAP / UNWRAP ---
+    if (singleInputEntry && singleOutputEntry) {
+      const inputIsStakingDerivative =
+        this.isKnownStakingDerivative(singleInputEntry);
+      const outputIsStakingDerivative =
+        this.isKnownStakingDerivative(singleOutputEntry);
+      const inputIsWrappedStakingDerivative =
+        this.isWrappedStakingDerivative(singleInputEntry);
+      const outputIsWrappedStakingDerivative =
+        this.isWrappedStakingDerivative(singleOutputEntry);
+
+      if (
+        inputIsStakingDerivative &&
+        outputIsStakingDerivative &&
+        !inputIsWrappedStakingDerivative &&
+        outputIsWrappedStakingDerivative
+      ) {
+        this.logger.debug(`Detected staking_wrap tx ${transaction.hash}`);
+        return 'staking_wrap';
+      }
+
+      if (
+        inputIsStakingDerivative &&
+        outputIsStakingDerivative &&
+        inputIsWrappedStakingDerivative &&
+        !outputIsWrappedStakingDerivative
+      ) {
+        this.logger.debug(`Detected staking_unwrap tx ${transaction.hash}`);
+        return 'staking_unwrap';
+      }
+
+      // --- STAKE / UNSTAKE ---
+      const inputIsBaseStakingAsset = this.isStakingBaseAsset(singleInputEntry);
+      const outputIsBaseStakingAsset = this.isStakingBaseAsset(singleOutputEntry);
+
+      if (inputIsBaseStakingAsset && outputIsStakingDerivative) {
+        this.logger.debug(`Detected stake tx ${transaction.hash}`);
+        return 'stake';
+      }
+
+      if (inputIsStakingDerivative && outputIsBaseStakingAsset) {
+        this.logger.debug(`Detected unstake tx ${transaction.hash}`);
+        return 'unstake';
+      }
+    }
+
     // --- WRAP: ETH in, WETH out ---
     if (
       inputTokens.size === 1 &&
@@ -860,6 +958,51 @@ export class WalletCoreService {
     }
 
     return 'swap';
+  }
+
+  private normalizeTokenSymbol(token?: string): string {
+    return token?.trim().toUpperCase() ?? '';
+  }
+
+  private normalizeTokenName(tokenName?: string): string {
+    return tokenName?.trim().toUpperCase() ?? '';
+  }
+
+  private isStakingBaseAsset(entry: NormalizedTokenAmount): boolean {
+    return WalletCoreService.STAKING_BASE_ASSET_SYMBOLS.has(
+      this.normalizeTokenSymbol(entry.token),
+    );
+  }
+
+  private isKnownStakingDerivative(entry: NormalizedTokenAmount): boolean {
+    const symbol = this.normalizeTokenSymbol(entry.token);
+    const tokenName = this.normalizeTokenName(entry.tokenName);
+
+    if (WalletCoreService.STAKING_DERIVATIVE_SYMBOLS.has(symbol)) {
+      return true;
+    }
+
+    return WalletCoreService.STAKING_DERIVATIVE_NAME_MATCHES.some((nameFragment) =>
+      tokenName.includes(nameFragment),
+    );
+  }
+
+  private isWrappedStakingDerivative(entry: NormalizedTokenAmount): boolean {
+    const symbol = this.normalizeTokenSymbol(entry.token);
+    const tokenName = this.normalizeTokenName(entry.tokenName);
+
+    if (WalletCoreService.WRAPPED_STAKING_DERIVATIVE_SYMBOLS.has(symbol)) {
+      return true;
+    }
+
+    if (
+      symbol.startsWith('W') &&
+      WalletCoreService.STAKING_DERIVATIVE_SYMBOLS.has(symbol.slice(1))
+    ) {
+      return true;
+    }
+
+    return tokenName.includes('WRAPPED') && this.isKnownStakingDerivative(entry);
   }
 
   private isPositiveValue(value: string): boolean {
