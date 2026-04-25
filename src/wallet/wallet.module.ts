@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JsonRpcProvider } from 'ethers';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { WalletController } from './wallet.controller';
 import {
@@ -13,11 +15,15 @@ import {
   WalletPricingService,
   WalletScoringService,
   WalletService,
+  HybridHoldingsService,
 } from './services';
+import { WalletKnownTokenEntity } from './entities/wallet-known-token.entity';
 import { TransactionEntity } from './transaction.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([TransactionEntity])],
+  imports: [
+    TypeOrmModule.forFeature([TransactionEntity, WalletKnownTokenEntity]),
+  ],
   controllers: [WalletController],
   providers: [
     WalletAnalyticsService,
@@ -31,6 +37,20 @@ import { TransactionEntity } from './transaction.entity';
     PnlService,
     WalletScoringService,
     ClassificationService,
+    {
+      provide: JsonRpcProvider,
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => {
+        const rpcUrl =
+          configService.get<string>('rpc.url') ??
+          'https://ethereum-rpc.publicnode.com';
+
+        return new JsonRpcProvider(rpcUrl, undefined, {
+          staticNetwork: true,
+        });
+      },
+    },
+    HybridHoldingsService,
   ],
 })
 export class WalletModule {}
