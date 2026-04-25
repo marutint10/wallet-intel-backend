@@ -26,7 +26,7 @@ Current capabilities:
 - calculate realized FIFO PnL metrics
 - calculate token flow and net flow from stored transactions
 - return live on-chain holdings via direct RPC using Multicall3 batched balance reads and a wallet-scoped known-token registry
-- return live enriched portfolio analytics
+- return live enriched portfolio analytics with per-asset display tier classification
 - return DB-backed reconstructed balances as a ledger view
 - return wallet summary metrics
 - return wallet context classification before higher-level scoring
@@ -192,12 +192,24 @@ This is the holdings and portfolio analytics layer.
 
 Responsibilities:
 
-- fetch live raw holdings from Moralis balances endpoints
+- fetch live raw holdings via `HybridHoldingsService`
 - compute the live enriched portfolio view
+- classify each portfolio item into a display tier using `PortfolioTierClassifier`
 - compute the DB-backed reconstructed ledger view
 - compute token flow and net flow from normalized history
 - compute holding duration and cost basis analytics from FIFO lots
 - compute current-price-based unrealized PnL and ROI
+
+### PortfolioTierClassifier
+
+This is a pure stateless classification module (`portfolio-tier.classifier.ts`).
+
+Responsibilities:
+
+- classify each portfolio item into one of three display tiers: `core`, `secondary`, or `hidden`
+- use token pricing, allocation, symbol allowlist, spam keyword detection, symbol length, trade history, and known-protocol contract lookup as classification signals
+- attach an optional `hiddenReason` string to items classified as `hidden`
+- operate without side effects; accepts portfolio item fields and a set of traded token symbols as inputs
 
 ### Placeholder services
 
@@ -424,6 +436,8 @@ Current response fields:
 - `pnl`
 - `roi`
 - `priceUnavailable`
+- `displayTier`
+- `hiddenReason?`
 - `decimals?`
 - `contractAddress?`
 
@@ -431,6 +445,8 @@ Important note:
 
 - `pnl` and `roi` on this endpoint are unrealized metrics for the current remaining position
 - when live pricing is unavailable, `currentPrice`, `usdValue`, `pnl`, and `roi` return `null`, and `priceUnavailable` returns `true`
+- `displayTier` classifies each asset for UI rendering: `core` (show prominently), `secondary` (show in expanded section), `hidden` (collapse or omit)
+- `hiddenReason` is only present when `displayTier = hidden` and explains why the asset was suppressed
 
 ### GET /wallet/:address/ledger
 
@@ -874,11 +890,12 @@ Completed FIFO lot matches from this same queueing logic are also reused by `Wal
 
 `WalletPortfolioService.getPortfolio()` is the enriched live holdings pipeline.
 
-It combines three inputs:
+It combines four inputs:
 
-1. live balances from Moralis
+1. live balances from `HybridHoldingsService`
 2. current market prices from CoinGecko
 3. normalized stored history for holding analytics and cost basis
+4. stored swap transactions for traded-token signals used in tier classification
 
 ### Step 1: fetch live holdings
 
@@ -958,6 +975,31 @@ Important behavior:
 - if no usable remaining lots exist, holding analytics return `null`
 - if average buy price is unknown, unrealized `pnl` and `roi` return `null`
 - if current price is unavailable, `currentPrice`, `usdValue`, `pnl`, and `roi` return `null` instead of implying a real zero market price
+
+### Step 6: classify display tier
+
+After all enriched metrics are computed, each portfolio item is passed to `classifyPortfolioTier()` together with the wallet's traded-token symbol set.
+
+Tier rules:
+
+**core** — assigned when any of the following are true:
+- `usdValue > 0`
+- `allocation > 0`
+- `currentPrice` is present
+- symbol is in the core allowlist: `ETH WETH USDC USDT DAI WBTC AAVE LINK UNI LDO OP ARB`
+
+**hidden** — checked next, assigned when any of the following are true:
+- token symbol contains a spam keyword: `claim`, `reward`, `receive at`, `visit`, `airdrop`, `bonus`, `free`
+- token symbol length exceeds 20 characters
+- token is fully unpriced (`priceUnavailable`, `allocation = 0`, `usdValue = null`) with no swap trade history and no match in the known-protocol contract map
+- token amount is below the dust threshold (0.001) with no swap trade history and no known-protocol contract match
+
+**secondary** — assigned to everything that is not core and not hidden:
+- `priceUnavailable = true` AND (`SY-`/`YT-`/`PT-` prefix OR amount ≥ 0.001)
+
+**fallback hidden** — any item that passes none of the above positive secondary conditions.
+
+All raw fields are preserved on every item. `displayTier` and optionally `hiddenReason` are appended. No items are removed from the response.
 
 ## 17. Average buy price rules
 
@@ -1045,9 +1087,10 @@ Recommended reading order for a new developer:
 6. `src/wallet/services/wallet-pnl.service.ts`
 7. `src/wallet/services/wallet-analytics.service.ts`
 8. `src/wallet/services/wallet-portfolio.service.ts`
-9. `src/wallet/transaction.entity.ts`
-10. `src/wallet/entities/wallet-known-token.entity.ts`
-11. `src/wallet/wallet.types.ts`
+9. `src/wallet/services/portfolio-tier.classifier.ts`
+10. `src/wallet/transaction.entity.ts`
+11. `src/wallet/entities/wallet-known-token.entity.ts`
+12. `src/wallet/wallet.types.ts`
 
 ## 22. Update rule for this document
 
