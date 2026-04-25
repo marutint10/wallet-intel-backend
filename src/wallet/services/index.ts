@@ -3,6 +3,7 @@ export { PnlService } from './pnl.service';
 export { PortfolioService } from './portfolio.service';
 export { WalletScoringService } from './scoring.service';
 export { WalletAnalyticsService } from './wallet-analytics.service';
+export { HybridHoldingsService } from './hybrid-holdings.service';
 export { WalletContextService } from './wallet-context.service';
 export { WalletCoreService } from './wallet-core.service';
 export { WalletPnlService } from './wallet-pnl.service';
