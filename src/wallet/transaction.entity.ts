@@ -43,6 +43,11 @@ export class TransactionEntity {
       'unstake',
       'staking_wrap',
       'staking_unwrap',
+      'yield_split',
+      'yield_merge',
+      'receipt_mint',
+      'receipt_burn',
+      'protocol_transform',
     ],
   })
   type!:
@@ -55,7 +60,12 @@ export class TransactionEntity {
     | 'stake'
     | 'unstake'
     | 'staking_wrap'
-    | 'staking_unwrap';
+    | 'staking_unwrap'
+    | 'yield_split'
+    | 'yield_merge'
+    | 'receipt_mint'
+    | 'receipt_burn'
+    | 'protocol_transform';
 
   @Column({ type: 'jsonb' })
   inputs!: NormalizedTokenAmount[];
