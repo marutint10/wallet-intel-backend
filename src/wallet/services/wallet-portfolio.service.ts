@@ -12,6 +12,7 @@ import {
 import { MoralisKeysExhaustedError, WalletCoreService } from './wallet-core.service';
 import { WalletPricingService } from './wallet-pricing.service';
 import { HybridHoldingsService } from './hybrid-holdings.service';
+import { classifyPortfolioTier } from './portfolio-tier.classifier';
 
 interface HoldingLot {
   amount: bigint;
@@ -76,10 +77,12 @@ export class WalletPortfolioService {
       };
     }
 
-    const [{ ethPrice, tokenPrices }, holdingAnalytics] = await Promise.all([
-      this.fetchHoldingPrices(holdings),
-      this.buildHoldingAnalyticsMap(address, holdings),
-    ]);
+    const [{ ethPrice, tokenPrices }, holdingAnalytics, tradedTokens] =
+      await Promise.all([
+        this.fetchHoldingPrices(holdings),
+        this.buildHoldingAnalyticsMap(address, holdings),
+        this.buildTradedTokenSymbols(address),
+      ]);
     const holdingsWithUsd = holdings
       .map((holding) => ({
         holding,
@@ -107,12 +110,35 @@ export class WalletPortfolioService {
           currentPrice,
           analytics?.avgBuyPrice ?? null,
         );
+        const allocation = this.computeAllocationPercentage(
+          usdValue,
+          totalPortfolioValue,
+        );
+        const tier = classifyPortfolioTier(
+          {
+            token: holding.token,
+            amount: holding.amount,
+            usdValue,
+            allocation,
+            currentPrice,
+            priceUnavailable,
+            contractAddress: holding.contractAddress,
+          },
+          tradedTokens,
+        );
+
+        if (tier.displayTier !== 'core') {
+          this.logger.debug(
+            `Token classified as ${tier.displayTier}: ${holding.token}` +
+              (tier.hiddenReason ? ` (${tier.hiddenReason})` : ''),
+          );
+        }
 
         return {
           token: holding.token,
           amount: holding.amount,
           usdValue,
-          allocation: this.computeAllocationPercentage(usdValue, totalPortfolioValue),
+          allocation,
           holdingSince: analytics?.holdingSince ?? null,
           holdingDays: analytics?.holdingDays ?? null,
           avgBuyPrice: analytics?.avgBuyPrice ?? null,
@@ -125,6 +151,8 @@ export class WalletPortfolioService {
           priceUnavailable,
           decimals: holding.decimals,
           contractAddress: holding.contractAddress,
+          displayTier: tier.displayTier,
+          ...(tier.hiddenReason ? { hiddenReason: tier.hiddenReason } : {}),
         };
       }),
       balancesAvailable: true,
@@ -412,6 +440,26 @@ export class WalletPortfolioService {
     }
 
     return balance.token_address?.toLowerCase() ?? 'UNKNOWN';
+  }
+
+  private async buildTradedTokenSymbols(address: string): Promise<Set<string>> {
+    const transactions =
+      await this.walletCoreService.getTransactionEntitiesUnordered(address);
+    const symbols = new Set<string>();
+
+    for (const tx of transactions) {
+      if (tx.type !== 'swap') {
+        continue;
+      }
+
+      for (const entry of [...tx.inputs, ...tx.outputs]) {
+        if (entry.token) {
+          symbols.add(entry.token.toLowerCase());
+        }
+      }
+    }
+
+    return symbols;
   }
 
   private async fetchHoldingPrices(
