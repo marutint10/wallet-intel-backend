@@ -570,7 +570,17 @@ export class WalletPortfolioService {
 
   private buildLotsByHoldingKey(
     transactions: Array<{
-      type: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove';
+      type:
+        | 'transfer'
+        | 'swap'
+        | 'wrap'
+        | 'unwrap'
+        | 'liquidity_add'
+        | 'liquidity_remove'
+        | 'stake'
+        | 'unstake'
+        | 'staking_wrap'
+        | 'staking_unwrap';
       timestamp: Date;
       inputs: NormalizedTokenAmount[];
       outputs: NormalizedTokenAmount[];
@@ -584,7 +594,17 @@ export class WalletPortfolioService {
 
   private async buildHoldingLots(
     transactions: Array<{
-      type: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove';
+      type:
+        | 'transfer'
+        | 'swap'
+        | 'wrap'
+        | 'unwrap'
+        | 'liquidity_add'
+        | 'liquidity_remove'
+        | 'stake'
+        | 'unstake'
+        | 'staking_wrap'
+        | 'staking_unwrap';
       timestamp: Date;
       inputs: NormalizedTokenAmount[];
       outputs: NormalizedTokenAmount[];
@@ -615,7 +635,17 @@ export class WalletPortfolioService {
     lotsByHolding: Map<string, HoldingLot[]>,
     entry: NormalizedTokenAmount,
     timestamp: Date,
-    transactionType: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove',
+    transactionType:
+      | 'transfer'
+      | 'swap'
+      | 'wrap'
+      | 'unwrap'
+      | 'liquidity_add'
+      | 'liquidity_remove'
+      | 'stake'
+      | 'unstake'
+      | 'staking_wrap'
+      | 'staking_unwrap',
     priceCache: Map<string, string | null>,
   ): Promise<void> {
     const rawAmount = this.parseRawAmount(entry.amount);
@@ -768,7 +798,17 @@ export class WalletPortfolioService {
   private async getLotAcquisitionPrice(
     entry: NormalizedTokenAmount,
     timestamp: Date,
-    transactionType: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove',
+    transactionType:
+      | 'transfer'
+      | 'swap'
+      | 'wrap'
+      | 'unwrap'
+      | 'liquidity_add'
+      | 'liquidity_remove'
+      | 'stake'
+      | 'unstake'
+      | 'staking_wrap'
+      | 'staking_unwrap',
     priceCache: Map<string, string | null>,
   ): Promise<string | null> {
     const cacheKey = `${transactionType}:${this.getHoldingKey(entry.token, entry.contractAddress)}:${timestamp.toISOString()}`;
