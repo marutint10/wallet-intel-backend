@@ -18,7 +18,7 @@ export interface NormalizedTransaction {
   timestamp: string;
   from: string;
   to: string;
-  type: 'transfer' | 'swap' | 'unknown';
+  type: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove' | 'unknown';
   inputs: NormalizedTokenAmount[];
   outputs: NormalizedTokenAmount[];
 }
