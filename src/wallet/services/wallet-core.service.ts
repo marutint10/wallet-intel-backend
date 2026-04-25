@@ -133,6 +133,7 @@ function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
 export class WalletCoreService {
   private static readonly MORALIS_RETRY_DELAY_MS = 500;
   private static readonly MORALIS_KEY_EXHAUSTED_WINDOW_MS = 60 * 60 * 1000;
+  private static readonly LP_TOKEN_PATTERN = /\bLP\b|UNI-V2|PAIR|POOL|BPT|\bSLP\b|Cake-LP/i;
   private readonly logger = new Logger(WalletCoreService.name);
   private readonly moralisApiKey1: string;
   private readonly moralisApiKey2: string;
@@ -564,8 +565,13 @@ export class WalletCoreService {
     const transactionsToSave = transactions.filter(
       (
         transaction,
-      ): transaction is NormalizedTransaction & { type: 'transfer' | 'swap' } =>
-        transaction.type === 'transfer' || transaction.type === 'swap',
+      ): transaction is NormalizedTransaction & { type: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove' } =>
+        transaction.type === 'transfer' ||
+        transaction.type === 'swap' ||
+        transaction.type === 'wrap' ||
+        transaction.type === 'unwrap' ||
+        transaction.type === 'liquidity_add' ||
+        transaction.type === 'liquidity_remove',
     );
 
     if (transactionsToSave.length === 0) {
@@ -796,24 +802,64 @@ export class WalletCoreService {
     const hasInputs = transaction.inputs.length > 0;
     const hasOutputs = transaction.outputs.length > 0;
 
-    if (hasInputs && hasOutputs) {
-      const isSameToken =
-        inputTokens.size === 1 &&
-        outputTokens.size === 1 &&
-        [...inputTokens][0] === [...outputTokens][0];
-
-      if (isSameToken) {
-        return 'transfer';
-      }
-
-      return 'swap';
+    if (!hasInputs && !hasOutputs) {
+      return 'unknown';
     }
 
-    if (hasInputs || hasOutputs) {
+    if (!hasInputs || !hasOutputs) {
       return 'transfer';
     }
 
-    return 'unknown';
+    // --- WRAP: ETH in, WETH out ---
+    if (
+      inputTokens.size === 1 &&
+      outputTokens.size === 1 &&
+      [...inputTokens][0].toUpperCase() === 'ETH' &&
+      [...outputTokens][0].toUpperCase() === 'WETH'
+    ) {
+      this.logger.debug(`Detected wrap tx ${transaction.hash}`);
+      return 'wrap';
+    }
+
+    // --- UNWRAP: WETH in, ETH out ---
+    if (
+      inputTokens.size === 1 &&
+      outputTokens.size === 1 &&
+      [...inputTokens][0].toUpperCase() === 'WETH' &&
+      [...outputTokens][0].toUpperCase() === 'ETH'
+    ) {
+      this.logger.debug(`Detected unwrap tx ${transaction.hash}`);
+      return 'unwrap';
+    }
+
+    // --- LIQUIDITY ADD: 2+ distinct input tokens, 1 LP token output ---
+    if (inputTokens.size >= 2 && outputTokens.size === 1) {
+      const outputSymbol = transaction.outputs[0].token;
+      if (WalletCoreService.LP_TOKEN_PATTERN.test(outputSymbol)) {
+        this.logger.debug(`Detected liquidity_add tx ${transaction.hash}`);
+        return 'liquidity_add';
+      }
+    }
+
+    // --- LIQUIDITY REMOVE: 1 LP token input, 2+ distinct output tokens ---
+    if (inputTokens.size === 1 && outputTokens.size >= 2) {
+      const inputSymbol = transaction.inputs[0].token;
+      if (WalletCoreService.LP_TOKEN_PATTERN.test(inputSymbol)) {
+        this.logger.debug(`Detected liquidity_remove tx ${transaction.hash}`);
+        return 'liquidity_remove';
+      }
+    }
+
+    // --- TRANSFER: same single token on both sides ---
+    if (
+      inputTokens.size === 1 &&
+      outputTokens.size === 1 &&
+      [...inputTokens][0] === [...outputTokens][0]
+    ) {
+      return 'transfer';
+    }
+
+    return 'swap';
   }
 
   private isPositiveValue(value: string): boolean {
