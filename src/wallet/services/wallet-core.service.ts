@@ -146,8 +146,78 @@ export class WalletCoreService {
   private static readonly MORALIS_KEY_EXHAUSTED_WINDOW_MS = 60 * 60 * 1000;
   private static readonly ZERO_ADDRESS =
     '0x0000000000000000000000000000000000000000';
+  private static readonly BRIDGE_PROTOCOL_ADDRESSES = new Set([
+    '0x99c9fc46f92e8a1c0dec1b1747d010903e884be1', // Optimism Standard Bridge
+    '0x3154cf16ccdb4c6d922629664174b904d80f2c35', // Base Standard Bridge
+    '0x4dbd4fc535ac27206064b68ffcf827b0a60bab3f', // Arbitrum Inbox
+    '0x8731d54e9d02c286767d56ac03e8037c07e01e98', // Stargate Router
+    '0x66a71dcef29a0ffbdbE3c6a460a3b5bc225cd675'.toLowerCase(), // LayerZero Endpoint
+  ]);
+  private static readonly LENDING_PROTOCOL_ADDRESSES = new Set([
+    '0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2', // Aave V3 Pool
+  ]);
+  private static readonly VAULT_PROTOCOL_ADDRESSES = new Set([
+    '0xba12222222228d8ba445958a75a0704d566bf2c8', // Balancer Vault
+  ]);
+  private static readonly REWARD_DISTRIBUTOR_ADDRESSES = new Set([
+    '0x4da27a545c0c5b758a6ba100e3a049001de870f5', // stkAAVE
+  ]);
   private static readonly LP_TOKEN_PATTERN = /\bLP\b|UNI-V2|PAIR|POOL|BPT|\bSLP\b|Cake-LP/i;
   private static readonly YIELD_TOKEN_PREFIXES = ['YT-', 'PT-', 'SY-'];
+  private static readonly LENDING_RECEIPT_SYMBOLS = new Set([
+    'AUSDC',
+    'AUSDT',
+    'ADAI',
+    'AWETH',
+    'AWBTC',
+    'CUSDC',
+    'CDAI',
+    'CUSDT',
+    'CWETH',
+    'SDAI',
+  ]);
+  private static readonly LENDING_RECEIPT_PREFIXES = ['A', 'C'];
+  private static readonly LENDING_RECEIPT_NAME_MATCHES = [
+    'AAVE',
+    'COMPOUND',
+    'INTEREST BEARING',
+    'LENDING',
+    'SPARK',
+  ];
+  private static readonly VAULT_SHARE_PREFIXES = ['YV', 'MOO', 'STK', 'X'];
+  private static readonly VAULT_SHARE_NAME_MATCHES = [
+    'VAULT',
+    'SHARE',
+    'YEARN',
+    'BEEFY',
+    'ERC4626',
+  ];
+  private static readonly BASE_ASSET_SYMBOLS = new Set([
+    'ETH',
+    'WETH',
+    'USDC',
+    'USDT',
+    'DAI',
+    'FRAX',
+    'LUSD',
+    'USDE',
+    'USDS',
+    'TUSD',
+    'CRVUSD',
+    'RETH',
+    'WEETH',
+    'STETH',
+    'EZETH',
+    'RSWETH',
+  ]);
+  private static readonly REWARD_TOKEN_SYMBOLS = new Set([
+    'ARB',
+    'OP',
+    'AAVE',
+    'PENDLE',
+    'VELO',
+    'GMX',
+  ]);
   private static readonly PENDLE_BASE_OR_RESTAKED_SYMBOLS = new Set([
     'ETH',
     'WETH',
@@ -642,7 +712,16 @@ export class WalletCoreService {
           | 'yield_merge'
           | 'receipt_mint'
           | 'receipt_burn'
-          | 'protocol_transform';
+          | 'protocol_transform'
+          | 'bridge_out'
+          | 'bridge_in'
+          | 'lending_deposit'
+          | 'lending_withdraw'
+          | 'borrow'
+          | 'repay'
+          | 'vault_deposit'
+          | 'vault_withdraw'
+          | 'reward_claim';
       } =>
         transaction.type === 'transfer' ||
         transaction.type === 'swap' ||
@@ -658,7 +737,16 @@ export class WalletCoreService {
         transaction.type === 'yield_merge' ||
         transaction.type === 'receipt_mint' ||
         transaction.type === 'receipt_burn' ||
-        transaction.type === 'protocol_transform',
+        transaction.type === 'protocol_transform' ||
+        transaction.type === 'bridge_out' ||
+        transaction.type === 'bridge_in' ||
+        transaction.type === 'lending_deposit' ||
+        transaction.type === 'lending_withdraw' ||
+        transaction.type === 'borrow' ||
+        transaction.type === 'repay' ||
+        transaction.type === 'vault_deposit' ||
+        transaction.type === 'vault_withdraw' ||
+        transaction.type === 'reward_claim',
     );
 
     if (transactionsToSave.length === 0) {
@@ -883,9 +971,7 @@ export class WalletCoreService {
     transaction: NormalizedTransaction,
   ): NormalizedTransaction['type'] {
     const inputTokens = new Set(transaction.inputs.map((entry) => entry.token));
-    const outputTokens = new Set(
-      transaction.outputs.map((entry) => entry.token),
-    );
+    const outputTokens = new Set(transaction.outputs.map((entry) => entry.token));
 
     const hasInputs = transaction.inputs.length > 0;
     const hasOutputs = transaction.outputs.length > 0;
@@ -894,7 +980,69 @@ export class WalletCoreService {
       return 'unknown';
     }
 
-    if (!hasInputs || !hasOutputs) {
+    const bridgeTo = this.isKnownBridgeAddress(transaction.to);
+    const bridgeFrom = this.isKnownBridgeAddress(transaction.from);
+    const lendingTo = this.isKnownLendingProtocolAddress(transaction.to);
+    const lendingFrom = this.isKnownLendingProtocolAddress(transaction.from);
+    const vaultTo = this.isKnownVaultProtocolAddress(transaction.to);
+    const vaultFrom = this.isKnownVaultProtocolAddress(transaction.from);
+    const rewardFrom = this.isKnownRewardDistributorAddress(transaction.from);
+
+    if (hasInputs && !hasOutputs) {
+      if (lendingTo) {
+        this.logger.debug(`Detected repay tx ${transaction.hash}`);
+        return 'repay';
+      }
+
+      if (bridgeTo || this.isLikelyBridgeOutWithoutReturn(transaction)) {
+        this.logger.debug(`Detected bridge_out tx ${transaction.hash}`);
+        return 'bridge_out';
+      }
+
+      if (vaultTo && transaction.inputs.some((entry) => this.isBaseAssetLike(entry))) {
+        this.logger.debug(`Detected vault_deposit tx ${transaction.hash}`);
+        return 'vault_deposit';
+      }
+
+      return 'transfer';
+    }
+
+    if (!hasInputs && hasOutputs) {
+      if (bridgeFrom) {
+        this.logger.debug(`Detected bridge_in tx ${transaction.hash}`);
+        return 'bridge_in';
+      }
+
+      if (lendingFrom) {
+        this.logger.debug(`Detected borrow tx ${transaction.hash}`);
+        return 'borrow';
+      }
+
+      if (this.isZeroAddress(transaction.from)) {
+        if (this.hasYieldToken(transaction.outputs)) {
+          this.logger.debug(`Detected yield_split tx ${transaction.hash}`);
+          return 'yield_split';
+        }
+
+        if (this.hasReceiptLikeToken(transaction.outputs)) {
+          this.logger.debug(`Detected zero-address mint tx ${transaction.hash}`);
+          return 'receipt_mint';
+        }
+
+        this.logger.debug(`Detected reward_claim tx ${transaction.hash}`);
+        return 'reward_claim';
+      }
+
+      if (rewardFrom || this.hasRewardLikeOutput(transaction.outputs)) {
+        this.logger.debug(`Detected reward_claim tx ${transaction.hash}`);
+        return 'reward_claim';
+      }
+
+      if (vaultFrom && transaction.outputs.some((entry) => this.isBaseAssetLike(entry))) {
+        this.logger.debug(`Detected vault_withdraw tx ${transaction.hash}`);
+        return 'vault_withdraw';
+      }
+
       return 'transfer';
     }
 
@@ -961,15 +1109,19 @@ export class WalletCoreService {
       return 'yield_merge';
     }
 
-    // --- RECEIPT MINT/BURN via zero address ---
     if (this.isZeroAddress(transaction.from)) {
       if (this.hasYieldToken(transaction.outputs)) {
         this.logger.debug(`Detected yield_split tx ${transaction.hash}`);
         return 'yield_split';
       }
 
-      this.logger.debug(`Detected zero-address mint tx ${transaction.hash}`);
-      return 'receipt_mint';
+      if (this.hasReceiptLikeToken(transaction.outputs)) {
+        this.logger.debug(`Detected zero-address mint tx ${transaction.hash}`);
+        return 'receipt_mint';
+      }
+
+      this.logger.debug(`Detected reward_claim tx ${transaction.hash}`);
+      return 'reward_claim';
     }
 
     if (this.isZeroAddress(transaction.to)) {
@@ -984,8 +1136,35 @@ export class WalletCoreService {
       return 'receipt_burn';
     }
 
-    // --- Existing staking semantics ---
     if (singleInputEntry && singleOutputEntry) {
+      const inputIsBaseAsset = this.isBaseAssetLike(singleInputEntry);
+      const outputIsBaseAsset = this.isBaseAssetLike(singleOutputEntry);
+      const inputIsLendingReceipt = this.isLikelyLendingReceiptToken(singleInputEntry);
+      const outputIsLendingReceipt =
+        this.isLikelyLendingReceiptToken(singleOutputEntry);
+      const inputIsVaultShare = this.isLikelyVaultShareToken(singleInputEntry);
+      const outputIsVaultShare = this.isLikelyVaultShareToken(singleOutputEntry);
+
+      if (inputIsBaseAsset && outputIsLendingReceipt) {
+        this.logger.debug(`Detected lending_deposit tx ${transaction.hash}`);
+        return 'lending_deposit';
+      }
+
+      if (inputIsLendingReceipt && outputIsBaseAsset) {
+        this.logger.debug(`Detected lending_withdraw tx ${transaction.hash}`);
+        return 'lending_withdraw';
+      }
+
+      if (inputIsBaseAsset && outputIsVaultShare) {
+        this.logger.debug(`Detected vault_deposit tx ${transaction.hash}`);
+        return 'vault_deposit';
+      }
+
+      if (inputIsVaultShare && outputIsBaseAsset) {
+        this.logger.debug(`Detected vault_withdraw tx ${transaction.hash}`);
+        return 'vault_withdraw';
+      }
+
       const inputIsStakingDerivative =
         this.isKnownStakingDerivative(singleInputEntry);
       const outputIsStakingDerivative =
@@ -1028,11 +1207,20 @@ export class WalletCoreService {
         return 'unstake';
       }
 
-      // --- PROTOCOL TRANSFORM: same economic asset, different wrapper/receipt representation ---
       if (this.isProtocolTransformPair(singleInputEntry, singleOutputEntry)) {
         this.logger.debug(`Detected protocol_transform tx ${transaction.hash}`);
         return 'protocol_transform';
       }
+    }
+
+    if (bridgeTo) {
+      this.logger.debug(`Detected bridge_out tx ${transaction.hash}`);
+      return 'bridge_out';
+    }
+
+    if (bridgeFrom) {
+      this.logger.debug(`Detected bridge_in tx ${transaction.hash}`);
+      return 'bridge_in';
     }
 
     // --- TRANSFER: same single token on both sides ---
@@ -1063,6 +1251,30 @@ export class WalletCoreService {
     return this.normalizeAddress(address) === WalletCoreService.ZERO_ADDRESS;
   }
 
+  private isKnownBridgeAddress(address?: string): boolean {
+    const normalizedAddress = this.normalizeAddress(address);
+
+    return WalletCoreService.BRIDGE_PROTOCOL_ADDRESSES.has(normalizedAddress);
+  }
+
+  private isKnownLendingProtocolAddress(address?: string): boolean {
+    const normalizedAddress = this.normalizeAddress(address);
+
+    return WalletCoreService.LENDING_PROTOCOL_ADDRESSES.has(normalizedAddress);
+  }
+
+  private isKnownVaultProtocolAddress(address?: string): boolean {
+    const normalizedAddress = this.normalizeAddress(address);
+
+    return WalletCoreService.VAULT_PROTOCOL_ADDRESSES.has(normalizedAddress);
+  }
+
+  private isKnownRewardDistributorAddress(address?: string): boolean {
+    const normalizedAddress = this.normalizeAddress(address);
+
+    return WalletCoreService.REWARD_DISTRIBUTOR_ADDRESSES.has(normalizedAddress);
+  }
+
   private isYieldToken(entry: NormalizedTokenAmount): boolean {
     const symbol = this.normalizeTokenSymbol(entry.token);
     const tokenName = this.normalizeTokenName(entry.tokenName);
@@ -1074,6 +1286,96 @@ export class WalletCoreService {
 
   private hasYieldToken(entries: NormalizedTokenAmount[]): boolean {
     return entries.some((entry) => this.isYieldToken(entry));
+  }
+
+  private isLikelyLendingReceiptToken(entry: NormalizedTokenAmount): boolean {
+    const symbol = this.normalizeTokenSymbol(entry.token);
+    const tokenName = this.normalizeTokenName(entry.tokenName);
+
+    if (WalletCoreService.LENDING_RECEIPT_SYMBOLS.has(symbol)) {
+      return true;
+    }
+
+    const hasLendingPrefix = WalletCoreService.LENDING_RECEIPT_PREFIXES.some(
+      (prefix) => symbol.startsWith(prefix) && symbol.length > 4,
+    );
+
+    if (
+      hasLendingPrefix &&
+      WalletCoreService.BASE_ASSET_SYMBOLS.has(symbol.slice(1))
+    ) {
+      return true;
+    }
+
+    return WalletCoreService.LENDING_RECEIPT_NAME_MATCHES.some((fragment) =>
+      tokenName.includes(fragment),
+    );
+  }
+
+  private isLikelyVaultShareToken(entry: NormalizedTokenAmount): boolean {
+    const symbol = this.normalizeTokenSymbol(entry.token);
+    const tokenName = this.normalizeTokenName(entry.tokenName);
+    const hasVaultPrefix = WalletCoreService.VAULT_SHARE_PREFIXES.some(
+      (prefix) => symbol.startsWith(prefix) && symbol.length > 3,
+    );
+
+    if (hasVaultPrefix) {
+      return true;
+    }
+
+    return WalletCoreService.VAULT_SHARE_NAME_MATCHES.some((fragment) =>
+      tokenName.includes(fragment),
+    );
+  }
+
+  private hasReceiptLikeToken(entries: NormalizedTokenAmount[]): boolean {
+    return entries.some(
+      (entry) =>
+        this.isLikelyLendingReceiptToken(entry) ||
+        this.isLikelyVaultShareToken(entry),
+    );
+  }
+
+  private isBaseAssetLike(entry: NormalizedTokenAmount): boolean {
+    const symbol = this.normalizeTokenSymbol(entry.token);
+
+    return (
+      WalletCoreService.BASE_ASSET_SYMBOLS.has(symbol) ||
+      this.isPendleBaseOrRestakedAsset(entry)
+    );
+  }
+
+  private isLikelyRewardToken(entry: NormalizedTokenAmount): boolean {
+    const symbol = this.normalizeTokenSymbol(entry.token);
+    const tokenName = this.normalizeTokenName(entry.tokenName);
+
+    if (WalletCoreService.REWARD_TOKEN_SYMBOLS.has(symbol)) {
+      return true;
+    }
+
+    return (
+      tokenName.includes('REWARD') ||
+      tokenName.includes('INCENTIVE') ||
+      tokenName.includes('AIRDROP')
+    );
+  }
+
+  private hasRewardLikeOutput(entries: NormalizedTokenAmount[]): boolean {
+    return entries.some((entry) => this.isLikelyRewardToken(entry));
+  }
+
+  private isLikelyBridgeOutWithoutReturn(
+    transaction: NormalizedTransaction,
+  ): boolean {
+    if (transaction.inputs.length === 0 || transaction.outputs.length > 0) {
+      return false;
+    }
+
+    if (!transaction.to || this.isZeroAddress(transaction.to)) {
+      return false;
+    }
+
+    return transaction.inputs.some((entry) => this.isBaseAssetLike(entry));
   }
 
   private isPendleBaseOrRestakedAsset(entry: NormalizedTokenAmount): boolean {
