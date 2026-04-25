@@ -35,6 +35,15 @@ export interface NormalizedTransaction {
     | 'receipt_mint'
     | 'receipt_burn'
     | 'protocol_transform'
+    | 'bridge_out'
+    | 'bridge_in'
+    | 'lending_deposit'
+    | 'lending_withdraw'
+    | 'borrow'
+    | 'repay'
+    | 'vault_deposit'
+    | 'vault_withdraw'
+    | 'reward_claim'
     | 'unknown';
   inputs: NormalizedTokenAmount[];
   outputs: NormalizedTokenAmount[];
