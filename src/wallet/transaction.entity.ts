@@ -30,8 +30,32 @@ export class TransactionEntity {
   @Column({ type: 'varchar', length: 42, default: '' })
   to_address!: string;
 
-  @Column({ type: 'enum', enum: ['transfer', 'swap', 'wrap', 'unwrap', 'liquidity_add', 'liquidity_remove'] })
-  type!: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove';
+  @Column({
+    type: 'enum',
+    enum: [
+      'transfer',
+      'swap',
+      'wrap',
+      'unwrap',
+      'liquidity_add',
+      'liquidity_remove',
+      'stake',
+      'unstake',
+      'staking_wrap',
+      'staking_unwrap',
+    ],
+  })
+  type!:
+    | 'transfer'
+    | 'swap'
+    | 'wrap'
+    | 'unwrap'
+    | 'liquidity_add'
+    | 'liquidity_remove'
+    | 'stake'
+    | 'unstake'
+    | 'staking_wrap'
+    | 'staking_unwrap';
 
   @Column({ type: 'jsonb' })
   inputs!: NormalizedTokenAmount[];
