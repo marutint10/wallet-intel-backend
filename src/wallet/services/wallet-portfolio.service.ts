@@ -570,7 +570,7 @@ export class WalletPortfolioService {
 
   private buildLotsByHoldingKey(
     transactions: Array<{
-      type: 'transfer' | 'swap';
+      type: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove';
       timestamp: Date;
       inputs: NormalizedTokenAmount[];
       outputs: NormalizedTokenAmount[];
@@ -584,7 +584,7 @@ export class WalletPortfolioService {
 
   private async buildHoldingLots(
     transactions: Array<{
-      type: 'transfer' | 'swap';
+      type: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove';
       timestamp: Date;
       inputs: NormalizedTokenAmount[];
       outputs: NormalizedTokenAmount[];
@@ -615,7 +615,7 @@ export class WalletPortfolioService {
     lotsByHolding: Map<string, HoldingLot[]>,
     entry: NormalizedTokenAmount,
     timestamp: Date,
-    transactionType: 'transfer' | 'swap',
+    transactionType: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove',
     priceCache: Map<string, string | null>,
   ): Promise<void> {
     const rawAmount = this.parseRawAmount(entry.amount);
@@ -768,7 +768,7 @@ export class WalletPortfolioService {
   private async getLotAcquisitionPrice(
     entry: NormalizedTokenAmount,
     timestamp: Date,
-    transactionType: 'transfer' | 'swap',
+    transactionType: 'transfer' | 'swap' | 'wrap' | 'unwrap' | 'liquidity_add' | 'liquidity_remove',
     priceCache: Map<string, string | null>,
   ): Promise<string | null> {
     const cacheKey = `${transactionType}:${this.getHoldingKey(entry.token, entry.contractAddress)}:${timestamp.toISOString()}`;
