@@ -25,7 +25,7 @@ Current capabilities:
 - infer one missing swap-leg price from the priced counterpart trade
 - calculate realized FIFO PnL metrics
 - calculate token flow and net flow from stored transactions
-- return live on-chain holdings from Moralis balances endpoints
+- return live on-chain holdings via direct RPC using Multicall3 batched balance reads and a wallet-scoped known-token registry
 - return live enriched portfolio analytics
 - return DB-backed reconstructed balances as a ledger view
 - return wallet summary metrics
@@ -65,6 +65,7 @@ Responsibilities:
 - delegate ingestion calls to `WalletCoreService`
 - delegate PnL calls to `WalletPnlService`
 - delegate holdings, ledger, and portfolio calls to `WalletPortfolioService`
+- delegate live holdings to `HybridHoldingsService`
 - delegate risk, hold-time, and activity analytics to `WalletAnalyticsService`
 - delegate wallet archetype/context detection to `WalletContextService`
 - delegate wallet behavior classification to `ClassificationService`
@@ -83,6 +84,20 @@ Responsibilities:
 - compute DEX router usage metrics from stored swap transaction recipients
 - compute token category analytics from existing priced trade and portfolio methods
 - expose reusable analytics methods for the facade and controller layer
+
+### HybridHoldingsService
+
+This is the live on-chain holdings layer.
+
+Responsibilities:
+
+- read live native ETH balance from an ethers.js `JsonRpcProvider`
+- read live ERC-20 balances in batches of 150 via the Multicall3 contract at `0xcA11bde05977b3631167028862bE2a173976CA11`
+- discover which ERC-20 tokens a wallet holds by consulting the `wallet_known_tokens` table
+- fall back to a transaction scan when no `wallet_known_tokens` rows exist for the wallet, and backfill the table asynchronously
+- maintain a 5-minute in-memory holdings cache per wallet address
+- sync `wallet_known_tokens` after ingestion when new transactions arrive via `syncKnownTokens()`
+- expose `clearCache()` and `clearAllCache()` for targeted or global cache invalidation
 
 ### WalletContextService
 
@@ -128,14 +143,16 @@ This is the ingestion and normalization layer.
 Responsibilities:
 
 - configure the Moralis client
+- rotate between up to two Moralis API keys on HTTP 401; mark exhausted keys for 1 hour before retrying
+- log configured key count at startup
 - fetch ERC-20 transfers and wallet history
-- fetch live native and ERC-20 balances
 - refresh only new blocks when DB data already exists
 - normalize raw provider payloads into `NormalizedTransaction`
 - persist normalized transactions into Postgres
 - return stored normalized transactions
 - expose transaction entities to downstream services
 - build trade entries from normalized token amounts
+- call `HybridHoldingsService.syncKnownTokens()` after each successful ingestion pass
 
 ### WalletPricingService
 
@@ -148,6 +165,12 @@ Responsibilities:
 - fetch historical trade prices from DefiLlama with CoinGecko fallback
 - fetch historical transfer-in market prices from DefiLlama only
 - infer one missing swap-leg price when the opposite side is priced
+- cache historical prices in memory for 24 hours; cache live prices for 5 minutes
+- deduplicate in-flight historical and live price requests so concurrent callers share one network call
+- store negative-cache entries for confirmed no-data misses to avoid repeated failed lookups
+- limit DefiLlama concurrency to 5 simultaneous requests with 100 ms inter-request spacing
+- retry DefiLlama 429 responses with exponential backoff (2 s first retry, 4 s second retry, 2 retries maximum)
+- engage a global 15-second DefiLlama cooldown when 5 or more 429s are received within a 10-second window
 
 ### WalletPnlService
 
@@ -196,21 +219,27 @@ They are registered in the module but are not the main runtime path for current 
 - `WalletPricingService`
 - `WalletPnlService`
 - `WalletPortfolioService`
+- `HybridHoldingsService`
 - `ClassificationService`
 - `WalletScoringService`
 - `WalletService`
 - the placeholder services listed above
 - the TypeORM repository for `TransactionEntity`
+- the TypeORM repository for `WalletKnownTokenEntity`
+- a `JsonRpcProvider` factory bound to the configured `ETH_RPC_URL`
 
 ## 4. Configuration
 
 Current config values:
 
 - `PORT`
-- `MORALIS_API_KEY`
+- `MORALIS_API_KEY` or `MORALIS_API_KEY_1` — first Moralis API key (interchangeable; `MORALIS_API_KEY_1` takes precedence when both are set)
+- `MORALIS_API_KEY_2` — optional second Moralis API key for key rotation
 - `COINGECKO_API_KEY`
 - `ETH_RPC_URL`
 - `DATABASE_URL`
+- `DATABASE_SSL`
+- `DATABASE_CONNECTION_TIMEOUT_MS`
 
 The app is currently Ethereum-focused.
 Moralis calls use `chain: 'eth'`.
@@ -219,16 +248,26 @@ Moralis calls use `chain: 'eth'`.
 
 ### Moralis
 
-Moralis is used for both history ingestion and live holdings.
+Moralis is used for history ingestion only.
 
 Current usage:
 
 - ERC-20 transfers
 - wallet history for native ETH transfers
-- native balance endpoint
-- ERC-20 balances endpoint
 
-Moralis is the source for blockchain activity and current on-chain balances.
+Moralis is no longer used for live balance fetching.
+WalletCoreService rotates between two configured API keys.
+When a key returns HTTP 401, it is marked exhausted for 1 hour before being retried.
+
+### Direct RPC and Multicall3
+
+Live on-chain balances are now fetched via a direct `JsonRpcProvider` connection and the Multicall3 contract.
+
+Current usage:
+
+- native ETH balance via `provider.getBalance()`
+- ERC-20 balances batched through Multicall3 `aggregate3()` in groups of 150
+- wallet bytecode lookup for `WalletContextService` address-type detection
 
 ### DefiLlama
 
@@ -275,6 +314,25 @@ Why we store normalized data:
 - normalized data is easier to reason about
 - most analytics can run from stored history
 - we can recover from temporary upstream failures
+
+The `wallet_known_tokens` table stores the set of ERC-20 tokens a wallet has interacted with.
+
+Important stored fields:
+
+- wallet_address
+- contract_address
+- symbol
+- decimals
+- first_seen_at
+- last_seen_at
+- seen_count
+
+Important rules:
+
+- one row per `wallet_address + contract_address`
+- upserted from `syncKnownTokens()` after each ingestion pass
+- `HybridHoldingsService` reads this table to know which ERC-20s to query balances for
+- falls back to a transaction scan when no rows exist for the wallet, then backfills asynchronously
 
 ## 7. Core data model
 
@@ -703,12 +761,18 @@ This works well for many common wallet events, but it is still a heuristic.
 
 ## 11. How live holdings work
 
-`getHoldings()` does not reconstruct balances from DB.
+`getHoldings()` is now served by `HybridHoldingsService`, not Moralis.
 
 It fetches:
 
-- native ETH balance from Moralis native balance endpoint
-- ERC-20 balances from Moralis ERC-20 balances endpoint
+- native ETH balance via `provider.getBalance()` using the configured `ETH_RPC_URL`
+- ERC-20 balances via batched Multicall3 `aggregate3()` calls in groups of 150
+
+Token discovery:
+
+1. `HybridHoldingsService` looks up `wallet_known_tokens` rows for the wallet address
+2. if rows exist, their `contract_address` entries are used as the ERC-20 candidate list
+3. if no rows exist, the service falls back to scanning stored `transactions` for token contract addresses, then asynchronously backfills the `wallet_known_tokens` table
 
 Current behavior:
 
@@ -716,6 +780,7 @@ Current behavior:
 - include native ETH as `ETH`
 - exclude zero balances
 - trim trailing zeros
+- cache results in memory for 5 minutes per wallet address
 
 This endpoint is the source for the live portfolio pipeline.
 
@@ -916,11 +981,19 @@ Current resilience rules:
 
 - Moralis client uses timeouts
 - Moralis history fetch retries once
-- cached DB data is used when refresh fails
+- Moralis key rotation: on HTTP 401 the active key is marked exhausted for 1 hour and the other key is tried immediately; `MoralisKeysExhaustedError` is thrown when both keys are exhausted at the same time
+- cached DB data is used when Moralis refresh fails
 - missing historical trade pricing can remain `0`, and one missing swap leg may still be inferred from its priced counterpart
 - live holdings pricing failures do not force zero-valued market fields; portfolio items return `null` market-derived values and `priceUnavailable = true`
 - transfer-in estimated basis falls back to `null` when unsupported
 - duplicate inserts are ignored safely
+- historical price cache (24h TTL) and live price cache (5 min TTL) prevent redundant provider calls
+- in-flight request deduplication ensures concurrent callers share one outstanding network request instead of issuing duplicates
+- negative-cache entries for confirmed no-data misses avoid repeated failed DefiLlama lookups
+- DefiLlama concurrency is capped at 5 simultaneous requests with 100 ms spacing to stay within rate limits
+- DefiLlama 429 responses trigger exponential backoff (2 s then 4 s, 2 retries maximum)
+- a global 15-second DefiLlama cooldown is engaged when 5 or more 429 responses are received within a 10-second window
+- `HybridHoldingsService` maintains a 5-minute in-memory cache per wallet; a cache miss triggers a full RPC + Multicall3 refresh
 
 ## 19. Current assumptions and limits
 
@@ -967,12 +1040,14 @@ Recommended reading order for a new developer:
 1. `src/wallet/wallet.controller.ts`
 2. `src/wallet/services/wallet.service.ts`
 3. `src/wallet/services/wallet-core.service.ts`
-4. `src/wallet/services/wallet-pricing.service.ts`
-5. `src/wallet/services/wallet-pnl.service.ts`
-6. `src/wallet/services/wallet-analytics.service.ts`
-7. `src/wallet/services/wallet-portfolio.service.ts`
-8. `src/wallet/transaction.entity.ts`
-9. `src/wallet/wallet.types.ts`
+4. `src/wallet/services/hybrid-holdings.service.ts`
+5. `src/wallet/services/wallet-pricing.service.ts`
+6. `src/wallet/services/wallet-pnl.service.ts`
+7. `src/wallet/services/wallet-analytics.service.ts`
+8. `src/wallet/services/wallet-portfolio.service.ts`
+9. `src/wallet/transaction.entity.ts`
+10. `src/wallet/entities/wallet-known-token.entity.ts`
+11. `src/wallet/wallet.types.ts`
 
 ## 22. Update rule for this document
 
@@ -988,5 +1063,6 @@ Whenever any of the following change, update this file in the same task:
 - cost basis logic
 - portfolio analytics fields
 - database schema for wallet data
+- live holdings provider or token discovery strategy
 
 This document should describe the current implementation, not an older version and not a future design.
