@@ -19,7 +19,7 @@ Current capabilities:
 - normalize ERC-20 and native ETH activity into one internal format
 - persist normalized transactions in Postgres
 - serve stored normalized transactions
-- classify normalized transactions as `transfer`, `swap`, `wrap`, `unwrap`, `liquidity_add`, or `liquidity_remove`
+- classify normalized transactions as `transfer`, `swap`, `wrap`, `unwrap`, `liquidity_add`, `liquidity_remove`, `stake`, `unstake`, `staking_wrap`, `staking_unwrap`, `yield_split`, `yield_merge`, `receipt_mint`, `receipt_burn`, `protocol_transform`, `bridge_out`, `bridge_in`, `lending_deposit`, `lending_withdraw`, `borrow`, `repay`, `vault_deposit`, `vault_withdraw`, or `reward_claim`
 - build trades from swap transactions
 - attach historical prices to trades
 - infer one missing swap-leg price from the priced counterpart trade
@@ -148,8 +148,9 @@ Responsibilities:
 - fetch ERC-20 transfers and wallet history
 - refresh only new blocks when DB data already exists
 - normalize raw provider payloads into `NormalizedTransaction`
-- classify each normalized transaction into one of six types using a priority-ordered rule set: `wrap`, `unwrap`, `liquidity_add`, `liquidity_remove`, `transfer`, or `swap`
-- emit `debug`-level logs for wrap, unwrap, liquidity_add, and liquidity_remove detections keyed by transaction hash
+- classify each normalized transaction with a priority-ordered semantic rule set covering wraps, liquidity events, staking, yield split/merge, receipt mint/burn, protocol transforms, bridge flows, lending/vault flows, reward claims, transfer, and swap
+- emit `debug`-level logs for key semantic detections keyed by transaction hash
+- enforce a hard ingestion cap per wallet using `TX_FETCH_LIMIT` (default `1000`) during paginated provider fetches
 - persist normalized transactions into Postgres; only non-`unknown` transactions are saved
 - return stored normalized transactions
 - expose transaction entities to downstream services
@@ -254,6 +255,7 @@ Current config values:
 - `DATABASE_URL`
 - `DATABASE_SSL`
 - `DATABASE_CONNECTION_TIMEOUT_MS`
+- `TX_FETCH_LIMIT` (code constant in `src/config/constants.ts`, default `1000`)
 
 The app is currently Ethereum-focused.
 Moralis calls use `chain: 'eth'`.
@@ -262,14 +264,14 @@ Moralis calls use `chain: 'eth'`.
 
 ### Moralis
 
-Moralis is used for history ingestion only.
+Moralis is used for history ingestion and as a secondary live-balance fallback.
 
 Current usage:
 
 - ERC-20 transfers
 - wallet history for native ETH transfers
+- fallback native and ERC-20 balances when `HybridHoldingsService` fails in portfolio/holdings loading
 
-Moralis is no longer used for live balance fetching.
 WalletCoreService rotates between two configured API keys.
 When a key returns HTTP 401, it is marked exhausted for 1 hour before being retried.
 
@@ -312,7 +314,7 @@ Important stored fields:
 - timestamp
 - from address
 - to address
-- type: `transfer`, `swap`, `wrap`, `unwrap`, `liquidity_add`, or `liquidity_remove`
+- type: one of `transfer`, `swap`, `wrap`, `unwrap`, `liquidity_add`, `liquidity_remove`, `stake`, `unstake`, `staking_wrap`, `staking_unwrap`, `yield_split`, `yield_merge`, `receipt_mint`, `receipt_burn`, `protocol_transform`, `bridge_out`, `bridge_in`, `lending_deposit`, `lending_withdraw`, `borrow`, `repay`, `vault_deposit`, `vault_withdraw`, `reward_claim` (`unknown` is not persisted)
 - inputs: tokens leaving the wallet
 - outputs: tokens entering the wallet
 
@@ -421,7 +423,7 @@ This is the main presentation endpoint for current holdings analytics.
 
 It is built from:
 
-- live balances from Moralis
+- live balances from `HybridHoldingsService` (direct RPC + Multicall3), with Moralis fallback when needed
 - current prices from CoinGecko
 - normalized stored history for holding analytics and cost basis
 
@@ -759,7 +761,7 @@ During normalization we:
 - push outgoing assets into `inputs`
 - push incoming assets into `outputs`
 - merge repeated token entries inside the same transaction
-- classify the transaction into one of the six supported types
+- classify the transaction using the full semantic rule set (transfer/swap, wraps, liquidity, staking, yield, protocol-transform, bridge, lending/vault, reward)
 
 ### Step 5: save and return stored view
 
@@ -771,25 +773,79 @@ This keeps the output stable regardless of the raw provider payload.
 
 Rules are applied in priority order. The first match wins.
 
-**wrap** — single input token is `ETH`, single output token is `WETH`
+### Empty payload guard
 
-**unwrap** — single input token is `WETH`, single output token is `ETH`
+**unknown** — no inputs and no outputs; these transactions are not persisted.
 
-**liquidity_add** — two or more distinct input tokens and exactly one output token whose symbol matches the LP token pattern: `LP`, `UNI-V2`, `PAIR`, `POOL`, `BPT`, `SLP`, `Cake-LP` (case-insensitive)
+### One-sided flow rules
 
-**liquidity_remove** — exactly one input token whose symbol matches the LP token pattern above, and two or more distinct output tokens
+**repay** — inputs exist, outputs are empty, and `to` is a known lending protocol address.
 
-**transfer** — same single token on both input and output sides, or only one side present
+**bridge_out** — inputs exist, outputs are empty, and either `to` is a known bridge address or the transfer matches a bridge-out heuristic (base-asset-like input with no wallet-side return leg).
 
-**swap** — any other combination of different-token inputs and outputs
+**vault_deposit** — inputs exist, outputs are empty, `to` is a known vault address, and at least one input is base-asset-like.
 
-**unknown** — no inputs and no outputs; these transactions are not persisted
+**bridge_in** — outputs exist, inputs are empty, and `from` is a known bridge address.
 
-Wrap, unwrap, liquidity_add, and liquidity_remove transactions are stored but are **never** converted into trades. Only `swap` transactions feed the PnL pipeline. This ensures LP deposits, LP withdrawals, WETH wraps, and unwraps no longer inflate realized PnL, swap counts, or trader classification signals.
+**borrow** — outputs exist, inputs are empty, and `from` is a known lending protocol address.
+
+**yield_split** — outputs exist, inputs are empty, `from` is the zero address, and any output matches yield token patterns (`YT-`, `PT-`, `SY-`).
+
+**receipt_mint** — outputs exist, inputs are empty, `from` is the zero address, and any output looks like a lending receipt or vault share.
+
+**reward_claim** — outputs exist, inputs are empty, and either (a) `from` is the zero address with non-yield/non-receipt outputs, (b) `from` is a known reward distributor, or (c) outputs are reward-like by symbol/name heuristics.
+
+**vault_withdraw** — outputs exist, inputs are empty, `from` is a known vault address, and at least one output is base-asset-like.
+
+**transfer** — fallback for one-sided flows that match none of the above.
+
+### Two-sided flow rules
+
+**wrap** — single-token `ETH` input and single-token `WETH` output.
+
+**unwrap** — single-token `WETH` input and single-token `ETH` output.
+
+**liquidity_add** — two or more distinct input tokens and exactly one LP-like output (`LP`, `UNI-V2`, `PAIR`, `POOL`, `BPT`, `SLP`, `Cake-LP`, case-insensitive).
+
+**liquidity_remove** — exactly one LP-like input and two or more distinct output tokens.
+
+**yield_split** — inputs contain a Pendle base/restaked asset and outputs contain a yield token.
+
+**yield_merge** — inputs contain a yield token and outputs contain a Pendle base/restaked asset.
+
+**receipt_mint / reward_claim** — when `from` is zero address in a two-sided payload: yield outputs => `yield_split`; receipt-like outputs => `receipt_mint`; otherwise `reward_claim`.
+
+**receipt_burn / yield_merge** — when `to` is zero address: yield token present on either side => `yield_merge`; otherwise `receipt_burn`.
+
+**lending_deposit** — single input/output pair where input is base-asset-like and output is lending-receipt-like.
+
+**lending_withdraw** — single input/output pair where input is lending-receipt-like and output is base-asset-like.
+
+**vault_deposit** — single input/output pair where input is base-asset-like and output is vault-share-like.
+
+**vault_withdraw** — single input/output pair where input is vault-share-like and output is base-asset-like.
+
+**staking_wrap** — staking derivative in, wrapped staking derivative out.
+
+**staking_unwrap** — wrapped staking derivative in, unwrapped staking derivative out.
+
+**stake** — staking base asset in, staking derivative out.
+
+**unstake** — staking derivative in, staking base asset out.
+
+**protocol_transform** — single input/output pair that maps to the same economic asset group with different wrappers/representations.
+
+**bridge_out / bridge_in** — two-sided fallback when `to`/`from` matches known bridge addresses.
+
+**transfer** — same single token on both sides.
+
+**swap** — fallback for all other two-sided flows.
+
+Trade conversion rule: only `swap` transactions are converted into trades by `WalletPnlService`. Every other stored type is excluded from trade reconstruction and realized PnL.
 
 ## 11. How live holdings work
 
-`getHoldings()` is now served by `HybridHoldingsService`, not Moralis.
+`getHoldings()` is served by `HybridHoldingsService` first, with Moralis fallback when needed.
 
 It fetches:
 
@@ -809,6 +865,8 @@ Current behavior:
 - exclude zero balances
 - trim trailing zeros
 - cache results in memory for 5 minutes per wallet address
+- if hybrid loading fails, `WalletPortfolioService` falls back to Moralis native/ERC-20 balances
+- if Moralis keys are exhausted during fallback, holdings return empty and `balancesAvailable = false` for score/classification gating
 
 This endpoint is the source for the live portfolio pipeline.
 
@@ -962,7 +1020,7 @@ This preserves reset and partial-sell behavior.
 
 ### Step 4: align lots to current live balance
 
-The live balance from Moralis is treated as the current source of truth.
+The live balance from the holdings pipeline (`HybridHoldingsService` primary, Moralis fallback) is treated as the current source of truth.
 Rebuilt lots are trimmed to match the current balance.
 
 This protects the analytics from minor ingestion gaps or stale stored state.
@@ -1057,8 +1115,8 @@ The module currently assumes Ethereum mainnet behavior.
 
 ### Classification is heuristic
 
-`transfer` vs `swap` detection is still rule-based.
-Complex DeFi patterns may need more advanced classification later.
+Transaction semantic detection is still rule-based and address/token-heuristic driven.
+Complex or newly deployed DeFi protocols can still require future rule expansion.
 
 ### Stored history is important
 
