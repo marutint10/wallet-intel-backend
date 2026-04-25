@@ -144,7 +144,38 @@ function mergeTokenAmounts(entries: NormalizedTokenAmount[]) {
 export class WalletCoreService {
   private static readonly MORALIS_RETRY_DELAY_MS = 500;
   private static readonly MORALIS_KEY_EXHAUSTED_WINDOW_MS = 60 * 60 * 1000;
+  private static readonly ZERO_ADDRESS =
+    '0x0000000000000000000000000000000000000000';
   private static readonly LP_TOKEN_PATTERN = /\bLP\b|UNI-V2|PAIR|POOL|BPT|\bSLP\b|Cake-LP/i;
+  private static readonly YIELD_TOKEN_PREFIXES = ['YT-', 'PT-', 'SY-'];
+  private static readonly PENDLE_BASE_OR_RESTAKED_SYMBOLS = new Set([
+    'ETH',
+    'WETH',
+    'STETH',
+    'EZETH',
+    'RSWETH',
+    'WEETH',
+    'RETH',
+  ]);
+  private static readonly PENDLE_BASE_OR_RESTAKED_NAME_MATCHES = [
+    'RENZO RESTAKED ETH',
+  ];
+  private static readonly PROTOCOL_TRANSFORM_GROUPS: Record<string, string> = {
+    ETH: 'ETH',
+    WETH: 'ETH',
+    STETH: 'STETH',
+    WSTETH: 'STETH',
+    EZETH: 'EZETH',
+    RSWETH: 'RSWETH',
+    WEETH: 'WEETH',
+    RETH: 'RETH',
+  };
+  private static readonly PROTOCOL_TRANSFORM_NAME_MATCHES: Array<{
+    fragment: string;
+    group: string;
+  }> = [
+    { fragment: 'RENZO RESTAKED ETH', group: 'EZETH' },
+  ];
   private static readonly STAKING_BASE_ASSET_SYMBOLS = new Set(['ETH', 'WETH']);
   private static readonly STAKING_DERIVATIVE_SYMBOLS = new Set([
     'STETH',
@@ -606,7 +637,12 @@ export class WalletCoreService {
           | 'stake'
           | 'unstake'
           | 'staking_wrap'
-          | 'staking_unwrap';
+          | 'staking_unwrap'
+          | 'yield_split'
+          | 'yield_merge'
+          | 'receipt_mint'
+          | 'receipt_burn'
+          | 'protocol_transform';
       } =>
         transaction.type === 'transfer' ||
         transaction.type === 'swap' ||
@@ -617,7 +653,12 @@ export class WalletCoreService {
         transaction.type === 'stake' ||
         transaction.type === 'unstake' ||
         transaction.type === 'staking_wrap' ||
-        transaction.type === 'staking_unwrap',
+        transaction.type === 'staking_unwrap' ||
+        transaction.type === 'yield_split' ||
+        transaction.type === 'yield_merge' ||
+        transaction.type === 'receipt_mint' ||
+        transaction.type === 'receipt_burn' ||
+        transaction.type === 'protocol_transform',
     );
 
     if (transactionsToSave.length === 0) {
@@ -862,52 +903,6 @@ export class WalletCoreService {
     const singleOutputEntry =
       outputTokens.size === 1 ? transaction.outputs[0] : undefined;
 
-    // --- STAKING WRAP / UNWRAP ---
-    if (singleInputEntry && singleOutputEntry) {
-      const inputIsStakingDerivative =
-        this.isKnownStakingDerivative(singleInputEntry);
-      const outputIsStakingDerivative =
-        this.isKnownStakingDerivative(singleOutputEntry);
-      const inputIsWrappedStakingDerivative =
-        this.isWrappedStakingDerivative(singleInputEntry);
-      const outputIsWrappedStakingDerivative =
-        this.isWrappedStakingDerivative(singleOutputEntry);
-
-      if (
-        inputIsStakingDerivative &&
-        outputIsStakingDerivative &&
-        !inputIsWrappedStakingDerivative &&
-        outputIsWrappedStakingDerivative
-      ) {
-        this.logger.debug(`Detected staking_wrap tx ${transaction.hash}`);
-        return 'staking_wrap';
-      }
-
-      if (
-        inputIsStakingDerivative &&
-        outputIsStakingDerivative &&
-        inputIsWrappedStakingDerivative &&
-        !outputIsWrappedStakingDerivative
-      ) {
-        this.logger.debug(`Detected staking_unwrap tx ${transaction.hash}`);
-        return 'staking_unwrap';
-      }
-
-      // --- STAKE / UNSTAKE ---
-      const inputIsBaseStakingAsset = this.isStakingBaseAsset(singleInputEntry);
-      const outputIsBaseStakingAsset = this.isStakingBaseAsset(singleOutputEntry);
-
-      if (inputIsBaseStakingAsset && outputIsStakingDerivative) {
-        this.logger.debug(`Detected stake tx ${transaction.hash}`);
-        return 'stake';
-      }
-
-      if (inputIsStakingDerivative && outputIsBaseStakingAsset) {
-        this.logger.debug(`Detected unstake tx ${transaction.hash}`);
-        return 'unstake';
-      }
-    }
-
     // --- WRAP: ETH in, WETH out ---
     if (
       inputTokens.size === 1 &&
@@ -948,6 +943,98 @@ export class WalletCoreService {
       }
     }
 
+    // --- YIELD SPLIT: base/restaked in, YT/PT/SY out ---
+    if (
+      this.hasPendleBaseOrRestakedAsset(transaction.inputs) &&
+      this.hasYieldToken(transaction.outputs)
+    ) {
+      this.logger.debug(`Detected yield_split tx ${transaction.hash}`);
+      return 'yield_split';
+    }
+
+    // --- YIELD MERGE: YT/PT/SY in, base/restaked out ---
+    if (
+      this.hasYieldToken(transaction.inputs) &&
+      this.hasPendleBaseOrRestakedAsset(transaction.outputs)
+    ) {
+      this.logger.debug(`Detected yield_merge tx ${transaction.hash}`);
+      return 'yield_merge';
+    }
+
+    // --- RECEIPT MINT/BURN via zero address ---
+    if (this.isZeroAddress(transaction.from)) {
+      if (this.hasYieldToken(transaction.outputs)) {
+        this.logger.debug(`Detected yield_split tx ${transaction.hash}`);
+        return 'yield_split';
+      }
+
+      this.logger.debug(`Detected zero-address mint tx ${transaction.hash}`);
+      return 'receipt_mint';
+    }
+
+    if (this.isZeroAddress(transaction.to)) {
+      if (
+        this.hasYieldToken(transaction.inputs) ||
+        this.hasYieldToken(transaction.outputs)
+      ) {
+        this.logger.debug(`Detected yield_merge tx ${transaction.hash}`);
+        return 'yield_merge';
+      }
+
+      return 'receipt_burn';
+    }
+
+    // --- Existing staking semantics ---
+    if (singleInputEntry && singleOutputEntry) {
+      const inputIsStakingDerivative =
+        this.isKnownStakingDerivative(singleInputEntry);
+      const outputIsStakingDerivative =
+        this.isKnownStakingDerivative(singleOutputEntry);
+      const inputIsWrappedStakingDerivative =
+        this.isWrappedStakingDerivative(singleInputEntry);
+      const outputIsWrappedStakingDerivative =
+        this.isWrappedStakingDerivative(singleOutputEntry);
+
+      if (
+        inputIsStakingDerivative &&
+        outputIsStakingDerivative &&
+        !inputIsWrappedStakingDerivative &&
+        outputIsWrappedStakingDerivative
+      ) {
+        this.logger.debug(`Detected staking_wrap tx ${transaction.hash}`);
+        return 'staking_wrap';
+      }
+
+      if (
+        inputIsStakingDerivative &&
+        outputIsStakingDerivative &&
+        inputIsWrappedStakingDerivative &&
+        !outputIsWrappedStakingDerivative
+      ) {
+        this.logger.debug(`Detected staking_unwrap tx ${transaction.hash}`);
+        return 'staking_unwrap';
+      }
+
+      const inputIsBaseStakingAsset = this.isStakingBaseAsset(singleInputEntry);
+      const outputIsBaseStakingAsset = this.isStakingBaseAsset(singleOutputEntry);
+
+      if (inputIsBaseStakingAsset && outputIsStakingDerivative) {
+        this.logger.debug(`Detected stake tx ${transaction.hash}`);
+        return 'stake';
+      }
+
+      if (inputIsStakingDerivative && outputIsBaseStakingAsset) {
+        this.logger.debug(`Detected unstake tx ${transaction.hash}`);
+        return 'unstake';
+      }
+
+      // --- PROTOCOL TRANSFORM: same economic asset, different wrapper/receipt representation ---
+      if (this.isProtocolTransformPair(singleInputEntry, singleOutputEntry)) {
+        this.logger.debug(`Detected protocol_transform tx ${transaction.hash}`);
+        return 'protocol_transform';
+      }
+    }
+
     // --- TRANSFER: same single token on both sides ---
     if (
       inputTokens.size === 1 &&
@@ -966,6 +1053,97 @@ export class WalletCoreService {
 
   private normalizeTokenName(tokenName?: string): string {
     return tokenName?.trim().toUpperCase() ?? '';
+  }
+
+  private normalizeAddress(address?: string): string {
+    return address?.trim().toLowerCase() ?? '';
+  }
+
+  private isZeroAddress(address?: string): boolean {
+    return this.normalizeAddress(address) === WalletCoreService.ZERO_ADDRESS;
+  }
+
+  private isYieldToken(entry: NormalizedTokenAmount): boolean {
+    const symbol = this.normalizeTokenSymbol(entry.token);
+    const tokenName = this.normalizeTokenName(entry.tokenName);
+
+    return WalletCoreService.YIELD_TOKEN_PREFIXES.some(
+      (prefix) => symbol.startsWith(prefix) || tokenName.includes(prefix),
+    );
+  }
+
+  private hasYieldToken(entries: NormalizedTokenAmount[]): boolean {
+    return entries.some((entry) => this.isYieldToken(entry));
+  }
+
+  private isPendleBaseOrRestakedAsset(entry: NormalizedTokenAmount): boolean {
+    const symbol = this.normalizeTokenSymbol(entry.token);
+    const tokenName = this.normalizeTokenName(entry.tokenName);
+
+    if (WalletCoreService.PENDLE_BASE_OR_RESTAKED_SYMBOLS.has(symbol)) {
+      return true;
+    }
+
+    return WalletCoreService.PENDLE_BASE_OR_RESTAKED_NAME_MATCHES.some((fragment) =>
+      tokenName.includes(fragment),
+    );
+  }
+
+  private hasPendleBaseOrRestakedAsset(
+    entries: NormalizedTokenAmount[],
+  ): boolean {
+    return entries.some((entry) => this.isPendleBaseOrRestakedAsset(entry));
+  }
+
+  private getProtocolTransformGroup(entry: NormalizedTokenAmount): string | null {
+    const symbol = this.normalizeTokenSymbol(entry.token);
+    const tokenName = this.normalizeTokenName(entry.tokenName);
+
+    const directGroup = WalletCoreService.PROTOCOL_TRANSFORM_GROUPS[symbol];
+    if (directGroup) {
+      return directGroup;
+    }
+
+    for (const matcher of WalletCoreService.PROTOCOL_TRANSFORM_NAME_MATCHES) {
+      if (tokenName.includes(matcher.fragment)) {
+        return matcher.group;
+      }
+    }
+
+    if (
+      symbol.startsWith('W') &&
+      WalletCoreService.PROTOCOL_TRANSFORM_GROUPS[symbol.slice(1)]
+    ) {
+      return WalletCoreService.PROTOCOL_TRANSFORM_GROUPS[symbol.slice(1)];
+    }
+
+    return null;
+  }
+
+  private isProtocolTransformPair(
+    inputEntry: NormalizedTokenAmount,
+    outputEntry: NormalizedTokenAmount,
+  ): boolean {
+    const inputGroup = this.getProtocolTransformGroup(inputEntry);
+    const outputGroup = this.getProtocolTransformGroup(outputEntry);
+
+    if (!inputGroup || !outputGroup || inputGroup !== outputGroup) {
+      return false;
+    }
+
+    const inputSymbol = this.normalizeTokenSymbol(inputEntry.token);
+    const outputSymbol = this.normalizeTokenSymbol(outputEntry.token);
+
+    if (inputSymbol !== outputSymbol) {
+      return true;
+    }
+
+    const inputContract = inputEntry.contractAddress?.toLowerCase() ?? '';
+    const outputContract = outputEntry.contractAddress?.toLowerCase() ?? '';
+
+    return Boolean(
+      inputContract && outputContract && inputContract !== outputContract,
+    );
   }
 
   private isStakingBaseAsset(entry: NormalizedTokenAmount): boolean {
