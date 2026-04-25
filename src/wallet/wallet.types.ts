@@ -30,6 +30,11 @@ export interface NormalizedTransaction {
     | 'unstake'
     | 'staking_wrap'
     | 'staking_unwrap'
+    | 'yield_split'
+    | 'yield_merge'
+    | 'receipt_mint'
+    | 'receipt_burn'
+    | 'protocol_transform'
     | 'unknown';
   inputs: NormalizedTokenAmount[];
   outputs: NormalizedTokenAmount[];
