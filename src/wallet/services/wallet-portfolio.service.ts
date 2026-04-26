@@ -10,7 +10,7 @@ import {
   WalletTokenFlowResponse,
 } from '../wallet.types';
 import { MoralisKeysExhaustedError, WalletCoreService } from './wallet-core.service';
-import { WalletPricingService } from './wallet-pricing.service';
+import { TokenMarketSignal, WalletPricingService } from './wallet-pricing.service';
 import { HybridHoldingsService } from './hybrid-holdings.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import {
@@ -82,7 +82,7 @@ export class WalletPortfolioService {
       };
     }
 
-    const [{ ethPrice, tokenPrices }, holdingAnalytics, tierSignals] =
+    const [{ ethPrice, marketSignalsByContract }, holdingAnalytics, tierSignals] =
       await Promise.all([
         this.fetchHoldingPrices(holdings),
         this.buildHoldingAnalyticsMap(address, holdings),
@@ -91,7 +91,11 @@ export class WalletPortfolioService {
     const holdingsWithUsd = holdings
       .map((holding) => ({
         holding,
-        currentPrice: this.getCurrentHoldingPrice(holding, ethPrice, tokenPrices),
+        currentPrice: this.getCurrentHoldingPrice(
+          holding,
+          ethPrice,
+          marketSignalsByContract,
+        ),
       }))
       .map(({ holding, currentPrice }) => ({
         holding,
@@ -130,6 +134,7 @@ export class WalletPortfolioService {
             contractAddress: holding.contractAddress,
           },
           tierSignals,
+          this.getMarketSignalForHolding(holding, marketSignalsByContract),
         );
 
         if (tier.displayTier !== 'core') {
@@ -157,6 +162,10 @@ export class WalletPortfolioService {
           decimals: holding.decimals,
           contractAddress: holding.contractAddress,
           displayTier: tier.displayTier,
+          tokenQualityScore: tier.tokenQualityScore,
+          tokenQualityLabel: tier.tokenQualityLabel,
+          priceSources: tier.priceSources,
+          liquidityUsd: tier.liquidityUsd,
           ...(tier.hiddenReason ? { hiddenReason: tier.hiddenReason } : {}),
         };
       }),
@@ -457,26 +466,60 @@ export class WalletPortfolioService {
     const tradedTokens = new Set<string>();
     const recentTradedTokens = new Set<string>();
     const pnlHistoryTokens = new Set<string>();
+    const airdropPatternTokens = new Set<string>();
+    const transferInByToken = new Map<string, number>();
+    const transferOutByToken = new Map<string, number>();
     const recentCutoffTimestamp = Date.now() - 30 * 24 * 60 * 60 * 1000;
 
     for (const transaction of transactions) {
-      if (transaction.type !== 'swap') {
+      const transactionTimestamp = transaction.timestamp.getTime();
+
+      if (transaction.type === 'swap') {
+        for (const entry of [...transaction.inputs, ...transaction.outputs]) {
+          if (!entry.token) {
+            continue;
+          }
+
+          const tokenKey = this.getTierTokenKey(
+            entry.token,
+            entry.contractAddress,
+          );
+          tradedTokens.add(tokenKey);
+
+          if (transactionTimestamp >= recentCutoffTimestamp) {
+            recentTradedTokens.add(tokenKey);
+          }
+        }
+
         continue;
       }
 
-      const transactionTimestamp = transaction.timestamp.getTime();
+      if (transaction.type !== 'transfer') {
+        continue;
+      }
 
-      for (const entry of [...transaction.inputs, ...transaction.outputs]) {
+      for (const entry of transaction.outputs) {
         if (!entry.token) {
           continue;
         }
 
-        const tokenKey = entry.token.toLowerCase();
-        tradedTokens.add(tokenKey);
+        const tokenKey = this.getTierTokenKey(
+          entry.token,
+          entry.contractAddress,
+        );
+        transferInByToken.set(tokenKey, (transferInByToken.get(tokenKey) ?? 0) + 1);
+      }
 
-        if (transactionTimestamp >= recentCutoffTimestamp) {
-          recentTradedTokens.add(tokenKey);
+      for (const entry of transaction.inputs) {
+        if (!entry.token) {
+          continue;
         }
+
+        const tokenKey = this.getTierTokenKey(
+          entry.token,
+          entry.contractAddress,
+        );
+        transferOutByToken.set(tokenKey, (transferOutByToken.get(tokenKey) ?? 0) + 1);
       }
     }
 
@@ -485,19 +528,32 @@ export class WalletPortfolioService {
         continue;
       }
 
-      pnlHistoryTokens.add(trade.token.toLowerCase());
+      pnlHistoryTokens.add(this.getTierTokenKey(trade.token));
+    }
+
+    for (const [tokenKey, transferInCount] of transferInByToken.entries()) {
+      const transferOutCount = transferOutByToken.get(tokenKey) ?? 0;
+      const swapped = tradedTokens.has(tokenKey);
+
+      if (!swapped && transferOutCount === 0 && transferInCount >= 2) {
+        airdropPatternTokens.add(tokenKey);
+      }
     }
 
     return {
       tradedTokens,
       recentTradedTokens,
       pnlHistoryTokens,
+      airdropPatternTokens,
     };
   }
 
   private async fetchHoldingPrices(
     holdings: WalletHoldingsResponse,
-  ): Promise<{ ethPrice: number; tokenPrices: Record<string, number> }> {
+  ): Promise<{
+    ethPrice: number;
+    marketSignalsByContract: Record<string, TokenMarketSignal>;
+  }> {
     const contractAddresses = Array.from(
       new Set(
         holdings
@@ -506,16 +562,16 @@ export class WalletPortfolioService {
       ),
     );
 
-    const [tokenPricesResult, ethPriceResult] = await Promise.allSettled([
-      this.walletPricingService.fetchCoinGeckoTokenPrices(contractAddresses),
+    const [tokenMarketsResult, ethPriceResult] = await Promise.allSettled([
+      this.walletPricingService.fetchTokenMarketSignals(contractAddresses),
       this.walletPricingService.fetchEthereumUsdPrice(),
     ]);
 
-    if (tokenPricesResult.status === 'rejected') {
+    if (tokenMarketsResult.status === 'rejected') {
       this.logger.warn(
-        'Token pricing failed for holdings valuation, affected holdings will expose unavailable pricing',
-        tokenPricesResult.reason instanceof Error
-          ? tokenPricesResult.reason.stack
+        'Token market lookup failed for holdings valuation, affected holdings will expose reduced quality signals',
+        tokenMarketsResult.reason instanceof Error
+          ? tokenMarketsResult.reason.stack
           : undefined,
       );
     }
@@ -530,8 +586,8 @@ export class WalletPortfolioService {
     }
 
     return {
-      tokenPrices:
-        tokenPricesResult.status === 'fulfilled' ? tokenPricesResult.value : {},
+      marketSignalsByContract:
+        tokenMarketsResult.status === 'fulfilled' ? tokenMarketsResult.value : {},
       ethPrice: ethPriceResult.status === 'fulfilled' ? ethPriceResult.value : 0,
     };
   }
@@ -986,13 +1042,14 @@ export class WalletPortfolioService {
   private getCurrentHoldingPrice(
     holding: WalletHoldingItem,
     ethPrice: number,
-    tokenPrices: Record<string, number>,
+    marketSignalsByContract: Record<string, TokenMarketSignal>,
   ): string | null {
     const price =
       holding.token.toUpperCase() === 'ETH'
         ? ethPrice
         : holding.contractAddress
-          ? tokenPrices[holding.contractAddress.toLowerCase()] ?? 0
+          ? marketSignalsByContract[holding.contractAddress.toLowerCase()]?.price ??
+            0
           : 0;
 
     if (!Number.isFinite(price) || price <= 0) {
@@ -1000,6 +1057,25 @@ export class WalletPortfolioService {
     }
 
     return this.normalizeDecimalString(price.toString());
+  }
+
+  private getTierTokenKey(token: string, contractAddress?: string): string {
+    if (contractAddress) {
+      return `contract:${contractAddress.toLowerCase()}`;
+    }
+
+    return `symbol:${token.toLowerCase()}`;
+  }
+
+  private getMarketSignalForHolding(
+    holding: WalletHoldingItem,
+    marketSignalsByContract: Record<string, TokenMarketSignal>,
+  ): TokenMarketSignal | null {
+    if (!holding.contractAddress) {
+      return null;
+    }
+
+    return marketSignalsByContract[holding.contractAddress.toLowerCase()] ?? null;
   }
 
   private computeUnrealizedPnl(
