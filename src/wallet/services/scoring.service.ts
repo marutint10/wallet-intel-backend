@@ -83,6 +83,25 @@ export class WalletScoringService {
 		private readonly walletPricingService: WalletPricingService,
 	) {}
 
+	getTraderWeightedRoiValue(
+		summary: WalletSummaryResponse,
+		risk: WalletRiskMetricsResponse,
+	): number {
+		const sampleSizeMultiplierValue = this.resolveWeightedRoiSampleSizeMultiplier(
+			summary.total_swaps,
+		);
+		const qualityMultiplierValue = this.resolveWeightedRoiQualityMultiplier(
+			summary.avgWinRate,
+			risk.profitFactor,
+		);
+
+		return this.computeWeightedRoiValue(
+			summary.avgROI,
+			sampleSizeMultiplierValue,
+			qualityMultiplierValue,
+		);
+	}
+
 	async getWalletScore(
 		address: string,
 		debug = false,
@@ -205,7 +224,7 @@ export class WalletScoringService {
 			tokenCategories,
 			scoringEligiblePortfolio,
 		);
-		const weightedRoiResult = this.scoreWeightedROI(summary, risk);
+		const traderWeightedRoiResult = this.scoreTraderWeightedROI(summary, risk);
 		const realizedPnlQualityResult = this.scoreRealizedPnLQuality(summary, risk);
 		const consistencyResult = this.scoreConsistency(summary, activity, risk);
 		const riskManagementResult = this.scoreRiskManagement(risk, summary, tokenCategories);
@@ -221,8 +240,8 @@ export class WalletScoringService {
 		);
 
 		const breakdown: TraderWalletScoreBreakdown = {
-			weightedROI: this.createDimensionBreakdown(
-				weightedRoiResult.score,
+			traderWeightedROI: this.createDimensionBreakdown(
+				traderWeightedRoiResult.score,
 				WalletScoringService.TRADER_WEIGHTED_ROI_MAX,
 			),
 			realizedPnLQuality: this.createDimensionBreakdown(
@@ -230,7 +249,7 @@ export class WalletScoringService {
 				WalletScoringService.TRADER_REALIZED_PNL_QUALITY_MAX,
 			),
 			profitability: this.createDimensionBreakdown(
-				weightedRoiResult.score + realizedPnlQualityResult.score,
+				traderWeightedRoiResult.score + realizedPnlQualityResult.score,
 				WalletScoringService.TRADER_WEIGHTED_ROI_MAX +
 					WalletScoringService.TRADER_REALIZED_PNL_QUALITY_MAX,
 			),
@@ -255,7 +274,8 @@ export class WalletScoringService {
 				WalletScoringService.TRADER_MARKET_ADAPTABILITY_MAX,
 			),
 		};
-		const weightedRoiValue = weightedRoiResult.debug.weightedROI.value ?? 0;
+		const traderWeightedRoiValue =
+			traderWeightedRoiResult.debug.traderWeightedROI.value ?? 0;
 		const gamblerPenalty = this.resolveGamblerPenalty(
 			risk.profitFactor,
 			summary.total_swaps,
@@ -264,16 +284,16 @@ export class WalletScoringService {
 		const adjustedScore = Math.max(0, rawScore - gamblerPenalty);
 		const hardCappedScore = this.applyWeightedRoiHardCap(
 			adjustedScore,
-			weightedRoiValue,
+			traderWeightedRoiValue,
 		);
 		const score = Math.round(hardCappedScore);
 		const uncappedBand = this.resolveTraderBand(score);
-		const band = this.applyWeightedRoiBandCap(uncappedBand, weightedRoiValue);
+		const band = this.applyWeightedRoiBandCap(uncappedBand, traderWeightedRoiValue);
 		const scoreExplanation = this.buildTraderScoreExplanation(
 			score,
 			band,
 			breakdown,
-			weightedRoiValue,
+			traderWeightedRoiValue,
 			risk,
 			summary,
 			gamblerPenalty,
@@ -298,10 +318,10 @@ export class WalletScoringService {
 		return {
 			...response,
 			debug: {
-				weightedROI: weightedRoiResult.debug,
+				traderWeightedROI: traderWeightedRoiResult.debug,
 				realizedPnLQuality: realizedPnlQualityResult.debug,
 				profitability: this.createLegacyProfitabilityDebug(
-					weightedRoiResult,
+					traderWeightedRoiResult,
 					realizedPnlQualityResult,
 				),
 				consistency: consistencyResult.debug,
@@ -615,7 +635,7 @@ export class WalletScoringService {
 	}
 
 
-	private scoreWeightedROI(
+	private scoreTraderWeightedROI(
 		summary: WalletSummaryResponse,
 		risk: WalletRiskMetricsResponse,
 	): ScoreDimensionResult<WalletScoreWeightedRoiDebug> {
@@ -626,15 +646,15 @@ export class WalletScoringService {
 			summary.avgWinRate,
 			risk.profitFactor,
 		);
-		const weightedRoiValue = this.computeWeightedRoiValue(
+		const traderWeightedRoiValue = this.computeWeightedRoiValue(
 			summary.avgROI,
 			sampleSizeMultiplierValue,
 			qualityMultiplierValue,
 		);
 
-		const weightedROI = this.createMetricDebug(
-			weightedRoiValue,
-			this.bracketScore(weightedRoiValue, [
+		const traderWeightedROI = this.createMetricDebug(
+			traderWeightedRoiValue,
+			this.bracketScore(traderWeightedRoiValue, [
 				{ min: 80, score: 25 },
 				{ min: 50, score: 21 },
 				{ min: 25, score: 16 },
@@ -648,7 +668,7 @@ export class WalletScoringService {
 		const avgROI = this.createMetricDebug(summary.avgROI, 0);
 		const sampleSizeMultiplier = this.createMetricDebug(sampleSizeMultiplierValue, 0);
 		const qualityMultiplier = this.createMetricDebug(qualityMultiplierValue, 0);
-		const raw = weightedROI.weightedContribution;
+		const raw = traderWeightedROI.weightedContribution;
 
 		return {
 			score: raw,
@@ -657,7 +677,7 @@ export class WalletScoringService {
 					raw,
 					WalletScoringService.TRADER_WEIGHTED_ROI_MAX,
 				),
-				weightedROI,
+				traderWeightedROI,
 				avgROI,
 				sampleSizeMultiplier,
 				qualityMultiplier,
@@ -1093,12 +1113,12 @@ export class WalletScoringService {
 		};
 
 		return {
-			weightedROI: {
+			traderWeightedROI: {
 				...this.createDimensionDebugSummary(
 					0,
 					WalletScoringService.TRADER_WEIGHTED_ROI_MAX,
 				),
-				weightedROI: this.createMetricDebug(0, 0),
+				traderWeightedROI: this.createMetricDebug(0, 0),
 				avgROI: this.createMetricDebug(0, 0),
 				sampleSizeMultiplier: this.createMetricDebug(0, 0),
 				qualityMultiplier: this.createMetricDebug(0, 0),
@@ -1263,9 +1283,9 @@ export class WalletScoringService {
 	}
 
 	private calculateTotalScore(breakdown: TraderWalletScoreBreakdown | HolderWalletScoreBreakdown): number {
-		if ('weightedROI' in breakdown) {
+		if ('traderWeightedROI' in breakdown) {
 			return (
-				breakdown.weightedROI.score +
+				breakdown.traderWeightedROI.score +
 				breakdown.realizedPnLQuality.score +
 				breakdown.consistency.score +
 				breakdown.riskManagement.score +
@@ -1401,8 +1421,8 @@ export class WalletScoringService {
 		return WalletScoringService.TRADER_GAMBLER_PENALTY;
 	}
 
-	private applyWeightedRoiHardCap(score: number, weightedRoiValue: number): number {
-		if (weightedRoiValue < -40) {
+	private applyWeightedRoiHardCap(score: number, traderWeightedRoiValue: number): number {
+		if (traderWeightedRoiValue < -40) {
 			return Math.min(score, 25);
 		}
 
@@ -1411,9 +1431,9 @@ export class WalletScoringService {
 
 	private applyWeightedRoiBandCap(
 		band: WalletScoreBand,
-		weightedRoiValue: number,
+		traderWeightedRoiValue: number,
 	): WalletScoreBand {
-		if (weightedRoiValue >= -20) {
+		if (traderWeightedRoiValue >= -20) {
 			return band;
 		}
 
@@ -1435,10 +1455,10 @@ export class WalletScoringService {
 	}
 
 	private createLegacyProfitabilityDebug(
-		weightedRoiResult: ScoreDimensionResult<WalletScoreWeightedRoiDebug>,
+		traderWeightedRoiResult: ScoreDimensionResult<WalletScoreWeightedRoiDebug>,
 		realizedPnlQualityResult: ScoreDimensionResult<WalletScoreRealizedPnLQualityDebug>,
 	): WalletScoreProfitabilityDebug {
-		const raw = weightedRoiResult.score + realizedPnlQualityResult.score;
+		const raw = traderWeightedRoiResult.score + realizedPnlQualityResult.score;
 
 		return {
 			...this.createDimensionDebugSummary(
@@ -1447,7 +1467,7 @@ export class WalletScoringService {
 					WalletScoringService.TRADER_REALIZED_PNL_QUALITY_MAX,
 			),
 			totalRealizedPnL: realizedPnlQualityResult.debug.totalRealizedPnL,
-			avgROI: weightedRoiResult.debug.avgROI,
+			avgROI: traderWeightedRoiResult.debug.avgROI,
 			profitFactor: realizedPnlQualityResult.debug.profitFactor,
 			bestWorstRatio: realizedPnlQualityResult.debug.bestWorstRatio,
 		};
@@ -1457,7 +1477,7 @@ export class WalletScoringService {
 		score: number,
 		band: WalletScoreBand,
 		breakdown: TraderWalletScoreBreakdown,
-		weightedRoiValue: number,
+		traderWeightedRoiValue: number,
 		risk: WalletRiskMetricsResponse,
 		summary: WalletSummaryResponse,
 		gamblerPenalty: number,
@@ -1465,7 +1485,7 @@ export class WalletScoringService {
 		const positives: string[] = [];
 		const negatives: string[] = [];
 
-		if (breakdown.weightedROI.score >= 16) {
+		if (breakdown.traderWeightedROI.score >= 16) {
 			positives.push('Weighted ROI remained strong after sample and quality weighting.');
 		}
 
@@ -1481,7 +1501,7 @@ export class WalletScoringService {
 			positives.push('Market adaptability is supported by venue and category diversification.');
 		}
 
-		if (weightedRoiValue < 0) {
+		if (traderWeightedRoiValue < 0) {
 			negatives.push('Weighted ROI is negative after activity and quality adjustment.');
 		}
 
@@ -1495,13 +1515,13 @@ export class WalletScoringService {
 			);
 		}
 
-		if (weightedRoiValue < -40) {
-			negatives.push('Hard cap applied: weightedROI below -40 limits maximum score to 25.');
-		} else if (weightedRoiValue < -20) {
-			negatives.push('Band cap applied: weightedROI below -20 limits maximum band to Developing.');
+		if (traderWeightedRoiValue < -40) {
+			negatives.push('Hard cap applied: traderWeightedROI below -40 limits maximum score to 25.');
+		} else if (traderWeightedRoiValue < -20) {
+			negatives.push('Band cap applied: traderWeightedROI below -20 limits maximum band to Developing.');
 		}
 
-		const summaryText = `Trader score is ${score}/100 (${band}) based on weighted ROI, realized PnL quality, consistency, risk control, portfolio quality, experience, and market adaptability.`;
+		const summaryText = `Trader score is ${score}/100 (${band}) based on weighted ROI, realized PnL quality, consistency, risk control, portfolio quality, experience, and market adaptability. Trader score uses traderWeightedROI adjusted for sample size and trade quality.`;
 
 		return this.createScoreExplanation(positives, negatives, summaryText);
 	}
@@ -1559,7 +1579,7 @@ export class WalletScoringService {
 
 	private createEmptyTraderBreakdown(): TraderWalletScoreBreakdown {
 		return {
-			weightedROI: this.createDimensionBreakdown(
+			traderWeightedROI: this.createDimensionBreakdown(
 				0,
 				WalletScoringService.TRADER_WEIGHTED_ROI_MAX,
 			),
