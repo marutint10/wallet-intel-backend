@@ -20,6 +20,12 @@ export interface PortfolioItemForTier {
   contractAddress?: string;
 }
 
+export interface PortfolioTierSignals {
+  tradedTokens: Set<string>;
+  recentTradedTokens: Set<string>;
+  pnlHistoryTokens: Set<string>;
+}
+
 // ─── Core allowlist ──────────────────────────────────────────────────────────
 // Symbols here are always classified as core regardless of pricing availability.
 const CORE_SYMBOL_ALLOWLIST = new Set([
@@ -70,24 +76,36 @@ const KNOWN_PROTOCOL_ADDRESSES = new Set(Object.keys(TOKEN_CATEGORY_MAP));
  */
 export function classifyPortfolioTier(
   item: PortfolioItemForTier,
-  tradedTokens: Set<string>,
+  signals: PortfolioTierSignals,
 ): TierClassification {
+  const tokenLower = item.token.toLowerCase();
+  const usdValue = parseFloat(item.usdValue ?? '0');
+  const tokenAmount = parseFloat(item.amount);
+  const hasTradeHistory =
+    signals.tradedTokens.has(tokenLower) ||
+    signals.recentTradedTokens.has(tokenLower) ||
+    signals.pnlHistoryTokens.has(tokenLower);
+
   // ── CORE ─────────────────────────────────────────────────────────────────
-  // Any single positive signal → promote to core immediately.
-  const hasUsdValue =
-    item.usdValue !== null && parseFloat(item.usdValue) > 0;
-  const hasAllocation = parseFloat(item.allocation) > 0;
-  const hasPricing = item.currentPrice !== null;
+  const hasStrongUsdValue = Number.isFinite(usdValue) && usdValue > 10;
   const isAllowlisted = CORE_SYMBOL_ALLOWLIST.has(item.token.toUpperCase());
 
-  if (hasUsdValue || hasAllocation || hasPricing || isAllowlisted) {
+  if (hasStrongUsdValue || (isAllowlisted && usdValue > 1)) {
     return { displayTier: 'core' };
+  }
+
+  // ── ACTIVE ───────────────────────────────────────────────────────────────
+  const recentlyTraded = signals.recentTradedTokens.has(tokenLower);
+  const hasPnlHistory = signals.pnlHistoryTokens.has(tokenLower);
+  const hasMeaningfulUsdValue = Number.isFinite(usdValue) && usdValue > 1;
+
+  if (recentlyTraded || hasPnlHistory || hasMeaningfulUsdValue) {
+    return { displayTier: 'active' };
   }
 
   // ── HIDDEN checks (run before secondary) ─────────────────────────────────
 
   // 1. Spam keyword in the token symbol.
-  const tokenLower = item.token.toLowerCase();
   if (SPAM_KEYWORDS.some((kw) => tokenLower.includes(kw))) {
     return {
       displayTier: 'hidden',
@@ -108,8 +126,6 @@ export function classifyPortfolioTier(
     item.contractAddress &&
       KNOWN_PROTOCOL_ADDRESSES.has(item.contractAddress.toLowerCase()),
   );
-  const hasTradeHistory = tradedTokens.has(tokenLower);
-  const tokenAmount = parseFloat(item.amount);
 
   // 3. Fully unpriced + no trade history + not a known protocol contract.
   const isFullyUnpriced =
@@ -139,9 +155,11 @@ export function classifyPortfolioTier(
     const hasSecondaryPrefix = SECONDARY_PREFIXES.some((p) =>
       item.token.startsWith(p),
     );
-    const isMeaningfulAmount = tokenAmount >= DUST_AMOUNT_THRESHOLD;
+    const isMeaningfulAmount =
+      Number.isFinite(tokenAmount) && tokenAmount >= DUST_AMOUNT_THRESHOLD;
+    const isLegitimate = hasSecondaryPrefix || isKnownContract || hasTradeHistory;
 
-    if (hasSecondaryPrefix || isMeaningfulAmount) {
+    if (isLegitimate && isMeaningfulAmount) {
       return { displayTier: 'secondary' };
     }
   }

@@ -12,7 +12,11 @@ import {
 import { MoralisKeysExhaustedError, WalletCoreService } from './wallet-core.service';
 import { WalletPricingService } from './wallet-pricing.service';
 import { HybridHoldingsService } from './hybrid-holdings.service';
-import { classifyPortfolioTier } from './portfolio-tier.classifier';
+import { WalletPnlService } from './wallet-pnl.service';
+import {
+  PortfolioTierSignals,
+  classifyPortfolioTier,
+} from './portfolio-tier.classifier';
 
 interface HoldingLot {
   amount: bigint;
@@ -50,6 +54,7 @@ export class WalletPortfolioService {
     private readonly walletCoreService: WalletCoreService,
     private readonly walletPricingService: WalletPricingService,
     private readonly hybridHoldingsService: HybridHoldingsService,
+    private readonly walletPnlService: WalletPnlService,
   ) {}
 
   async getHoldings(address: string): Promise<WalletHoldingsResponse> {
@@ -77,11 +82,11 @@ export class WalletPortfolioService {
       };
     }
 
-    const [{ ethPrice, tokenPrices }, holdingAnalytics, tradedTokens] =
+    const [{ ethPrice, tokenPrices }, holdingAnalytics, tierSignals] =
       await Promise.all([
         this.fetchHoldingPrices(holdings),
         this.buildHoldingAnalyticsMap(address, holdings),
-        this.buildTradedTokenSymbols(address),
+        this.buildPortfolioTierSignals(address),
       ]);
     const holdingsWithUsd = holdings
       .map((holding) => ({
@@ -124,7 +129,7 @@ export class WalletPortfolioService {
             priceUnavailable,
             contractAddress: holding.contractAddress,
           },
-          tradedTokens,
+          tierSignals,
         );
 
         if (tier.displayTier !== 'core') {
@@ -442,24 +447,52 @@ export class WalletPortfolioService {
     return balance.token_address?.toLowerCase() ?? 'UNKNOWN';
   }
 
-  private async buildTradedTokenSymbols(address: string): Promise<Set<string>> {
-    const transactions =
-      await this.walletCoreService.getTransactionEntitiesUnordered(address);
-    const symbols = new Set<string>();
+  private async buildPortfolioTierSignals(
+    address: string,
+  ): Promise<PortfolioTierSignals> {
+    const [transactions, realizedTrades] = await Promise.all([
+      this.walletCoreService.getTransactionEntitiesUnordered(address),
+      this.walletPnlService.getRealizedTradeMetrics(address),
+    ]);
+    const tradedTokens = new Set<string>();
+    const recentTradedTokens = new Set<string>();
+    const pnlHistoryTokens = new Set<string>();
+    const recentCutoffTimestamp = Date.now() - 30 * 24 * 60 * 60 * 1000;
 
-    for (const tx of transactions) {
-      if (tx.type !== 'swap') {
+    for (const transaction of transactions) {
+      if (transaction.type !== 'swap') {
         continue;
       }
 
-      for (const entry of [...tx.inputs, ...tx.outputs]) {
-        if (entry.token) {
-          symbols.add(entry.token.toLowerCase());
+      const transactionTimestamp = transaction.timestamp.getTime();
+
+      for (const entry of [...transaction.inputs, ...transaction.outputs]) {
+        if (!entry.token) {
+          continue;
+        }
+
+        const tokenKey = entry.token.toLowerCase();
+        tradedTokens.add(tokenKey);
+
+        if (transactionTimestamp >= recentCutoffTimestamp) {
+          recentTradedTokens.add(tokenKey);
         }
       }
     }
 
-    return symbols;
+    for (const trade of realizedTrades) {
+      if (!trade.token) {
+        continue;
+      }
+
+      pnlHistoryTokens.add(trade.token.toLowerCase());
+    }
+
+    return {
+      tradedTokens,
+      recentTradedTokens,
+      pnlHistoryTokens,
+    };
   }
 
   private async fetchHoldingPrices(
