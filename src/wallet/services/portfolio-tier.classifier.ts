@@ -1,8 +1,13 @@
 import { PortfolioDisplayTier } from '../wallet.types';
 import { TOKEN_CATEGORY_MAP } from '../constants/token-categories';
+import { TokenMarketSignal } from './wallet-pricing.service';
 
 export interface TierClassification {
   displayTier: PortfolioDisplayTier;
+  tokenQualityScore: number;
+  tokenQualityLabel: 'visible' | 'speculative' | 'hidden';
+  priceSources: string[];
+  liquidityUsd: string | null;
   hiddenReason?: string;
 }
 
@@ -24,6 +29,7 @@ export interface PortfolioTierSignals {
   tradedTokens: Set<string>;
   recentTradedTokens: Set<string>;
   pnlHistoryTokens: Set<string>;
+  airdropPatternTokens: Set<string>;
 }
 
 // ─── Core allowlist ──────────────────────────────────────────────────────────
@@ -77,96 +83,165 @@ const KNOWN_PROTOCOL_ADDRESSES = new Set(Object.keys(TOKEN_CATEGORY_MAP));
 export function classifyPortfolioTier(
   item: PortfolioItemForTier,
   signals: PortfolioTierSignals,
+  marketSignal: TokenMarketSignal | null = null,
 ): TierClassification {
   const tokenLower = item.token.toLowerCase();
-  const usdValue = parseFloat(item.usdValue ?? '0');
-  const tokenAmount = parseFloat(item.amount);
-  const hasTradeHistory =
-    signals.tradedTokens.has(tokenLower) ||
-    signals.recentTradedTokens.has(tokenLower) ||
-    signals.pnlHistoryTokens.has(tokenLower);
-
-  // ── CORE ─────────────────────────────────────────────────────────────────
-  const hasStrongUsdValue = Number.isFinite(usdValue) && usdValue > 10;
+  const tokenIdentity = toTokenIdentity(item.token, item.contractAddress);
+  const usdValue = toFiniteNumber(item.usdValue);
+  const tokenAmount = toFiniteNumber(item.amount);
   const isAllowlisted = CORE_SYMBOL_ALLOWLIST.has(item.token.toUpperCase());
-
-  if (hasStrongUsdValue || (isAllowlisted && usdValue > 1)) {
-    return { displayTier: 'core' };
-  }
-
-  // ── ACTIVE ───────────────────────────────────────────────────────────────
-  const recentlyTraded = signals.recentTradedTokens.has(tokenLower);
-  const hasPnlHistory = signals.pnlHistoryTokens.has(tokenLower);
-  const hasMeaningfulUsdValue = Number.isFinite(usdValue) && usdValue > 1;
-
-  if (recentlyTraded || hasPnlHistory || hasMeaningfulUsdValue) {
-    return { displayTier: 'active' };
-  }
-
-  // ── HIDDEN checks (run before secondary) ─────────────────────────────────
-
-  // 1. Spam keyword in the token symbol.
-  if (SPAM_KEYWORDS.some((kw) => tokenLower.includes(kw))) {
-    return {
-      displayTier: 'hidden',
-      hiddenReason: 'spam keyword in token name',
-    };
-  }
-
-  // 2. Abnormally long symbol — typical of promo/scam airdrops.
-  if (item.token.length > MAX_NORMAL_SYMBOL_LENGTH) {
-    return {
-      displayTier: 'hidden',
-      hiddenReason: 'symbol too long (promo text)',
-    };
-  }
-
-  // Shared signals used in rules 3 and 4.
   const isKnownContract = Boolean(
     item.contractAddress &&
       KNOWN_PROTOCOL_ADDRESSES.has(item.contractAddress.toLowerCase()),
   );
+  const hasSecondaryPrefix = SECONDARY_PREFIXES.some((prefix) =>
+    item.token.startsWith(prefix),
+  );
+  const hasSpamKeyword = SPAM_KEYWORDS.some((keyword) =>
+    tokenLower.includes(keyword),
+  );
+  const longPromoSymbol = item.token.length > MAX_NORMAL_SYMBOL_LENGTH;
+  const hasRecentTrade = signals.recentTradedTokens.has(tokenIdentity);
+  const hasPnlHistory = signals.pnlHistoryTokens.has(tokenIdentity);
+  const hasTradeHistory =
+    hasRecentTrade ||
+    signals.tradedTokens.has(tokenIdentity) ||
+    hasPnlHistory;
+  const matchesAirdropPattern = signals.airdropPatternTokens.has(tokenIdentity);
+  const hasAnyPrice =
+    Boolean(item.currentPrice) || Boolean((marketSignal?.price ?? 0) > 0);
+  const hasLiquidity = Boolean((marketSignal?.liquidityUsd ?? 0) > 0);
+  const isTrustedToken = isAllowlisted || isKnownContract || hasSecondaryPrefix;
+  const isLowWalletValue = usdValue !== null && usdValue < 1;
+  const significantWalletValue = usdValue !== null && usdValue >= 10;
+  const verySignificantWalletValue = usdValue !== null && usdValue >= 100;
+  const isDustAmount =
+    tokenAmount !== null && tokenAmount > 0 && tokenAmount < DUST_AMOUNT_THRESHOLD;
 
-  // 3. Fully unpriced + no trade history + not a known protocol contract.
-  const isFullyUnpriced =
-    item.priceUnavailable &&
-    parseFloat(item.allocation) === 0 &&
-    item.usdValue === null;
+  let tokenQualityScore = 50;
 
-  if (isFullyUnpriced && !hasTradeHistory && !isKnownContract) {
-    return {
-      displayTier: 'hidden',
-      hiddenReason: 'unpriced, no trade history, unknown protocol',
-    };
-  }
+  // Positive trust and market signals.
+  tokenQualityScore += hasAnyPrice ? 24 : -30;
+  tokenQualityScore += hasLiquidity ? 18 : -10;
+  tokenQualityScore += hasRecentTrade ? 15 : 0;
+  tokenQualityScore += hasTradeHistory ? 8 : -10;
+  tokenQualityScore += isTrustedToken ? 16 : 0;
+  tokenQualityScore += significantWalletValue ? 12 : 0;
+  tokenQualityScore += verySignificantWalletValue ? 8 : 0;
 
-  // 4. Dust amount + unknown token (not traded, not in known-protocol map).
-  if (
-    tokenAmount < DUST_AMOUNT_THRESHOLD &&
-    !hasTradeHistory &&
-    !isKnownContract
-  ) {
-    return { displayTier: 'hidden', hiddenReason: 'dust amount, unknown token' };
-  }
+  // Negative spam/noise signals.
+  tokenQualityScore += hasSpamKeyword ? -35 : 0;
+  tokenQualityScore += longPromoSymbol ? -12 : 0;
+  tokenQualityScore += isLowWalletValue ? -15 : 0;
+  tokenQualityScore += isDustAmount && !hasTradeHistory ? -10 : 0;
+  tokenQualityScore += matchesAirdropPattern ? -22 : 0;
+  tokenQualityScore += !hasLiquidity && !hasTradeHistory && !isTrustedToken ? -8 : 0;
 
-  // ── SECONDARY ────────────────────────────────────────────────────────────
-  // Legitimate-looking but unpriced DeFi assets.
-  if (item.priceUnavailable) {
-    const hasSecondaryPrefix = SECONDARY_PREFIXES.some((p) =>
-      item.token.startsWith(p),
-    );
-    const isMeaningfulAmount =
-      Number.isFinite(tokenAmount) && tokenAmount >= DUST_AMOUNT_THRESHOLD;
-    const isLegitimate = hasSecondaryPrefix || isKnownContract || hasTradeHistory;
+  tokenQualityScore = clampScore(tokenQualityScore);
 
-    if (isLegitimate && isMeaningfulAmount) {
-      return { displayTier: 'secondary' };
-    }
-  }
+  const qualityLabel: 'visible' | 'speculative' | 'hidden' =
+    tokenQualityScore >= 70
+      ? 'visible'
+      : tokenQualityScore >= 35
+        ? 'speculative'
+        : 'hidden';
+  const displayTier: PortfolioDisplayTier =
+    qualityLabel === 'visible'
+      ? 'core'
+      : qualityLabel === 'speculative'
+        ? hasRecentTrade || significantWalletValue || hasLiquidity
+          ? 'active'
+          : 'secondary'
+        : 'hidden';
 
-  // Fallback: unpriced with no legitimacy signal.
   return {
-    displayTier: 'hidden',
-    hiddenReason: 'unpriced with no legitimacy signal',
+    displayTier,
+    tokenQualityScore,
+    tokenQualityLabel: qualityLabel,
+    priceSources: marketSignal?.priceSources ?? [],
+    liquidityUsd: formatOptionalUsd(marketSignal?.liquidityUsd ?? null),
+    ...(displayTier === 'hidden'
+      ? {
+          hiddenReason: resolveHiddenReason({
+            hasSpamKeyword,
+            longPromoSymbol,
+            matchesAirdropPattern,
+            hasAnyPrice,
+            hasLiquidity,
+            hasTradeHistory,
+            isLowWalletValue,
+          }),
+        }
+      : {}),
   };
+}
+
+function resolveHiddenReason(input: {
+  hasSpamKeyword: boolean;
+  longPromoSymbol: boolean;
+  matchesAirdropPattern: boolean;
+  hasAnyPrice: boolean;
+  hasLiquidity: boolean;
+  hasTradeHistory: boolean;
+  isLowWalletValue: boolean;
+}): string {
+  if (input.hasSpamKeyword) {
+    return 'spam keyword in token symbol';
+  }
+
+  if (input.longPromoSymbol) {
+    return 'symbol too long (promo text)';
+  }
+
+  if (input.matchesAirdropPattern) {
+    return 'random airdrop pattern';
+  }
+
+  if (!input.hasAnyPrice && !input.hasLiquidity && !input.hasTradeHistory) {
+    return 'no price, liquidity, or trade history';
+  }
+
+  if (input.isLowWalletValue && !input.hasTradeHistory) {
+    return 'low value and no trade history';
+  }
+
+  return 'low token quality score';
+}
+
+function toTokenIdentity(token: string, contractAddress?: string): string {
+  if (contractAddress) {
+    return `contract:${contractAddress.toLowerCase()}`;
+  }
+
+  return `symbol:${token.toLowerCase()}`;
+}
+
+function toFiniteNumber(value: string | null | undefined): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const parsedValue = Number(value);
+
+  if (!Number.isFinite(parsedValue)) {
+    return null;
+  }
+
+  return parsedValue;
+}
+
+function clampScore(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(value * 100) / 100));
+}
+
+function formatOptionalUsd(value: number | null): string | null {
+  if (value === null || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+
+  return (Math.round(value * 100) / 100).toString();
 }
