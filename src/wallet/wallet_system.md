@@ -72,6 +72,8 @@ Responsibilities:
 - delegate wallet behavior classification to `ClassificationService`
 - delegate V1 smart-money scoring to `WalletScoringService`
 - compose the unified wallet features response from existing service methods
+- compose unified wallet intelligence responses across context, summary, score, classification, portfolio, and features
+- cache `/wallet/:address/intelligence` responses in-memory (wallet+query keyed) with short TTL to reduce repeated recomputation
 
 ### WalletAnalyticsService
 
@@ -569,6 +571,37 @@ Important notes:
 - this endpoint reuses the same summary and analytics methods used by the dedicated endpoints
 - the `risk` block returns the base risk response shape, not the optional debug extension
 
+### GET /wallet/:address/intelligence
+
+Returns a unified wallet intelligence payload combining the main analysis surfaces.
+
+Current base response fields:
+
+- `address`
+- `analyzedAt`
+- `context`
+- `summary`
+- `score`
+- `classification`
+- `portfolio`
+- `features`
+
+Supported query params:
+
+- `lite=true`
+	- returns only `summary`, `score`, and `classification` (plus `address` and `analyzedAt`)
+- `verbose=true`
+	- includes reasoning fields in `context` and triage responses
+	- includes `confidenceReasoning` in score/classification responses
+	- includes `features.rawFeatureMetrics` (risk, hold-time, and activity raw metrics)
+
+Current behavior notes:
+
+- this endpoint reuses existing wallet services instead of introducing new scoring or classification engines
+- it avoids duplicate response assembly work by reusing one fetched summary/activity snapshot for context+features composition
+- smart-contract triage is evaluated once; when triage applies, both score and classification preserve the existing triage payload behavior
+- responses are cached in-memory by `address + lite + verbose` key with short TTL to reduce repeated heavy computations
+
 ### GET /wallet/:address/context
 
 Returns wallet archetype/context classification intended to run before smart-money scoring.
@@ -629,7 +662,6 @@ Current behavior notes:
 - trader wallets that pass gating return `gateStatus = Eligible`
 - non-trader wallets with positive-value holdings are scored on a holder path and return `gateStatus = Eligible (Holder)`
 - non-trader wallets with no positive-value holdings return `gateStatus = Empty Wallet`, `score = 0`, `band = Unscored`, and zeroed holder breakdowns
-- trader confidence uses fixed thresholds: `high` for `swaps >= 50` and `tradingSpanDays >= 90`, `medium` for `swaps >= 15` and `tradingSpanDays >= 30`, else `low`
 - trader scoring uses five weighted dimensions: profitability `30`, consistency `20`, risk management `20`, portfolio quality `15`, experience `15`
 - holder scoring uses four weighted dimensions: portfolio quality `35`, conviction `30`, portfolio size `20`, asset selection `15`
 - holder scores are scaled by a portfolio-size multiplier before band assignment
