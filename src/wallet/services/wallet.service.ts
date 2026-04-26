@@ -43,6 +43,12 @@ import { WalletTriageService } from './wallet-triage.service';
 @Injectable()
 export class WalletService {
   private static readonly INTELLIGENCE_CACHE_TTL_MS = 90_000;
+  private static readonly LIFETIME_VOLUME_MIN_RECEIVE_AMOUNT = 1e-9;
+  private static readonly LIFETIME_VOLUME_ABSURD_UNIT_PRICE_USD = 1_000_000_000;
+  private static readonly LIFETIME_VOLUME_SUPPLY_DISTORTION_AMOUNT =
+    1_000_000_000_000;
+  private static readonly LIFETIME_VOLUME_TINY_LIQUIDITY_NOTIONAL_USD = 250_000;
+  private static readonly LIFETIME_VOLUME_SANITY_CAP_MULTIPLIER = 20;
   private readonly intelligenceCache = new Map<
     string,
     { expiresAt: number; value: WalletIntelligenceResult }
@@ -175,7 +181,7 @@ export class WalletService {
       summary,
       fullPortfolio,
     );
-    const portfolioSummary = this.buildPortfolioSummary(fullPortfolio);
+    const portfolioSummary = this.buildPortfolioSummary(fullPortfolio, metrics);
     const visiblePortfolio = fullPortfolio.filter(
       (item) =>
         item.tokenQualityLabel === 'visible' || item.displayTier === 'core',
@@ -422,7 +428,12 @@ export class WalletService {
     );
     const pricingCoverageNotice =
       'PnL based on priced subset of trades where historical pricing was available.';
+    const portfolioTotalValueUsd = this.computePortfolioTotalValueUsd(portfolio);
     const capitalBase = this.computeCapitalBase(pricedTrades, portfolio);
+    const lifetimeTradeMetrics = this.computeLifetimeTradeVolumeMetrics(
+      pricedTrades,
+      capitalBase,
+    );
     const weightedRoiThreshold = 100;
     const weightedROI =
       capitalBase > 0
@@ -436,6 +447,11 @@ export class WalletService {
       return {
         weightedROI,
         capitalBase: this.roundDecimal(capitalBase),
+        portfolioTotalValueUsd,
+        lifetimeTradeVolumeUsd: lifetimeTradeMetrics.lifetimeTradeVolumeUsd,
+        lifetimeTradeCounted: lifetimeTradeMetrics.lifetimeTradeCounted,
+        lifetimeTradeSkipped: lifetimeTradeMetrics.lifetimeTradeSkipped,
+        lifetimeTradeConfidence: lifetimeTradeMetrics.lifetimeTradeConfidence,
         roiConfidence: 'low',
         headlineRoiVisible: false,
         headlineRoiNotice:
@@ -448,12 +464,351 @@ export class WalletService {
     return {
       weightedROI,
       capitalBase: this.roundDecimal(capitalBase),
+      portfolioTotalValueUsd,
+      lifetimeTradeVolumeUsd: lifetimeTradeMetrics.lifetimeTradeVolumeUsd,
+      lifetimeTradeCounted: lifetimeTradeMetrics.lifetimeTradeCounted,
+      lifetimeTradeSkipped: lifetimeTradeMetrics.lifetimeTradeSkipped,
+      lifetimeTradeConfidence: lifetimeTradeMetrics.lifetimeTradeConfidence,
       roiConfidence: capitalBase < 100 ? 'low' : capitalBase < 500 ? 'medium' : 'high',
       headlineRoiVisible: true,
       headlineRoiNotice: null,
       pricingCoverage,
       pricingCoverageNotice,
     };
+  }
+
+  private computePortfolioTotalValueUsd(
+    portfolio: WalletPortfolioResponse,
+  ): number {
+    const totalUsd = portfolio.reduce((total, item) => {
+      if (item.tokenQualityLabel === 'spoofed_major_symbol') {
+        return total;
+      }
+
+      const usdValue = Number(item.usdValue);
+
+      if (!Number.isFinite(usdValue) || usdValue <= 0) {
+        return total;
+      }
+
+      return total + usdValue;
+    }, 0);
+
+    return this.roundDecimal(totalUsd, 2);
+  }
+
+  private computeLifetimeTradeVolumeMetrics(
+    pricedTrades: PricedTrade[],
+    historicalCapitalBase: number,
+  ): {
+    lifetimeTradeVolumeUsd: number;
+    lifetimeTradeCounted: number;
+    lifetimeTradeSkipped: number;
+    lifetimeTradeConfidence: number;
+  } {
+    const tradesBySwap = new Map<string, PricedTrade[]>();
+
+    for (const trade of pricedTrades) {
+      const swapKey = this.getSwapGroupingKey(trade);
+      const group = tradesBySwap.get(swapKey) ?? [];
+      group.push(trade);
+      tradesBySwap.set(swapKey, group);
+    }
+
+    const capitalReference = this.computeLifetimeVolumeCapitalReference(
+      pricedTrades,
+      historicalCapitalBase,
+    );
+    let lifetimeTradeVolumeUsd = 0;
+    let lifetimeTradeCounted = 0;
+    let lifetimeTradeSkipped = 0;
+    let knownSideCounted = 0;
+
+    for (const tradesForSwap of tradesBySwap.values()) {
+      const dedupedTrades = this.dedupeSwapTrades(tradesForSwap);
+
+      if (dedupedTrades.length === 0) {
+        lifetimeTradeSkipped += 1;
+        continue;
+      }
+
+      let knownBuyNotionalUsd = 0;
+      let knownSellNotionalUsd = 0;
+      let totalBuyNotionalUsd = 0;
+      let totalSellNotionalUsd = 0;
+      let buyAmount = 0;
+      let hasMajorTokenInSwap = false;
+      let hasAbsurdUnitPrice = false;
+      let hasSupplyDistortion = false;
+      let hasSpoofedMajorSymbol = false;
+
+      for (const trade of dedupedTrades) {
+        const normalizedAmount = this.normalizeTradeAmountForVolume(trade);
+
+        if (normalizedAmount === null || normalizedAmount <= 0) {
+          continue;
+        }
+
+        if (
+          this.walletPricingService.isSpoofedMajorSymbol(
+            trade.token,
+            trade.contractAddress,
+          )
+        ) {
+          hasSpoofedMajorSymbol = true;
+          continue;
+        }
+
+        if (trade.type === 'BUY') {
+          buyAmount += normalizedAmount;
+        }
+
+        if (!Number.isFinite(trade.price) || trade.price <= 0) {
+          continue;
+        }
+
+        if (trade.price > WalletService.LIFETIME_VOLUME_ABSURD_UNIT_PRICE_USD) {
+          hasAbsurdUnitPrice = true;
+        }
+
+        const isMajorToken = this.walletPricingService.isTrustedMajorToken(
+          trade.token,
+          trade.contractAddress,
+        );
+
+        if (isMajorToken) {
+          hasMajorTokenInSwap = true;
+        }
+
+        if (
+          !isMajorToken &&
+          normalizedAmount > WalletService.LIFETIME_VOLUME_SUPPLY_DISTORTION_AMOUNT
+        ) {
+          hasSupplyDistortion = true;
+        }
+
+        const tradeNotionalUsd = normalizedAmount * trade.price;
+
+        if (!Number.isFinite(tradeNotionalUsd) || tradeNotionalUsd <= 0) {
+          continue;
+        }
+
+        if (trade.type === 'BUY') {
+          totalBuyNotionalUsd += tradeNotionalUsd;
+        } else {
+          totalSellNotionalUsd += tradeNotionalUsd;
+        }
+
+        if (isMajorToken) {
+          if (trade.type === 'BUY') {
+            knownBuyNotionalUsd += tradeNotionalUsd;
+          } else {
+            knownSellNotionalUsd += tradeNotionalUsd;
+          }
+        }
+      }
+
+      if (
+        buyAmount > 0 &&
+        buyAmount < WalletService.LIFETIME_VOLUME_MIN_RECEIVE_AMOUNT
+      ) {
+        lifetimeTradeSkipped += 1;
+        continue;
+      }
+
+      if (hasSpoofedMajorSymbol) {
+        lifetimeTradeSkipped += 1;
+        continue;
+      }
+
+      if (hasAbsurdUnitPrice || hasSupplyDistortion) {
+        lifetimeTradeSkipped += 1;
+        continue;
+      }
+
+      const hasKnownSide = knownBuyNotionalUsd > 0 || knownSellNotionalUsd > 0;
+      const candidateNotionalUsd = hasKnownSide
+        ? Math.max(knownBuyNotionalUsd, knownSellNotionalUsd)
+        : Math.max(totalBuyNotionalUsd, totalSellNotionalUsd);
+
+      if (!Number.isFinite(candidateNotionalUsd) || candidateNotionalUsd <= 0) {
+        lifetimeTradeSkipped += 1;
+        continue;
+      }
+
+      if (
+        !hasKnownSide &&
+        !hasMajorTokenInSwap &&
+        candidateNotionalUsd > WalletService.LIFETIME_VOLUME_TINY_LIQUIDITY_NOTIONAL_USD
+      ) {
+        lifetimeTradeSkipped += 1;
+        continue;
+      }
+
+      if (
+        capitalReference > 0 &&
+        candidateNotionalUsd >
+          capitalReference * WalletService.LIFETIME_VOLUME_SANITY_CAP_MULTIPLIER &&
+        !hasMajorTokenInSwap
+      ) {
+        lifetimeTradeSkipped += 1;
+        continue;
+      }
+
+      lifetimeTradeVolumeUsd += candidateNotionalUsd;
+      lifetimeTradeCounted += 1;
+
+      if (hasKnownSide) {
+        knownSideCounted += 1;
+      }
+    }
+
+    const totalEvaluatedTrades = lifetimeTradeCounted + lifetimeTradeSkipped;
+    const countedRatio =
+      totalEvaluatedTrades > 0
+        ? lifetimeTradeCounted / totalEvaluatedTrades
+        : 0;
+    const knownSideRatio =
+      lifetimeTradeCounted > 0 ? knownSideCounted / lifetimeTradeCounted : 0;
+    const lifetimeTradeConfidence = this.roundDecimal(
+      Math.max(0, Math.min(1, countedRatio * 0.6 + knownSideRatio * 0.4)),
+      3,
+    );
+
+    return {
+      lifetimeTradeVolumeUsd: this.roundDecimal(lifetimeTradeVolumeUsd, 2),
+      lifetimeTradeCounted,
+      lifetimeTradeSkipped,
+      lifetimeTradeConfidence,
+    };
+  }
+
+  private computeLifetimeVolumeCapitalReference(
+    pricedTrades: PricedTrade[],
+    historicalCapitalBase: number,
+  ): number {
+    if (Number.isFinite(historicalCapitalBase) && historicalCapitalBase > 0) {
+      return historicalCapitalBase;
+    }
+
+    let fallbackReference = 0;
+
+    for (const trade of pricedTrades) {
+      if (
+        this.walletPricingService.isSpoofedMajorSymbol(
+          trade.token,
+          trade.contractAddress,
+        )
+      ) {
+        continue;
+      }
+
+      const normalizedAmount = this.normalizeTradeAmountForVolume(trade);
+
+      if (normalizedAmount === null || normalizedAmount <= 0) {
+        continue;
+      }
+
+      if (!Number.isFinite(trade.price) || trade.price <= 0) {
+        continue;
+      }
+
+      if (
+        !this.walletPricingService.isTrustedMajorToken(
+          trade.token,
+          trade.contractAddress,
+        )
+      ) {
+        continue;
+      }
+
+      const notional = normalizedAmount * trade.price;
+
+      if (Number.isFinite(notional) && notional > fallbackReference) {
+        fallbackReference = notional;
+      }
+    }
+
+    return Math.max(fallbackReference, 100);
+  }
+
+  private getSwapGroupingKey(trade: PricedTrade): string {
+    const normalizedHash = trade.transactionHash?.toLowerCase();
+
+    if (normalizedHash) {
+      return `${normalizedHash}:${trade.timestamp}`;
+    }
+
+    return `timestamp:${trade.timestamp}`;
+  }
+
+  private dedupeSwapTrades(trades: PricedTrade[]): PricedTrade[] {
+    const dedupedTrades = new Map<string, PricedTrade>();
+
+    for (const trade of trades) {
+      const tokenKey = trade.contractAddress
+        ? `contract:${trade.contractAddress.toLowerCase()}`
+        : `symbol:${trade.token.toUpperCase()}`;
+      const amountKey = trade.rawAmount ?? trade.amount;
+      const dedupeKey = [
+        trade.transactionHash?.toLowerCase() ?? 'no-hash',
+        trade.timestamp.toString(),
+        (trade.routeHopIndex ?? -1).toString(),
+        trade.type,
+        tokenKey,
+        amountKey,
+      ].join(':');
+
+      if (!dedupedTrades.has(dedupeKey)) {
+        dedupedTrades.set(dedupeKey, trade);
+      }
+    }
+
+    return Array.from(dedupedTrades.values());
+  }
+
+  private normalizeTradeAmountForVolume(trade: PricedTrade): number | null {
+    if (trade.rawAmount) {
+      try {
+        const rawAmount = BigInt(trade.rawAmount);
+
+        if (rawAmount <= 0n) {
+          return null;
+        }
+
+        const decimals =
+          typeof trade.decimals === 'number' &&
+          Number.isInteger(trade.decimals) &&
+          trade.decimals >= 0
+            ? trade.decimals
+            : 18;
+        const divisor = 10n ** BigInt(decimals);
+        const wholePart = rawAmount / divisor;
+        const fractionalPart = rawAmount % divisor;
+        const normalizedAmountString =
+          fractionalPart === 0n
+            ? wholePart.toString()
+            : `${wholePart.toString()}.${fractionalPart
+                .toString()
+                .padStart(decimals, '0')
+                .replace(/0+$/, '')}`;
+        const normalizedAmount = Number(normalizedAmountString);
+
+        if (Number.isFinite(normalizedAmount) && normalizedAmount > 0) {
+          return normalizedAmount;
+        }
+      } catch {
+        // Fallback to parsed decimal amount below.
+      }
+    }
+
+    const parsedAmount = Number(trade.amount);
+
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      return null;
+    }
+
+    return parsedAmount;
   }
 
   private computeCapitalBase(
@@ -468,6 +823,15 @@ export class WalletService {
     let maxHistoricalPortfolioEstimate = 0;
 
     for (const trade of sortedTrades) {
+      if (
+        this.walletPricingService.isSpoofedMajorSymbol(
+          trade.token,
+          trade.contractAddress,
+        )
+      ) {
+        continue;
+      }
+
       const amount = Number(trade.amount);
 
       if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(trade.price) || trade.price <= 0) {
@@ -494,6 +858,10 @@ export class WalletService {
     }
 
     const currentPortfolioEstimate = portfolio.reduce((total, item) => {
+      if (item.tokenQualityLabel === 'spoofed_major_symbol') {
+        return total;
+      }
+
       const usdValue = Number(item.usdValue);
       return total + (Number.isFinite(usdValue) && usdValue > 0 ? usdValue : 0);
     }, 0);
@@ -540,6 +908,10 @@ export class WalletService {
 
   private buildPortfolioSummary(
     portfolio: WalletPortfolioResponse,
+    metrics?: Pick<
+      WalletIntelligenceMetrics,
+      'portfolioTotalValueUsd' | 'lifetimeTradeVolumeUsd'
+    >,
   ): WalletPortfolioSummary {
     const hiddenItems = portfolio.filter((item) => item.displayTier === 'hidden');
     const hiddenUsdValue = hiddenItems.reduce((total, item) => {
@@ -556,12 +928,38 @@ export class WalletService {
       );
     }).length;
 
+    const scaleSummary = metrics
+      ? ` | scale: $${this.formatUsdCompact(metrics.portfolioTotalValueUsd)} portfolio, $${this.formatUsdCompact(metrics.lifetimeTradeVolumeUsd)} lifetime traded`
+      : '';
+
     return {
       hiddenCount: hiddenItems.length,
       hiddenUsdValue: this.roundDecimal(hiddenUsdValue).toString(),
       spamCount,
-      uiSummary: `+${hiddenItems.length} hidden inactive / spam assets`,
+      uiSummary: `+${hiddenItems.length} hidden inactive / spam assets${scaleSummary}`,
     };
+  }
+
+  private formatUsdCompact(value: number): string {
+    if (!Number.isFinite(value) || value <= 0) {
+      return '0';
+    }
+
+    const absoluteValue = Math.abs(value);
+
+    if (absoluteValue >= 1_000_000_000) {
+      return `${this.roundDecimal(value / 1_000_000_000, 2)}B`;
+    }
+
+    if (absoluteValue >= 1_000_000) {
+      return `${this.roundDecimal(value / 1_000_000, 2)}M`;
+    }
+
+    if (absoluteValue >= 1_000) {
+      return `${this.roundDecimal(value / 1_000, 2)}K`;
+    }
+
+    return this.roundDecimal(value, 2).toString();
   }
 
   private roundDecimal(value: number, decimals = 6): number {
