@@ -174,6 +174,12 @@ export type WalletSubtype =
   | 'Automated/Bot-like'
   | null;
 
+export type WalletContractSubtype =
+  | 'Vesting / Distribution'
+  | 'Treasury / Multisig'
+  | 'Exchange / Custody'
+  | 'Unknown Contract';
+
 export interface WalletContextResponse {
   walletType: WalletType;
   walletSubtype: WalletSubtype;
@@ -353,6 +359,17 @@ export interface WalletScoreDebugResponse extends WalletScoreResponse {
 
 export type WalletScoreResult = WalletScoreResponse | WalletScoreDebugResponse;
 
+export interface WalletTriageResponse {
+  walletType: 'Contract';
+  walletSubtype: WalletContractSubtype;
+  traderEligible: false;
+  score: null;
+  scoreBand: null;
+  reasoning: string[];
+}
+
+export type WalletScoreOrTriageResult = WalletScoreResult | WalletTriageResponse;
+
 export interface WalletClassification {
   address: string;
   type: string;
@@ -366,6 +383,10 @@ export interface WalletClassification {
   allScores: Record<string, number>;
   classifiedAt: string;
 }
+
+export type WalletClassificationResult =
+  | WalletClassification
+  | WalletTriageResponse;
 
 export interface WalletRiskMetricsDebugResponse
   extends WalletRiskMetricsResponse {
