@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JsonRpcProvider } from 'ethers';
 import {
   NormalizedTransaction,
+  WalletConfidenceLabel,
   WalletContractSubtype,
   WalletTriageResponse,
 } from '../wallet.types';
@@ -65,17 +66,60 @@ export class WalletTriageService {
       bytecode,
       activity,
     );
+    const confidenceProfile = this.resolveTriageConfidence(subtype, activity);
 
     return {
       walletType: 'Contract',
       walletSubtype: subtype,
       traderEligible: false,
+      ...confidenceProfile,
       score: null,
       scoreBand: null,
       reasoning: [
         'On-chain bytecode is present, so this address is treated as a smart contract wallet.',
         `Contract activity snapshot: transfers=${activity.transferCount}, swaps=${activity.swapCount}, uniqueCounterparties=${activity.uniqueCounterparties}.`,
         ...subtypeReasoning,
+      ],
+    };
+  }
+
+  private resolveTriageConfidence(
+    subtype: WalletContractSubtype,
+    activity: ContractActivitySnapshot,
+  ): {
+    confidence: WalletConfidenceLabel;
+    confidenceLabel: WalletConfidenceLabel;
+    confidenceScore: number;
+    confidenceReasoning: string[];
+  } {
+    const baseScoreBySubtype: Record<WalletContractSubtype, number> = {
+      'Vesting / Distribution': 78,
+      'Treasury / Multisig': 82,
+      'Exchange / Custody': 74,
+      'Unknown Contract': 36,
+    };
+    const dataDepthBonus =
+      activity.totalTransactions >= 100
+        ? 12
+        : activity.totalTransactions >= 40
+          ? 8
+          : activity.totalTransactions >= 10
+            ? 4
+            : 0;
+    const confidenceScore = Math.min(
+      100,
+      baseScoreBySubtype[subtype] + dataDepthBonus,
+    );
+    const confidenceLabel = this.toConfidenceLabel(confidenceScore);
+
+    return {
+      confidence: confidenceLabel,
+      confidenceLabel,
+      confidenceScore,
+      confidenceReasoning: [
+        `Subtype match confidence starts at ${baseScoreBySubtype[subtype]} for ${subtype}.`,
+        `Activity depth bonus is +${dataDepthBonus} from ${activity.totalTransactions} stored transactions.`,
+        `Final triage confidence is ${confidenceLabel} (${confidenceScore}/100).`,
       ],
     };
   }
@@ -269,5 +313,17 @@ export class WalletTriageService {
     }
 
     return `${(value * 100).toFixed(1)}%`;
+  }
+
+  private toConfidenceLabel(score: number): WalletConfidenceLabel {
+    if (score >= 70) {
+      return 'high';
+    }
+
+    if (score >= 40) {
+      return 'medium';
+    }
+
+    return 'low';
   }
 }
