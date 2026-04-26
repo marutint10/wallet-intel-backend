@@ -1,4 +1,5 @@
 export { ClassificationService } from './classification.service';
+export { WalletConfidenceService } from './wallet-confidence.service';
 export { PnlService } from './pnl.service';
 export { PortfolioService } from './portfolio.service';
 export { WalletScoringService } from './scoring.service';

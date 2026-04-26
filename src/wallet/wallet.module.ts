@@ -8,6 +8,7 @@ import {
   PnlService,
   PortfolioService,
   WalletAnalyticsService,
+  WalletConfidenceService,
   WalletContextService,
   WalletCoreService,
   WalletPnlService,
@@ -28,6 +29,7 @@ import { TransactionEntity } from './transaction.entity';
   controllers: [WalletController],
   providers: [
     WalletAnalyticsService,
+    WalletConfidenceService,
     WalletContextService,
     WalletCoreService,
     WalletPricingService,
