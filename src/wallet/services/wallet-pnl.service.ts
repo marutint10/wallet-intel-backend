@@ -209,9 +209,10 @@ export class WalletPnlService {
         metrics.worstTrade !== 0 ||
         metrics.winRate !== 0,
     );
-    const roiValues = activeTokens
+    const roiValues = pnlEntries
+      .filter(([, metrics]) => metrics.realizedPnL !== 0)
       .map(([, metrics]) => metrics.roi)
-      .filter((roi) => roi > 0);
+      .filter((roi) => Number.isFinite(roi));
     const winRateValues = activeTokens.map(([, metrics]) => metrics.winRate);
     const bestTradeCandidates = activeTokens.map(
       ([, metrics]) => metrics.bestTrade,
