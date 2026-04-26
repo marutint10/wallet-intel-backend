@@ -696,6 +696,22 @@ export const NATIVE_TOKEN_CATEGORIES: Record<string, TokenCategory> = {
   SOL: TokenCategory.BLUE_CHIP,
 };
 
+export const MAJOR_SYMBOL_CATEGORY_FALLBACKS: Record<string, TokenCategory> = {
+  WETH: TokenCategory.BLUE_CHIP,
+  WBTC: TokenCategory.BLUE_CHIP,
+  UNI: TokenCategory.DEFI,
+  AAVE: TokenCategory.DEFI,
+  LINK: TokenCategory.BLUE_CHIP,
+  USDC: TokenCategory.STABLECOIN,
+  USDT: TokenCategory.STABLECOIN,
+  DAI: TokenCategory.STABLECOIN,
+  FRAX: TokenCategory.STABLECOIN,
+  MKR: TokenCategory.DEFI,
+  COMP: TokenCategory.DEFI,
+  CRV: TokenCategory.DEFI,
+  LDO: TokenCategory.LST_LRT,
+};
+
 // ─── Lookup Function ─────────────────────────────────────────────
 
 /**
@@ -722,6 +738,15 @@ export function classifyToken(
         symbol: upper,
         name: upper,
         category: nativeCategory,
+      };
+    }
+
+    const majorFallbackCategory = MAJOR_SYMBOL_CATEGORY_FALLBACKS[upper];
+    if (majorFallbackCategory) {
+      return {
+        symbol: upper,
+        name: upper,
+        category: majorFallbackCategory,
       };
     }
   }
