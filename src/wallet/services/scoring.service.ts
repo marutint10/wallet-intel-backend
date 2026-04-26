@@ -221,7 +221,7 @@ export class WalletScoringService {
 			score,
 			scorePath: 'trader',
 			...confidenceProfile,
-			band: this.resolveBand(score),
+			band: this.resolveTraderBand(score),
 			breakdown,
 			gateStatus,
 			balancesAvailable,
@@ -492,7 +492,7 @@ export class WalletScoringService {
 			score,
 			scorePath: 'holder',
 			...confidenceProfile,
-			band: this.resolveBand(score),
+			band: this.resolveHolderBand(score),
 			breakdown,
 			gateStatus: 'Eligible (Holder)',
 			balancesAvailable,
@@ -1084,28 +1084,52 @@ export class WalletScoringService {
 		);
 	}
 
-	private resolveBand(score: number): WalletScoreBand {
-		if (score >= 90) {
+	private resolveTraderBand(score: number): WalletScoreBand {
+		if (score >= 91) {
+			return 'Exceptional';
+		}
+
+		if (score >= 76) {
 			return 'Elite';
 		}
 
-		if (score >= 75) {
-			return 'Advanced';
-		}
-
-		if (score >= 60) {
+		if (score >= 61) {
 			return 'Skilled';
 		}
 
-		if (score >= 40) {
+		if (score >= 41) {
+			return 'Capable';
+		}
+
+		if (score >= 21) {
 			return 'Developing';
 		}
 
-		if (score >= 25) {
-			return 'Early';
+		return 'Unproven';
+	}
+
+	private resolveHolderBand(score: number): WalletScoreBand {
+		if (score >= 91) {
+			return 'Institutional';
 		}
 
-		return 'Poor';
+		if (score >= 76) {
+			return 'Premium';
+		}
+
+		if (score >= 61) {
+			return 'Strong';
+		}
+
+		if (score >= 41) {
+			return 'Solid';
+		}
+
+		if (score >= 21) {
+			return 'Basic';
+		}
+
+		return 'Dormant';
 	}
 
 	private createDimensionBreakdown(
