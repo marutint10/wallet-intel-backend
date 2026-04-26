@@ -690,6 +690,13 @@ Current behavior notes:
 - trader scoring uses five weighted dimensions: profitability `30`, consistency `20`, risk management `20`, portfolio quality `15`, experience `15`
 - holder scoring uses four weighted dimensions: portfolio quality `35`, conviction `30`, portfolio size `20`, asset selection `15`
 - holder scores are scaled by a portfolio-size multiplier before band assignment
+- holder portfolio-size scaling excludes low-confidence holdings from scale inputs only (`totalPortfolioUsd`, `largestPositionUsd`, multiplier input):
+	- exclude holding when `liquidityUsd < 5000`
+	- exclude holding when `liquidityUsd` is unavailable and `priceSources` contains only `dexscreener`
+- trader realized PnL quality applies tiny-sample dampening (scoring path only, based on realized trade count):
+	- `profitFactor`: `< 5 trades => 1.0`, `5-9 trades => min(actual, 2.5)`, `>= 10 trades => actual`
+	- `bestWorstRatio`: `< 5 trades => 1.0`, `5-9 trades => min(actual, 2.0)`, `>= 10 trades => actual`
+- raw analytics endpoints remain unchanged; dampening is applied only inside `/wallet/:address/score` scoring calculations
 - `balancesAvailable` is `false` when live balances could not be loaded, which lets score consumers distinguish provider availability problems from a true empty wallet
 - `GET /wallet/:address/score?debug=true` returns the base response plus per-dimension debug metrics for the active scoring path
 
