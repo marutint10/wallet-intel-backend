@@ -120,7 +120,7 @@ Responsibilities:
 
 - detect smart contracts from on-chain bytecode (`eth_getCode`)
 - classify contract wallets into `Vesting / Distribution`, `Treasury / Multisig`, `Exchange / Custody`, or `Unknown Contract`
-- return a triage payload: `walletType`, `walletSubtype`, `traderEligible`, `score`, `scoreBand`, and `reasoning`
+- return a triage payload: `walletType`, `walletSubtype`, `traderEligible`, confidence fields, `score`, `scoreBand`, and `reasoning`
 - short-circuit contract wallets so trader scoring and trader archetype classification are skipped
 
 ### WalletScoringService
@@ -136,6 +136,21 @@ Responsibilities:
 - return `balancesAvailable` so downstream consumers can distinguish empty holdings from unavailable live balances
 - assign confidence from swap count and trading-span coverage for traders, and from portfolio breadth, size, and holding duration for holders
 - return a structured score response with dimension breakdowns
+
+### WalletConfidenceService
+
+This is the confidence estimation layer used by both score and classification responses.
+
+Responsibilities:
+
+- compute `confidenceScore` (`0-100`) and `confidenceLabel` (`low`, `medium`, `high`)
+- return confidence reasoning for downstream explanation (`confidenceReasoning`)
+- weight confidence dimensions as:
+	- data quality `30%` (parsed transaction coverage + usable priced trade coverage)
+	- wallet age `20%` (days since first stored transaction)
+	- swap sample size `30%` (total swaps + active trading days)
+	- signal consistency `20%` (hold-time stability, repeated behavior, activity variance)
+- apply confidence label mapping: `0-39 = low`, `40-69 = medium`, `70-100 = high`
 
 ### ClassificationService
 
@@ -250,6 +265,7 @@ They are registered in the module but are not the main runtime path for current 
 - `WalletTriageService`
 - `ClassificationService`
 - `WalletScoringService`
+- `WalletConfidenceService`
 - `WalletService`
 - the placeholder services listed above
 - the TypeORM repository for `TransactionEntity`
@@ -584,6 +600,10 @@ Current fields:
 	- `walletType`
 	- `walletSubtype`
 	- `traderEligible` (`false`)
+	- `confidence`
+	- `confidenceLabel`
+	- `confidenceScore`
+	- `confidenceReasoning`
 	- `score` (`null`)
 	- `scoreBand` (`null`)
 	- `reasoning`
@@ -591,6 +611,9 @@ Current fields:
 	- `address`
 	- `score`
 	- `confidence`
+	- `confidenceLabel`
+	- `confidenceScore`
+	- `confidenceReasoning`
 	- `band`
 	- `breakdown`
 	- `gateStatus`
@@ -601,6 +624,7 @@ Current behavior notes:
 
 - contract wallets are triaged first and return the short-circuit triage payload
 - EOAs continue through the existing scoring pipeline unchanged
+- confidence now uses the shared weighted model from `WalletConfidenceService`
 - trader gate order is `Not a Trader Wallet` -> `Insufficient Data` -> `No Trading Activity`
 - trader wallets that pass gating return `gateStatus = Eligible`
 - non-trader wallets with positive-value holdings are scored on a holder path and return `gateStatus = Eligible (Holder)`
@@ -622,6 +646,10 @@ Current fields:
 	- `walletType`
 	- `walletSubtype`
 	- `traderEligible` (`false`)
+	- `confidence`
+	- `confidenceLabel`
+	- `confidenceScore`
+	- `confidenceReasoning`
 	- `score` (`null`)
 	- `scoreBand` (`null`)
 	- `reasoning`
@@ -631,6 +659,9 @@ Current fields:
 	- `primaryType`
 	- `primaryScore`
 	- `confidence`
+	- `confidenceLabel`
+	- `confidenceScore`
+	- `confidenceReasoning`
 	- `description`
 	- `traits`
 	- `riskProfile`
@@ -642,6 +673,7 @@ Current behavior notes:
 
 - contract wallets are triaged first and return the short-circuit triage payload
 - EOAs continue through the existing classification pipeline unchanged
+- low-confidence classifications are softened and explicitly marked as directional
 - trader wallets are classified with a weighted-archetype system over summary, hold-time, activity, DEX, risk, and token-category signals
 - holder wallets are classified with a weighted-archetype system over live portfolio composition, holding duration, unrealized posture, and category exposure
 - non-trader wallets with no positive-value holdings, or with unavailable live balances, fall back to `Empty Wallet`
