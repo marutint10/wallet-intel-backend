@@ -68,6 +68,7 @@ Responsibilities:
 - delegate live holdings to `HybridHoldingsService`
 - delegate risk, hold-time, and activity analytics to `WalletAnalyticsService`
 - delegate wallet archetype/context detection to `WalletContextService`
+- run contract triage through `WalletTriageService` before score and behavior classification endpoints
 - delegate wallet behavior classification to `ClassificationService`
 - delegate V1 smart-money scoring to `WalletScoringService`
 - compose the unified wallet features response from existing service methods
@@ -110,6 +111,17 @@ Responsibilities:
 - classify whether the wallet qualifies as a trader from summary swap count
 - infer simple operational-treasury and bot-like subtypes from summary and activity metrics
 - return reasoning and confidence for downstream scoring decisions
+
+### WalletTriageService
+
+This is the contract-first triage layer that runs before score and classification.
+
+Responsibilities:
+
+- detect smart contracts from on-chain bytecode (`eth_getCode`)
+- classify contract wallets into `Vesting / Distribution`, `Treasury / Multisig`, `Exchange / Custody`, or `Unknown Contract`
+- return a triage payload: `walletType`, `walletSubtype`, `traderEligible`, `score`, `scoreBand`, and `reasoning`
+- short-circuit contract wallets so trader scoring and trader archetype classification are skipped
 
 ### WalletScoringService
 
@@ -235,6 +247,7 @@ They are registered in the module but are not the main runtime path for current 
 - `WalletPnlService`
 - `WalletPortfolioService`
 - `HybridHoldingsService`
+- `WalletTriageService`
 - `ClassificationService`
 - `WalletScoringService`
 - `WalletService`
@@ -563,21 +576,31 @@ Current behavior notes:
 
 ### GET /wallet/:address/score
 
-Returns the V1 smart-money score derived from existing analytics endpoints and context classification.
+Returns either contract triage output or the V1 smart-money score derived from existing analytics endpoints and context classification.
 
 Current fields:
 
-- `address`
-- `score`
-- `confidence`
-- `band`
-- `breakdown`
-- `gateStatus`
-- `balancesAvailable`
-- `scoredAt`
+- contract triage response for smart contracts:
+	- `walletType`
+	- `walletSubtype`
+	- `traderEligible` (`false`)
+	- `score` (`null`)
+	- `scoreBand` (`null`)
+	- `reasoning`
+- score response for EOAs:
+	- `address`
+	- `score`
+	- `confidence`
+	- `band`
+	- `breakdown`
+	- `gateStatus`
+	- `balancesAvailable`
+	- `scoredAt`
 
 Current behavior notes:
 
+- contract wallets are triaged first and return the short-circuit triage payload
+- EOAs continue through the existing scoring pipeline unchanged
 - trader gate order is `Not a Trader Wallet` -> `Insufficient Data` -> `No Trading Activity`
 - trader wallets that pass gating return `gateStatus = Eligible`
 - non-trader wallets with positive-value holdings are scored on a holder path and return `gateStatus = Eligible (Holder)`
@@ -591,24 +614,34 @@ Current behavior notes:
 
 ### GET /wallet/:address/classification
 
-Returns a higher-level wallet behavior classification built on top of context, analytics, and holdings data.
+Returns either contract triage output or a higher-level wallet behavior classification built on top of context, analytics, and holdings data.
 
 Current fields:
 
-- `address`
-- `type`
-- `primaryType`
-- `primaryScore`
-- `confidence`
-- `description`
-- `traits`
-- `riskProfile`
-- `secondaryTypes`
-- `allScores`
-- `classifiedAt`
+- contract triage response for smart contracts:
+	- `walletType`
+	- `walletSubtype`
+	- `traderEligible` (`false`)
+	- `score` (`null`)
+	- `scoreBand` (`null`)
+	- `reasoning`
+- classification response for EOAs:
+	- `address`
+	- `type`
+	- `primaryType`
+	- `primaryScore`
+	- `confidence`
+	- `description`
+	- `traits`
+	- `riskProfile`
+	- `secondaryTypes`
+	- `allScores`
+	- `classifiedAt`
 
 Current behavior notes:
 
+- contract wallets are triaged first and return the short-circuit triage payload
+- EOAs continue through the existing classification pipeline unchanged
 - trader wallets are classified with a weighted-archetype system over summary, hold-time, activity, DEX, risk, and token-category signals
 - holder wallets are classified with a weighted-archetype system over live portfolio composition, holding duration, unrealized posture, and category exposure
 - non-trader wallets with no positive-value holdings, or with unavailable live balances, fall back to `Empty Wallet`
