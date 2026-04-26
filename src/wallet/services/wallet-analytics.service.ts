@@ -21,6 +21,7 @@ import {
 } from './wallet-pnl.service';
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
+import { WalletPricingService } from './wallet-pricing.service';
 
 interface PortfolioConcentrationSnapshot {
   largestHoldingUsd: string;
@@ -34,6 +35,7 @@ export class WalletAnalyticsService {
     private readonly walletCoreService: WalletCoreService,
     private readonly walletPnlService: WalletPnlService,
     private readonly walletPortfolioService: WalletPortfolioService,
+    private readonly walletPricingService: WalletPricingService,
   ) {}
 
   async getRiskMetrics(
@@ -44,6 +46,9 @@ export class WalletAnalyticsService {
       this.walletPnlService.getRealizedTradeMetrics(address),
       this.walletPortfolioService.getPortfolio(address),
     ]);
+    const filteredPortfolio = portfolio.filter((holding) =>
+      this.isMetricEligibleHolding(holding),
+    );
     const positivePnLTrades = realizedTrades
       .filter((trade) => trade.pnl > 0)
       .map((trade) => this.roundDecimal(trade.pnl));
@@ -52,7 +57,9 @@ export class WalletAnalyticsService {
       .map((trade) => this.roundDecimal(trade.pnl));
     const cumulativePnLCurve = this.buildCumulativePnLCurve(realizedTrades);
     const tradeROIs = realizedTrades.map((trade) => this.roundDecimal(trade.roi));
-    const concentrationSnapshot = this.computeConcentrationSnapshot(portfolio);
+    const concentrationSnapshot = this.computeConcentrationSnapshot(
+      filteredPortfolio,
+    );
 
     const metrics: WalletRiskMetricsResponse = {
       profitFactor: this.computeProfitFactorFromValues(
@@ -247,11 +254,17 @@ export class WalletAnalyticsService {
       this.walletPnlService.getPricedTrades(address),
       this.walletPortfolioService.getPortfolio(address),
     ]);
+    const metricEligibleTrades = pricedTrades.filter((trade) =>
+      this.isMetricEligibleTrade(trade),
+    );
+    const metricEligibleHoldings = portfolio.filter((holding) =>
+      this.isMetricEligibleHolding(holding),
+    );
     const tradesByCategory = new Map<string, number>();
     const volumeByCategory = new Map<string, number>();
     const currentHoldingsByCategory = new Map<string, number>();
 
-    for (const trade of pricedTrades) {
+    for (const trade of metricEligibleTrades) {
       const category = classifyToken(
         trade.contractAddress,
         trade.token,
@@ -279,7 +292,7 @@ export class WalletAnalyticsService {
       }
     }
 
-    for (const holding of portfolio) {
+    for (const holding of metricEligibleHoldings) {
       if (!holding.usdValue) {
         continue;
       }
@@ -304,7 +317,7 @@ export class WalletAnalyticsService {
       );
     }
 
-    const totalTrades = pricedTrades.length;
+    const totalTrades = metricEligibleTrades.length;
     const totalVolume = Array.from(volumeByCategory.values()).reduce(
       (total, value) => total + value,
       0,
@@ -363,6 +376,26 @@ export class WalletAnalyticsService {
           ? this.roundDecimal((stablecoinHoldings / totalHoldingsUsd) * 100)
           : 0,
     };
+  }
+
+  private isMetricEligibleTrade(trade: Trade): boolean {
+    return !this.walletPricingService.isSpoofedMajorSymbol(
+      trade.token,
+      trade.contractAddress,
+    );
+  }
+
+  private isMetricEligibleHolding(
+    holding: WalletPortfolioResponse[number],
+  ): boolean {
+    if (holding.tokenQualityLabel === 'spoofed_major_symbol') {
+      return false;
+    }
+
+    return !this.walletPricingService.isSpoofedMajorSymbol(
+      holding.token,
+      holding.contractAddress,
+    );
   }
 
   private computeProfitFactor(realizedTrades: RealizedTradeMetrics[]): number {

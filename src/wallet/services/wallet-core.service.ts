@@ -521,11 +521,18 @@ export class WalletCoreService {
     entries: NormalizedTokenAmount[],
     type: Trade['type'],
     timestamp: number,
+    options: {
+      transactionHash?: string;
+      hopIndexOffset?: number;
+    } = {},
   ): Trade[] {
     const trades: Trade[] = [];
 
-    for (const entry of entries) {
-      const trade = this.createTradeFromEntry(entry, type, timestamp);
+    for (const [index, entry] of entries.entries()) {
+      const trade = this.createTradeFromEntry(entry, type, timestamp, {
+        transactionHash: options.transactionHash,
+        routeHopIndex: (options.hopIndexOffset ?? 0) + index,
+      });
 
       if (trade) {
         trades.push(trade);
@@ -543,6 +550,10 @@ export class WalletCoreService {
     entry: NormalizedTokenAmount,
     type: Trade['type'],
     timestamp: number,
+    options: {
+      transactionHash?: string;
+      routeHopIndex?: number;
+    } = {},
   ): Trade | null {
     if (!entry.token) {
       return null;
@@ -561,6 +572,9 @@ export class WalletCoreService {
       decimals: entry.decimals,
       contractAddress: entry.contractAddress?.toLowerCase(),
       timestamp,
+      transactionHash: options.transactionHash,
+      routeHopIndex: options.routeHopIndex,
+      rawAmount: rawAmount.toString(),
     };
   }
 
