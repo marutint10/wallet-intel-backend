@@ -51,6 +51,32 @@ export class WalletService {
     1_000_000_000_000;
   private static readonly LIFETIME_VOLUME_TINY_LIQUIDITY_NOTIONAL_USD = 250_000;
   private static readonly LIFETIME_VOLUME_SANITY_CAP_MULTIPLIER = 20;
+  private static readonly VISIBLE_PORTFOLIO_MATERIAL_VALUE_USD = 100;
+  private static readonly VISIBLE_PORTFOLIO_MATERIAL_ALLOCATION_PERCENT = 0.5;
+  private static readonly VISIBLE_PORTFOLIO_TOP_MEANINGFUL_LIMIT = 12;
+  private static readonly VISIBLE_PORTFOLIO_MAJOR_SYMBOLS = new Set([
+    'ETH',
+    'WETH',
+    'BTC',
+    'WBTC',
+    'USDC',
+    'USDT',
+    'DAI',
+    'USDE',
+    'USDS',
+    'USDB',
+    'STETH',
+    'WSTETH',
+    'CBETH',
+    'RETH',
+    'LINK',
+    'UNI',
+    'AAVE',
+    'LDO',
+    'OP',
+    'ARB',
+    'MKR',
+  ]);
   private readonly intelligenceCache = new Map<
     string,
     { expiresAt: number; value: WalletIntelligenceResult }
@@ -193,9 +219,9 @@ export class WalletService {
       riskMetrics,
     );
     const portfolioSummary = this.buildPortfolioSummary(fullPortfolio, metrics);
-    const visiblePortfolio = fullPortfolio.filter(
-      (item) =>
-        item.tokenQualityLabel === 'visible' || item.displayTier === 'core',
+    const visiblePortfolio = this.buildVisiblePortfolio(fullPortfolio);
+    const visiblePortfolioKeys = new Set(
+      visiblePortfolio.map((item) => this.getPortfolioItemIdentity(item)),
     );
     const speculativePortfolio = fullPortfolio.filter(
       (item) =>
@@ -204,7 +230,10 @@ export class WalletService {
         item.displayTier === 'secondary',
     );
     const topSpeculativePortfolio = this.selectTopSpeculativePortfolio(
-      speculativePortfolio,
+      speculativePortfolio.filter(
+        (item) =>
+          !visiblePortfolioKeys.has(this.getPortfolioItemIdentity(item)),
+      ),
       12,
     );
     const defaultPortfolio = [...visiblePortfolio, ...topSpeculativePortfolio];
@@ -1156,6 +1185,187 @@ export class WalletService {
         return left.token.localeCompare(right.token);
       })
       .slice(0, limit);
+  }
+
+  private buildVisiblePortfolio(
+    portfolio: WalletPortfolioResponse,
+  ): WalletPortfolioResponse {
+    if (portfolio.length === 0) {
+      return [];
+    }
+
+    const baseVisible = portfolio.filter((item) =>
+      this.shouldIncludeInVisiblePortfolio(item),
+    );
+    const topMeaningfulHoldings = [...portfolio]
+      .filter(
+        (item) =>
+          !this.isHiddenPortfolioItem(item) &&
+          this.isMaterialVisibleHolding(item),
+      )
+      .sort((left, right) => this.comparePortfolioItemsByMateriality(left, right))
+      .slice(0, WalletService.VISIBLE_PORTFOLIO_TOP_MEANINGFUL_LIMIT);
+
+    return this.dedupePortfolioItems([...baseVisible, ...topMeaningfulHoldings]).sort(
+      (left, right) => {
+        const leftTierRank = this.resolveVisibleTierRank(left.displayTier);
+        const rightTierRank = this.resolveVisibleTierRank(right.displayTier);
+
+        if (leftTierRank !== rightTierRank) {
+          return leftTierRank - rightTierRank;
+        }
+
+        return this.comparePortfolioItemsByMateriality(left, right);
+      },
+    );
+  }
+
+  private shouldIncludeInVisiblePortfolio(
+    item: WalletPortfolioResponse[number],
+  ): boolean {
+    if (this.isHiddenPortfolioItem(item)) {
+      return false;
+    }
+
+    if (item.displayTier === 'core' || item.displayTier === 'active') {
+      return true;
+    }
+
+    if (this.isMaterialMajorHolding(item)) {
+      return true;
+    }
+
+    return this.isMaterialVisibleHolding(item);
+  }
+
+  private isHiddenPortfolioItem(item: WalletPortfolioResponse[number]): boolean {
+    if (item.displayTier === 'hidden') {
+      return true;
+    }
+
+    return item.tokenQualityLabel === 'spoofed_major_symbol';
+  }
+
+  private isMaterialMajorHolding(
+    item: WalletPortfolioResponse[number],
+  ): boolean {
+    const usdValue = this.parsePositiveUsdValue(item.usdValue);
+
+    if (usdValue < WalletService.VISIBLE_PORTFOLIO_MATERIAL_VALUE_USD) {
+      return false;
+    }
+
+    if (this.walletPricingService.isTrustedMajorToken(item.token, item.contractAddress)) {
+      return true;
+    }
+
+    return WalletService.VISIBLE_PORTFOLIO_MAJOR_SYMBOLS.has(
+      item.token.trim().toUpperCase(),
+    );
+  }
+
+  private isMaterialVisibleHolding(
+    item: WalletPortfolioResponse[number],
+  ): boolean {
+    const usdValue = this.parsePositiveUsdValue(item.usdValue);
+
+    if (usdValue >= WalletService.VISIBLE_PORTFOLIO_MATERIAL_VALUE_USD) {
+      return true;
+    }
+
+    const allocationPercent = this.parsePositiveAllocation(item.allocation);
+
+    return (
+      allocationPercent >= WalletService.VISIBLE_PORTFOLIO_MATERIAL_ALLOCATION_PERCENT
+    );
+  }
+
+  private comparePortfolioItemsByMateriality(
+    left: WalletPortfolioResponse[number],
+    right: WalletPortfolioResponse[number],
+  ): number {
+    const leftUsdValue = this.parsePositiveUsdValue(left.usdValue);
+    const rightUsdValue = this.parsePositiveUsdValue(right.usdValue);
+
+    if (rightUsdValue !== leftUsdValue) {
+      return rightUsdValue - leftUsdValue;
+    }
+
+    const leftAllocation = this.parsePositiveAllocation(left.allocation);
+    const rightAllocation = this.parsePositiveAllocation(right.allocation);
+
+    if (rightAllocation !== leftAllocation) {
+      return rightAllocation - leftAllocation;
+    }
+
+    const leftQuality = left.tokenQualityScore ?? 0;
+    const rightQuality = right.tokenQualityScore ?? 0;
+
+    if (rightQuality !== leftQuality) {
+      return rightQuality - leftQuality;
+    }
+
+    return left.token.localeCompare(right.token);
+  }
+
+  private dedupePortfolioItems(
+    portfolio: WalletPortfolioResponse,
+  ): WalletPortfolioResponse {
+    const deduped = new Map<string, WalletPortfolioResponse[number]>();
+
+    for (const item of portfolio) {
+      const identity = this.getPortfolioItemIdentity(item);
+
+      if (!deduped.has(identity)) {
+        deduped.set(identity, item);
+      }
+    }
+
+    return Array.from(deduped.values());
+  }
+
+  private resolveVisibleTierRank(displayTier: string): number {
+    if (displayTier === 'core') {
+      return 0;
+    }
+
+    if (displayTier === 'active') {
+      return 1;
+    }
+
+    if (displayTier === 'secondary') {
+      return 2;
+    }
+
+    return 3;
+  }
+
+  private getPortfolioItemIdentity(item: WalletPortfolioResponse[number]): string {
+    if (item.contractAddress) {
+      return `contract:${item.contractAddress.toLowerCase()}`;
+    }
+
+    return `symbol:${item.token.trim().toLowerCase()}`;
+  }
+
+  private parsePositiveUsdValue(value: string | null): number {
+    const parsedValue = Number(value);
+
+    if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+      return 0;
+    }
+
+    return parsedValue;
+  }
+
+  private parsePositiveAllocation(value: string): number {
+    const parsedValue = Number(value);
+
+    if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+      return 0;
+    }
+
+    return parsedValue;
   }
 
   private buildPortfolioSummary(

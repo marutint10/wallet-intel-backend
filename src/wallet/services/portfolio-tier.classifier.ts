@@ -42,6 +42,7 @@ export interface PortfolioTierSignals {
 const CORE_SYMBOL_ALLOWLIST = new Set([
   'ETH',
   'WETH',
+  'BTC',
   'USDC',
   'USDT',
   'DAI',
@@ -52,6 +53,31 @@ const CORE_SYMBOL_ALLOWLIST = new Set([
   'LDO',
   'OP',
   'ARB',
+]);
+
+// Material majors and stables should not disappear from the visible portfolio.
+const MATERIAL_MAJOR_SYMBOL_ALLOWLIST = new Set([
+  'ETH',
+  'WETH',
+  'BTC',
+  'WBTC',
+  'USDC',
+  'USDT',
+  'DAI',
+  'USDE',
+  'USDS',
+  'USDB',
+  'STETH',
+  'WSTETH',
+  'CBETH',
+  'RETH',
+  'LINK',
+  'UNI',
+  'AAVE',
+  'LDO',
+  'OP',
+  'ARB',
+  'MKR',
 ]);
 
 // ─── Spam / scam keyword fragments (case-insensitive match) ──────────────────
@@ -73,6 +99,7 @@ const DUST_AMOUNT_THRESHOLD = 0.001;
 
 // Symbol character length above this (with priceUnavailable) signals promo text.
 const MAX_NORMAL_SYMBOL_LENGTH = 20;
+const MATERIAL_MAJOR_VISIBILITY_USD_THRESHOLD = 100;
 
 // Set of all contract addresses in our known-protocol map.
 const KNOWN_PROTOCOL_ADDRESSES = new Set(Object.keys(TOKEN_CATEGORY_MAP));
@@ -102,10 +129,11 @@ export function classifyPortfolioTier(
   }
 
   const tokenLower = item.token.toLowerCase();
+  const tokenUpper = item.token.trim().toUpperCase();
   const tokenIdentity = toTokenIdentity(item.token, item.contractAddress);
   const usdValue = toFiniteNumber(item.usdValue);
   const tokenAmount = toFiniteNumber(item.amount);
-  const isAllowlisted = CORE_SYMBOL_ALLOWLIST.has(item.token.toUpperCase());
+  const isAllowlisted = CORE_SYMBOL_ALLOWLIST.has(tokenUpper);
   const isKnownContract = Boolean(
     item.contractAddress &&
       KNOWN_PROTOCOL_ADDRESSES.has(item.contractAddress.toLowerCase()),
@@ -131,8 +159,22 @@ export function classifyPortfolioTier(
   const isLowWalletValue = usdValue !== null && usdValue < 1;
   const significantWalletValue = usdValue !== null && usdValue >= 10;
   const verySignificantWalletValue = usdValue !== null && usdValue >= 100;
+  const materialMajorWalletValue =
+    usdValue !== null &&
+    usdValue >= MATERIAL_MAJOR_VISIBILITY_USD_THRESHOLD &&
+    MATERIAL_MAJOR_SYMBOL_ALLOWLIST.has(tokenUpper);
   const isDustAmount =
     tokenAmount !== null && tokenAmount > 0 && tokenAmount < DUST_AMOUNT_THRESHOLD;
+
+  if (materialMajorWalletValue) {
+    return {
+      displayTier: 'core',
+      tokenQualityScore: 95,
+      tokenQualityLabel: 'visible',
+      priceSources: marketSignal?.priceSources ?? [],
+      liquidityUsd: formatOptionalUsd(marketSignal?.liquidityUsd ?? null),
+    };
+  }
 
   let tokenQualityScore = 50;
 
