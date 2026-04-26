@@ -4,6 +4,7 @@ import {
 	Trade,
 	WalletActivityMetricsResponse,
 	WalletClassification,
+	WalletConfidenceFields,
 	WalletDexMetricsResponse,
 	WalletHoldTimeBuckets,
 	WalletHoldTimeMetricsResponse,
@@ -13,6 +14,7 @@ import {
 	WalletTokenCategoryMetricsResponse,
 } from '../wallet.types';
 import { WalletAnalyticsService } from './wallet-analytics.service';
+import { WalletConfidenceService } from './wallet-confidence.service';
 import { WalletContextService } from './wallet-context.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
@@ -99,6 +101,7 @@ export class ClassificationService {
 		private readonly walletAnalyticsService: WalletAnalyticsService,
 		private readonly walletContextService: WalletContextService,
 		private readonly walletPortfolioService: WalletPortfolioService,
+		private readonly walletConfidenceService: WalletConfidenceService,
 	) {}
 
 	async getClassification(address: string): Promise<WalletClassification> {
@@ -111,6 +114,11 @@ export class ClassificationService {
 		const normalizedAddress = summary.address ?? address.toLowerCase();
 
 		if (!context.isTraderWallet) {
+			const confidenceProfile = await this.walletConfidenceService.getConfidence(
+				address,
+				{ summary },
+			);
+
 			return this.classifyHolder(
 				normalizedAddress,
 				context,
@@ -118,6 +126,7 @@ export class ClassificationService {
 				portfolioResult.portfolio,
 				tokenCategories,
 				portfolioResult.balancesAvailable,
+				confidenceProfile,
 			);
 		}
 
@@ -128,6 +137,15 @@ export class ClassificationService {
 			this.walletAnalyticsService.getRiskMetrics(address),
 			this.walletPnlService.getTrades(address),
 		]);
+		const confidenceProfile = await this.walletConfidenceService.getConfidence(
+			address,
+			{
+				summary,
+				activity,
+				holdTime,
+				trades,
+			},
+		);
 
 		return this.classifyTrader(
 			normalizedAddress,
@@ -138,6 +156,7 @@ export class ClassificationService {
 			dexMetrics,
 			risk,
 			trades,
+			confidenceProfile,
 		);
 	}
 
@@ -150,6 +169,7 @@ export class ClassificationService {
 		dexMetrics: WalletDexMetricsResponse,
 		risk: WalletRiskMetricsResponse,
 		trades: Trade[],
+		confidenceProfile: WalletConfidenceFields,
 	): WalletClassification {
 
 		const totalHolds = this.computeTotalHolds(holdTime.holdBuckets);
@@ -199,16 +219,15 @@ export class ClassificationService {
 			return right[1] - left[1];
 		});
 		const [primaryType, primaryScore] = rankedScores[0] ?? ['Diamond Hand', 0];
-		const secondScore = rankedScores[1]?.[1] ?? 0;
 		const primaryThreshold = primaryScore * 0.6;
-		const confidence = this.computeConfidence(primaryScore, secondScore);
 		const allScores = Object.fromEntries(scoreEntries);
 
 		this.logger.debug({
 			address,
 			classificationScores: allScores,
 			selectedPrimary: primaryType,
-			confidence,
+			confidence: confidenceProfile.confidence,
+			confidenceScore: confidenceProfile.confidenceScore,
 		});
 
 		const narrative = this.buildTraderNarrative(primaryType, input);
@@ -217,7 +236,7 @@ export class ClassificationService {
 			address,
 			type: primaryType,
 			primaryScore,
-			confidence,
+			confidenceProfile,
 			description: narrative.description,
 			traits: narrative.traits,
 			riskProfile: narrative.riskProfile,
@@ -240,6 +259,7 @@ export class ClassificationService {
 		portfolio: WalletPortfolioItem[],
 		tokenCategories: WalletTokenCategoryMetricsResponse,
 		balancesAvailable: boolean,
+		confidenceProfile: WalletConfidenceFields,
 	): WalletClassification {
 		const positiveValueHoldings = this.filterPortfolioByUsdValue(portfolio, 0);
 
@@ -248,7 +268,7 @@ export class ClassificationService {
 				address,
 				type: 'Empty Wallet',
 				primaryScore: 0,
-				confidence: 'high',
+				confidenceProfile,
 				description:
 					'Wallet has no priced holdings and no meaningful trading activity, so it is classified as an empty wallet.',
 				traits: [
@@ -318,8 +338,6 @@ export class ClassificationService {
 			return right[1] - left[1];
 		});
 		const [primaryType, primaryScore] = rankedScores[0] ?? ['Micro Holder', 0];
-		const secondScore = rankedScores[1]?.[1] ?? 0;
-		const confidence = this.computeConfidence(primaryScore, secondScore);
 		const allScores = Object.fromEntries(scoreEntries);
 		const narrative = this.buildHolderNarrative(primaryType, input);
 
@@ -327,14 +345,15 @@ export class ClassificationService {
 			address,
 			classificationScores: allScores,
 			selectedPrimary: primaryType,
-			confidence,
+			confidence: confidenceProfile.confidence,
+			confidenceScore: confidenceProfile.confidenceScore,
 		});
 
 		return this.buildClassificationResponse({
 			address,
 			type: primaryType,
 			primaryScore,
-			confidence,
+			confidenceProfile,
 			description: narrative.description,
 			traits: narrative.traits,
 			riskProfile: narrative.riskProfile,
@@ -354,26 +373,47 @@ export class ClassificationService {
 		address: string;
 		type: string;
 		primaryScore: number;
-		confidence: 'low' | 'medium' | 'high';
+		confidenceProfile: WalletConfidenceFields;
 		description: string;
 		traits: string[];
 		riskProfile: ClassificationRiskProfile;
 		secondaryTypes: string[];
 		allScores: Record<string, number>;
 	}): WalletClassification {
+		const isLowConfidence = input.confidenceProfile.confidenceLabel === 'low';
+		const description = isLowConfidence
+			? this.softenLowConfidenceDescription(input.description)
+			: input.description;
+		const traits = isLowConfidence
+			? [
+				'Low-confidence classification; interpret as directional rather than definitive.',
+				...input.traits,
+			]
+			: input.traits;
+
 		return {
 			address: input.address,
 			type: input.type,
 			primaryType: input.type,
 			primaryScore: this.clampScore(input.primaryScore),
-			confidence: input.confidence,
-			description: input.description,
-			traits: input.traits.slice(0, 5),
+			...input.confidenceProfile,
+			description,
+			traits: traits.slice(0, 5),
 			riskProfile: input.riskProfile,
 			secondaryTypes: input.secondaryTypes,
 			allScores: input.allScores,
 			classifiedAt: new Date().toISOString(),
 		};
+	}
+
+	private softenLowConfidenceDescription(description: string): string {
+		const trimmedDescription = description.trim();
+
+		if (!trimmedDescription) {
+			return 'Likely wallet behavior inferred from limited and noisy signals.';
+		}
+
+		return `${trimmedDescription} This is a tentative classification because confidence is currently low.`;
 	}
 
 	private buildTraderNarrative(
@@ -1285,23 +1325,6 @@ export class ClassificationService {
 		}
 
 		return this.roundDecimal((categoryTrades / totalTrades) * 100);
-	}
-
-	private computeConfidence(
-		topScore: number,
-		secondScore: number,
-	): 'low' | 'medium' | 'high' {
-		const gap = (topScore - secondScore) / Math.max(topScore, 1);
-
-		if (gap > 0.4) {
-			return 'high';
-		}
-
-		if (gap > 0.2) {
-			return 'medium';
-		}
-
-		return 'low';
 	}
 
 	private bracketScore(
