@@ -176,8 +176,20 @@ export class WalletService {
     );
     const portfolioSummary = this.buildPortfolioSummary(fullPortfolio);
     const visiblePortfolio = fullPortfolio.filter(
-      (item) => item.displayTier !== 'hidden',
+      (item) =>
+        item.tokenQualityLabel === 'visible' || item.displayTier === 'core',
     );
+    const speculativePortfolio = fullPortfolio.filter(
+      (item) =>
+        item.tokenQualityLabel === 'speculative' ||
+        item.displayTier === 'active' ||
+        item.displayTier === 'secondary',
+    );
+    const topSpeculativePortfolio = this.selectTopSpeculativePortfolio(
+      speculativePortfolio,
+      12,
+    );
+    const defaultPortfolio = [...visiblePortfolio, ...topSpeculativePortfolio];
     const hiddenPortfolio = fullPortfolio.filter(
       (item) => item.displayTier === 'hidden',
     );
@@ -227,7 +239,7 @@ export class WalletService {
       metrics,
       score: this.shapeScoreByVerbosity(score, verbose),
       classification: this.shapeClassificationByVerbosity(classification, verbose),
-      portfolio: visiblePortfolio,
+      portfolio: defaultPortfolio,
       visiblePortfolio,
       portfolioSummary,
       ...(verbose
@@ -481,6 +493,39 @@ export class WalletService {
       this.roundDecimal(maxHistoricalPortfolioEstimate),
       this.roundDecimal(currentPortfolioEstimate),
     );
+  }
+
+  private selectTopSpeculativePortfolio(
+    portfolio: WalletPortfolioResponse,
+    limit: number,
+  ): WalletPortfolioResponse {
+    if (portfolio.length === 0 || limit <= 0) {
+      return [];
+    }
+
+    return [...portfolio]
+      .sort((left, right) => {
+        const leftQuality = left.tokenQualityScore ?? 0;
+        const rightQuality = right.tokenQualityScore ?? 0;
+
+        if (rightQuality !== leftQuality) {
+          return rightQuality - leftQuality;
+        }
+
+        const leftUsdValue = Number(left.usdValue);
+        const rightUsdValue = Number(right.usdValue);
+        const leftSafeUsdValue =
+          Number.isFinite(leftUsdValue) && leftUsdValue > 0 ? leftUsdValue : 0;
+        const rightSafeUsdValue =
+          Number.isFinite(rightUsdValue) && rightUsdValue > 0 ? rightUsdValue : 0;
+
+        if (rightSafeUsdValue !== leftSafeUsdValue) {
+          return rightSafeUsdValue - leftSafeUsdValue;
+        }
+
+        return left.token.localeCompare(right.token);
+      })
+      .slice(0, limit);
   }
 
   private buildPortfolioSummary(
