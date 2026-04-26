@@ -107,11 +107,19 @@ export class WalletConfidenceService {
       100,
     );
     const confidenceLabel = this.toConfidenceLabel(confidenceScore);
+    const confidenceReason = this.buildConfidenceReason({
+      confidenceLabel,
+      summary,
+      parsedCoverage,
+      pricedTradeCoverage,
+      activity,
+    });
 
     return {
       confidence: confidenceLabel,
       confidenceLabel,
       confidenceScore,
+      confidenceReason,
       confidenceReasoning: [
         `Data quality (${dataQualityContribution}/30): parsed transaction coverage ${this.formatPercent(parsedCoverage)} and usable priced trade coverage ${this.formatPercent(pricedTradeCoverage)}.`,
         `Wallet age (${walletAgeContribution}/20): ${Math.round(walletAgeDays)} days since first stored transaction.`,
@@ -120,6 +128,54 @@ export class WalletConfidenceService {
         `Final confidence is ${confidenceLabel} (${confidenceScore}/100).`,
       ],
     };
+  }
+
+  private buildConfidenceReason(input: {
+    confidenceLabel: WalletConfidenceLabel;
+    summary: WalletSummaryResponse;
+    parsedCoverage: number;
+    pricedTradeCoverage: number;
+    activity: WalletActivityMetricsResponse;
+  }): string {
+    if (input.confidenceLabel === 'high') {
+      const reasons = [
+        input.summary.total_swaps >= 600
+          ? '600+ swaps'
+          : `${input.summary.total_swaps} swaps`,
+        'strong realized trade history',
+        input.pricedTradeCoverage >= 70
+          ? 'priced assets available'
+          : 'partial pricing coverage',
+        input.activity.tradingSpanRatio >= 0.35
+          ? 'clear behavioral patterns'
+          : 'consistent activity signals',
+      ];
+
+      return `High confidence due to ${reasons.join(', ')}.`;
+    }
+
+    if (input.confidenceLabel === 'medium') {
+      const reasons = [
+        input.summary.total_swaps >= 40
+          ? 'moderate swap history'
+          : 'limited swaps',
+        input.pricedTradeCoverage >= 60
+          ? 'acceptable pricing coverage'
+          : 'incomplete pricing coverage',
+      ];
+
+      return `Medium confidence due to ${reasons.join(' and ')}.`;
+    }
+
+    const lowConfidenceReasons = [
+      input.summary.total_swaps <= 5 ? 'sparse data' : 'low signal depth',
+      input.summary.total_transfers > input.summary.total_swaps
+        ? 'mostly transfers'
+        : 'limited realized trading evidence',
+      input.parsedCoverage < 50 ? 'partial parsing coverage' : null,
+    ].filter((value): value is string => Boolean(value));
+
+    return `Low confidence due to ${lowConfidenceReasons.join(', ')}.`;
   }
 
   private computeParsedTransactionCoverage(
