@@ -472,6 +472,59 @@ export interface WalletPortfolioItem {
 
 export type WalletPortfolioResponse = WalletPortfolioItem[];
 
+type OptionalReasoningFields<T> = T extends unknown
+  ? Omit<T, 'reasoning' | 'confidenceReasoning'> & {
+      reasoning?: string[];
+      confidenceReasoning?: string[];
+    }
+  : never;
+
+export type WalletIntelligenceContext = Omit<WalletContextResponse, 'reasoning'> & {
+  reasoning?: string[];
+};
+
+export type WalletIntelligenceScore =
+  OptionalReasoningFields<WalletScoreOrTriageResult>;
+
+export type WalletIntelligenceClassification =
+  OptionalReasoningFields<WalletClassificationResult>;
+
+export interface WalletIntelligenceFeatures {
+  summary: WalletSummaryResponse;
+  risk: WalletRiskMetricsResponse;
+  holdTime: WalletHoldTimeMetricsResponse;
+  activity: WalletActivityMetricsResponse;
+  rawFeatureMetrics?: {
+    risk: WalletRiskMetricsResponse;
+    holdTime: WalletHoldTimeMetricsResponse;
+    activity: WalletActivityMetricsResponse;
+  };
+}
+
+export interface WalletIntelligenceLiteResponse {
+  address: string;
+  analyzedAt: string;
+  summary: WalletSummaryResponse;
+  score: WalletIntelligenceScore;
+  classification: WalletIntelligenceClassification;
+}
+
+export interface WalletIntelligenceResponse
+  extends WalletIntelligenceLiteResponse {
+  context: WalletIntelligenceContext;
+  portfolio: WalletPortfolioResponse;
+  features: WalletIntelligenceFeatures;
+}
+
+export type WalletIntelligenceResult =
+  | WalletIntelligenceLiteResponse
+  | WalletIntelligenceResponse;
+
+export interface WalletIntelligenceOptions {
+  lite?: boolean;
+  verbose?: boolean;
+}
+
 export type {
   MoralisErc20Balance,
   MoralisNativeBalanceResponse,
