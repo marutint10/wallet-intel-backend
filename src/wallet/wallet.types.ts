@@ -248,11 +248,14 @@ export interface WalletScoreDimensionBreakdown {
 }
 
 export interface TraderWalletScoreBreakdown {
+  weightedROI: WalletScoreDimensionBreakdown;
+  realizedPnLQuality: WalletScoreDimensionBreakdown;
   profitability: WalletScoreDimensionBreakdown;
   consistency: WalletScoreDimensionBreakdown;
   riskManagement: WalletScoreDimensionBreakdown;
   portfolioQuality: WalletScoreDimensionBreakdown;
   experience: WalletScoreDimensionBreakdown;
+  marketAdaptability: WalletScoreDimensionBreakdown;
 }
 
 export interface HolderWalletScoreBreakdown {
@@ -266,6 +269,12 @@ export type WalletScoreBreakdown =
   | TraderWalletScoreBreakdown
   | HolderWalletScoreBreakdown;
 
+export interface WalletScoreExplanation {
+  positives: string[];
+  negatives: string[];
+  summary: string;
+}
+
 export interface WalletScoreResponse {
   address: string;
   score: number;
@@ -276,9 +285,25 @@ export interface WalletScoreResponse {
   confidenceReasoning: string[];
   band: WalletScoreBand;
   breakdown: WalletScoreBreakdown;
+  scoreExplanation: WalletScoreExplanation;
   gateStatus: WalletScoreGateStatus;
   balancesAvailable: boolean;
   scoredAt: string;
+}
+
+export interface WalletScoreWeightedRoiDebug
+  extends WalletScoreDimensionDebugSummary {
+  weightedROI: WalletScoreMetricDebug;
+  avgROI: WalletScoreMetricDebug;
+  sampleSizeMultiplier: WalletScoreMetricDebug;
+  qualityMultiplier: WalletScoreMetricDebug;
+}
+
+export interface WalletScoreRealizedPnLQualityDebug
+  extends WalletScoreDimensionDebugSummary {
+  totalRealizedPnL: WalletScoreMetricDebug;
+  profitFactor: WalletScoreMetricDebug;
+  bestWorstRatio: WalletScoreMetricDebug;
 }
 
 export interface WalletScoreMetricDebug {
@@ -331,8 +356,16 @@ export interface WalletScoreExperienceDebug
   extends WalletScoreDimensionDebugSummary {
   tradingSpanDays: WalletScoreMetricDebug;
   tradingSpanRatio: WalletScoreMetricDebug;
+  sampleAdequacy: WalletScoreMetricDebug;
   totalSwaps: WalletScoreMetricDebug;
   dexDiversity: WalletScoreMetricDebug;
+}
+
+export interface WalletScoreMarketAdaptabilityDebug
+  extends WalletScoreDimensionDebugSummary {
+  dexDiversity: WalletScoreMetricDebug;
+  primaryDexShare: WalletScoreMetricDebug;
+  categoryDiversity: WalletScoreMetricDebug;
 }
 
 export interface WalletHolderScorePortfolioQualityDebug
@@ -367,11 +400,15 @@ export interface WalletHolderScoreAssetSelectionDebug
 }
 
 export interface TraderWalletScoreDebugData {
+  weightedROI: WalletScoreWeightedRoiDebug;
+  realizedPnLQuality: WalletScoreRealizedPnLQualityDebug;
   profitability: WalletScoreProfitabilityDebug;
   consistency: WalletScoreConsistencyDebug;
   riskManagement: WalletScoreRiskManagementDebug;
   portfolio: WalletScorePortfolioDebug;
+  portfolioQuality: WalletScorePortfolioDebug;
   experience: WalletScoreExperienceDebug;
+  marketAdaptability: WalletScoreMarketAdaptabilityDebug;
 }
 
 export interface HolderWalletScoreDebugData {
