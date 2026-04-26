@@ -2,6 +2,7 @@ export { ClassificationService } from './classification.service';
 export { PnlService } from './pnl.service';
 export { PortfolioService } from './portfolio.service';
 export { WalletScoringService } from './scoring.service';
+export { WalletTriageService } from './wallet-triage.service';
 export { WalletAnalyticsService } from './wallet-analytics.service';
 export { HybridHoldingsService } from './hybrid-holdings.service';
 export { WalletContextService } from './wallet-context.service';

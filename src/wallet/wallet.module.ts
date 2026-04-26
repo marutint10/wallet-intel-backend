@@ -16,6 +16,7 @@ import {
   WalletScoringService,
   WalletService,
   HybridHoldingsService,
+  WalletTriageService,
 } from './services';
 import { WalletKnownTokenEntity } from './entities/wallet-known-token.entity';
 import { TransactionEntity } from './transaction.entity';
@@ -37,6 +38,7 @@ import { TransactionEntity } from './transaction.entity';
     PnlService,
     WalletScoringService,
     ClassificationService,
+    WalletTriageService,
     {
       provide: JsonRpcProvider,
       inject: [ConfigService],
