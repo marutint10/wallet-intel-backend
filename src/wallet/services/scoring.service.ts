@@ -39,6 +39,7 @@ import { WalletConfidenceService } from './wallet-confidence.service';
 import { WalletContextService } from './wallet-context.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
+import { WalletPricingService } from './wallet-pricing.service';
 
 interface ScoreBracket {
 	min: number;
@@ -73,6 +74,7 @@ export class WalletScoringService {
 		private readonly walletContextService: WalletContextService,
 		private readonly walletPortfolioService: WalletPortfolioService,
 		private readonly walletConfidenceService: WalletConfidenceService,
+		private readonly walletPricingService: WalletPricingService,
 	) {}
 
 	async getWalletScore(
@@ -86,6 +88,7 @@ export class WalletScoringService {
 		]);
 
 		const { portfolio, balancesAvailable } = portfolioResult;
+		const scoringEligiblePortfolio = this.filterScoringEligibleHoldings(portfolio);
 		const scoredAt = new Date().toISOString();
 
 		if (!context.isTraderWallet) {
@@ -93,7 +96,10 @@ export class WalletScoringService {
 				address,
 				{ summary },
 			);
-			const positiveValueHoldings = this.filterHoldingsByUsdValue(portfolio, 0);
+			const positiveValueHoldings = this.filterHoldingsByUsdValue(
+				scoringEligiblePortfolio,
+				0,
+			);
 
 			if (positiveValueHoldings.length === 0) {
 				const response: WalletScoreResponse = {
@@ -123,7 +129,7 @@ export class WalletScoringService {
 
 			return this.scoreHolder(
 				summary.address,
-				portfolio,
+				scoringEligiblePortfolio,
 				tokenCategories,
 				balancesAvailable,
 				scoredAt,
@@ -181,7 +187,7 @@ export class WalletScoringService {
 			summary,
 			holdTime,
 			tokenCategories,
-			portfolio,
+			scoringEligiblePortfolio,
 		);
 		const profitabilityResult = this.scoreProfitability(summary, risk);
 		const consistencyResult = this.scoreConsistency(summary, activity, risk);
@@ -847,9 +853,11 @@ export class WalletScoringService {
 
 	private countUniquePortfolioTokens(portfolio: WalletPortfolioItem[]): number {
 		return new Set(
-			portfolio.map((holding) =>
+			portfolio
+				.filter((holding) => this.isScoringEligibleHolding(holding))
+				.map((holding) =>
 				holding.contractAddress?.toLowerCase() ?? holding.token.trim().toLowerCase(),
-			),
+				),
 		).size;
 	}
 
@@ -1213,6 +1221,10 @@ export class WalletScoringService {
 		minimumUsdValue: number,
 	): WalletPortfolioItem[] {
 		return portfolio.filter((holding) => {
+			if (!this.isScoringEligibleHolding(holding)) {
+				return false;
+			}
+
 			const usdValue = this.parseNumericString(holding.usdValue);
 
 			return usdValue !== null && usdValue > minimumUsdValue;
@@ -1297,10 +1309,31 @@ export class WalletScoringService {
 
 	private hasEthExposure(portfolio: WalletPortfolioItem[]): boolean {
 		return portfolio.some((holding) => {
+			if (!this.isScoringEligibleHolding(holding)) {
+				return false;
+			}
+
 			const token = holding.token.trim().toUpperCase();
 
 			return token === 'ETH' || token === 'WETH';
 		});
+	}
+
+	private filterScoringEligibleHoldings(
+		portfolio: WalletPortfolioItem[],
+	): WalletPortfolioItem[] {
+		return portfolio.filter((holding) => this.isScoringEligibleHolding(holding));
+	}
+
+	private isScoringEligibleHolding(holding: WalletPortfolioItem): boolean {
+		if (holding.tokenQualityLabel === 'spoofed_major_symbol') {
+			return false;
+		}
+
+		return !this.walletPricingService.isSpoofedMajorSymbol(
+			holding.token,
+			holding.contractAddress,
+		);
 	}
 
 	private parseNumericString(value: string | null | undefined): number | null {
