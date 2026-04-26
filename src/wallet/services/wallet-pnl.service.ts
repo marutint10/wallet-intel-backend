@@ -74,6 +74,10 @@ export class WalletPnlService {
           transaction.inputs,
           'SELL',
           timestamp,
+          {
+            transactionHash: transaction.transaction_hash,
+            hopIndexOffset: 0,
+          },
         ),
       );
       trades.push(
@@ -81,6 +85,10 @@ export class WalletPnlService {
           transaction.outputs,
           'BUY',
           timestamp,
+          {
+            transactionHash: transaction.transaction_hash,
+            hopIndexOffset: transaction.inputs.length,
+          },
         ),
       );
     }
@@ -128,7 +136,7 @@ export class WalletPnlService {
         }
 
         if (
-          !this.walletPricingService.isKnownInferenceAsset(
+          !this.walletPricingService.isTrustedMajorToken(
             trade.token,
             trade.contractAddress,
           )
