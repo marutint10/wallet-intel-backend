@@ -12,12 +12,12 @@ import {
 	WalletHolderScorePortfolioSizeDebug,
 	WalletContextResponse,
 	WalletDexMetricsResponse,
+	WalletConfidenceFields,
 	WalletHoldTimeMetricsResponse,
 	WalletPortfolioItem,
 	WalletRiskMetricsResponse,
 	WalletScoreBand,
 	WalletScoreBreakdown,
-	WalletScoreConfidence,
 	WalletScoreConsistencyDebug,
 	WalletScoreDimensionDebugSummary,
 	WalletScoreDebugResponse,
@@ -35,6 +35,7 @@ import {
 	WalletTokenCategoryMetricsResponse,
 } from '../wallet.types';
 import { WalletAnalyticsService } from './wallet-analytics.service';
+import { WalletConfidenceService } from './wallet-confidence.service';
 import { WalletContextService } from './wallet-context.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
@@ -71,6 +72,7 @@ export class WalletScoringService {
 		private readonly walletAnalyticsService: WalletAnalyticsService,
 		private readonly walletContextService: WalletContextService,
 		private readonly walletPortfolioService: WalletPortfolioService,
+		private readonly walletConfidenceService: WalletConfidenceService,
 	) {}
 
 	async getWalletScore(
@@ -87,13 +89,17 @@ export class WalletScoringService {
 		const scoredAt = new Date().toISOString();
 
 		if (!context.isTraderWallet) {
+			const confidenceProfile = await this.walletConfidenceService.getConfidence(
+				address,
+				{ summary },
+			);
 			const positiveValueHoldings = this.filterHoldingsByUsdValue(portfolio, 0);
 
 			if (positiveValueHoldings.length === 0) {
 				const response: WalletScoreResponse = {
 					address: summary.address,
 					score: 0,
-					confidence: 'low',
+					...confidenceProfile,
 					band: 'Unscored',
 					breakdown: this.createEmptyHolderBreakdown(),
 					gateStatus: 'Empty Wallet',
@@ -120,6 +126,7 @@ export class WalletScoringService {
 				tokenCategories,
 				balancesAvailable,
 				scoredAt,
+				confidenceProfile,
 				debug,
 			);
 		}
@@ -135,9 +142,14 @@ export class WalletScoringService {
 			]);
 
 		const tradingSpanDays = this.computeTradingSpanDays(trades);
-		const confidence = this.computeConfidence(
-			summary.total_swaps,
-			tradingSpanDays,
+		const confidenceProfile = await this.walletConfidenceService.getConfidence(
+			address,
+			{
+				summary,
+				activity,
+				holdTime,
+				trades,
+			},
 		);
 		const gateStatus = this.resolveGateStatus(context, summary, activity);
 
@@ -145,7 +157,7 @@ export class WalletScoringService {
 			const response: WalletScoreResponse = {
 				address: summary.address,
 				score: 0,
-				confidence,
+				...confidenceProfile,
 				band: 'Unscored',
 				breakdown: this.createEmptyTraderBreakdown(),
 				gateStatus,
@@ -205,7 +217,7 @@ export class WalletScoringService {
 		const response: WalletScoreResponse = {
 			address: summary.address,
 			score,
-			confidence,
+			...confidenceProfile,
 			band: this.resolveBand(score),
 			breakdown,
 			gateStatus,
@@ -235,6 +247,7 @@ export class WalletScoringService {
 		tokenCategories: WalletTokenCategoryMetricsResponse,
 		balancesAvailable: boolean,
 		scoredAt: string,
+		confidenceProfile: WalletConfidenceFields,
 		debug: boolean,
 	): WalletScoreResult {
 		const positiveValueHoldings = this.filterHoldingsByUsdValue(portfolio, 0);
@@ -471,15 +484,10 @@ export class WalletScoringService {
 			totalPortfolioUsdValue,
 		);
 		const score = Math.round(rawScore * portfolioSizeMultiplier);
-		const confidence = this.computeHolderConfidence(
-			totalPortfolioUsdValue,
-			uniqueTokenCount,
-			avgHoldingDaysValue,
-		);
 		const response: WalletScoreResponse = {
 			address,
 			score,
-			confidence,
+			...confidenceProfile,
 			band: this.resolveBand(score),
 			breakdown,
 			gateStatus: 'Eligible (Holder)',
@@ -530,20 +538,6 @@ export class WalletScoringService {
 		return 'Eligible';
 	}
 
-	private computeConfidence(
-		totalSwaps: number,
-		tradingSpanDays: number,
-	): WalletScoreConfidence {
-		if (totalSwaps >= 50 && tradingSpanDays >= 90) {
-			return 'high';
-		}
-
-		if (totalSwaps >= 15 && tradingSpanDays >= 30) {
-			return 'medium';
-		}
-
-		return 'low';
-	}
 
 	private scoreProfitability(
 		summary: WalletSummaryResponse,
@@ -1164,30 +1158,6 @@ export class WalletScoringService {
 				WalletScoringService.HOLDER_ASSET_SELECTION_MAX,
 			),
 		};
-	}
-
-	private computeHolderConfidence(
-		totalPortfolioUsd: number,
-		uniqueTokens: number,
-		avgHoldingDays: number,
-	): WalletScoreConfidence {
-		if (totalPortfolioUsd < 1) {
-			return 'low';
-		}
-
-		if (
-			totalPortfolioUsd > 1000 &&
-			uniqueTokens >= 3 &&
-			avgHoldingDays > 30
-		) {
-			return 'high';
-		}
-
-		if (totalPortfolioUsd > 100 && uniqueTokens >= 2) {
-			return 'medium';
-		}
-
-		return 'low';
 	}
 
 	private resolveHolderPortfolioSizeMultiplier(totalPortfolioUsd: number): number {
