@@ -488,6 +488,10 @@ export interface WalletPortfolioItem {
   decimals?: number;
   contractAddress?: string;
   displayTier: PortfolioDisplayTier;
+  tokenQualityScore?: number;
+  tokenQualityLabel?: 'visible' | 'speculative' | 'hidden';
+  priceSources?: string[];
+  liquidityUsd?: string | null;
   hiddenReason?: string;
 }
 
