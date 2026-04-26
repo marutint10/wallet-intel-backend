@@ -124,10 +124,11 @@ export class WalletService {
     const analyzedAt = new Date().toISOString();
 
     if (lite) {
-      const [summary, triage] = await Promise.all([
-        this.walletPnlService.getWalletSummary(normalizedAddress),
-        this.walletTriageService.getWalletTriage(normalizedAddress),
-      ]);
+      const summary = await this.walletPnlService.getWalletSummary(normalizedAddress);
+      const triage = await this.walletTriageService.getWalletTriage(
+        normalizedAddress,
+        { summary },
+      );
 
       const [score, classification] =
         triage && !triage.traderEligible
@@ -155,20 +156,26 @@ export class WalletService {
       return response;
     }
 
-    const [summary, activity, holdTime, riskMetrics, portfolio, triage] =
+    const [summary, activity, holdTime, riskMetrics, portfolio] =
       await Promise.all([
         this.walletPnlService.getWalletSummary(normalizedAddress),
         this.walletAnalyticsService.getActivityMetrics(normalizedAddress),
         this.walletAnalyticsService.getHoldTimeMetrics(normalizedAddress),
         this.walletAnalyticsService.getRiskMetrics(normalizedAddress),
         this.walletPortfolioService.getPortfolio(normalizedAddress),
-        this.walletTriageService.getWalletTriage(normalizedAddress),
       ]);
+    const triage = await this.walletTriageService.getWalletTriage(
+      normalizedAddress,
+      {
+        summary,
+      },
+    );
     const context = await this.walletContextService.getWalletContext(
       normalizedAddress,
       {
         summary,
         activity,
+        triage,
       },
     );
 
