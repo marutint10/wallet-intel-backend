@@ -10,6 +10,7 @@ import {
   WalletFeaturesResponse,
   WalletHoldingsResponse,
   WalletHoldTimeMetricsResponse,
+  WalletIntelligenceResult,
   WalletLedgerResponse,
   WalletNetFlowResponse,
   WalletPnLResponse,
@@ -113,6 +114,20 @@ export class WalletController {
     }
 
     return this.walletService.getWalletContext(address);
+  }
+
+  @Get(':address/intelligence')
+  async getWalletIntelligence(
+    @Param('address') address: string,
+    @Query('lite') lite?: string,
+    @Query('verbose') verbose?: string,
+  ): Promise<WalletIntelligenceResult> {
+    this.validateAddress(address);
+
+    return this.walletService.getWalletIntelligence(address, {
+      lite: this.parseBooleanQueryFlag(lite),
+      verbose: this.parseBooleanQueryFlag(verbose),
+    });
   }
 
   @Get(':address/score')
@@ -248,5 +263,15 @@ export class WalletController {
     if (!isEthereumAddress(address)) {
       throw new BadRequestException('Invalid Ethereum wallet address');
     }
+  }
+
+  private parseBooleanQueryFlag(value?: string): boolean {
+    if (!value) {
+      return false;
+    }
+
+    const normalizedValue = value.trim().toLowerCase();
+
+    return normalizedValue === 'true' || normalizedValue === '1';
   }
 }
