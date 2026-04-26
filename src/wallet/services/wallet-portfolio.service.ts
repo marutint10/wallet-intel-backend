@@ -510,6 +510,23 @@ export class WalletPortfolioService {
     await this.refreshTransactionHistory(address);
 
     const transactions = await this.walletCoreService.getTransactionEntities(address);
+    if (transactions.length === 0) {
+      const emptyAnalyticsMap = new Map<string, HoldingAnalyticsInfo>();
+
+      for (const holding of holdings) {
+        emptyAnalyticsMap.set(
+          this.getHoldingKey(holding.token, holding.contractAddress),
+          {
+            holdingSince: null,
+            holdingDays: null,
+            avgBuyPrice: null,
+          },
+        );
+      }
+
+      return emptyAnalyticsMap;
+    }
+
     const lotsByHolding = await this.buildLotsByHoldingKey(transactions);
     const analyticsMap = new Map<string, HoldingAnalyticsInfo>();
     const now = new Date();
