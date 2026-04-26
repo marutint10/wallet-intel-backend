@@ -204,6 +204,7 @@ export interface WalletConfidenceFields {
   confidence: WalletConfidenceLabel;
   confidenceLabel: WalletConfidenceLabel;
   confidenceScore: number;
+  confidenceReason: string;
   confidenceReasoning: string[];
 }
 
@@ -225,11 +226,17 @@ export type WalletScorePath =
 
 export type WalletScoreBand =
   | 'Unscored'
-  | 'Poor'
-  | 'Early'
+  | 'Unproven'
   | 'Developing'
+  | 'Capable'
   | 'Skilled'
-  | 'Advanced'
+  | 'Exceptional'
+  | 'Dormant'
+  | 'Basic'
+  | 'Solid'
+  | 'Strong'
+  | 'Premium'
+  | 'Institutional'
   | 'Elite';
 
 export interface WalletScoreDimensionBreakdown {
@@ -389,6 +396,7 @@ export interface WalletTriageResponse {
   confidence: WalletConfidenceLabel;
   confidenceLabel: WalletConfidenceLabel;
   confidenceScore: number;
+  confidenceReason: string;
   confidenceReasoning: string[];
   score: null;
   scoreBand: null;
@@ -405,11 +413,13 @@ export interface WalletClassification {
   confidence: WalletConfidenceLabel;
   confidenceLabel: WalletConfidenceLabel;
   confidenceScore: number;
+  confidenceReason: string;
   confidenceReasoning: string[];
   description: string;
   traits: string[];
   riskProfile: 'conservative' | 'moderate' | 'aggressive';
   secondaryTypes: string[];
+  scoreBreakdown: Record<string, number>;
   allScores: Record<string, number>;
   classifiedAt: string;
 }
@@ -461,7 +471,7 @@ export interface WalletHoldingItem {
 
 export type WalletHoldingsResponse = WalletHoldingItem[];
 
-export type PortfolioDisplayTier = 'core' | 'secondary' | 'hidden';
+export type PortfolioDisplayTier = 'core' | 'active' | 'secondary' | 'hidden';
 
 export interface WalletPortfolioItem {
   token: string;
@@ -482,6 +492,13 @@ export interface WalletPortfolioItem {
 }
 
 export type WalletPortfolioResponse = WalletPortfolioItem[];
+
+export interface WalletPortfolioSummary {
+  hiddenCount: number;
+  hiddenUsdValue: string;
+  spamCount: number;
+  uiSummary: string;
+}
 
 type OptionalReasoningFields<T> = T extends unknown
   ? Omit<T, 'reasoning' | 'confidenceReasoning'> & {
@@ -512,10 +529,19 @@ export interface WalletIntelligenceFeatures {
   };
 }
 
+export interface WalletIntelligenceMetrics {
+  weightedROI: number;
+  capitalBase: number;
+  roiConfidence: WalletConfidenceLabel;
+  headlineRoiVisible: boolean;
+  headlineRoiNotice: string | null;
+}
+
 export interface WalletIntelligenceLiteResponse {
   address: string;
   analyzedAt: string;
   summary: WalletSummaryResponse;
+  metrics: WalletIntelligenceMetrics;
   score: WalletIntelligenceScore;
   classification: WalletIntelligenceClassification;
 }
@@ -524,6 +550,10 @@ export interface WalletIntelligenceResponse
   extends WalletIntelligenceLiteResponse {
   context: WalletIntelligenceContext;
   portfolio: WalletPortfolioResponse;
+  visiblePortfolio: WalletPortfolioResponse;
+  portfolioSummary: WalletPortfolioSummary;
+  hiddenPortfolio?: WalletPortfolioResponse;
+  fullPortfolio?: WalletPortfolioResponse;
   features: WalletIntelligenceFeatures;
 }
 
