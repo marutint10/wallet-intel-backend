@@ -7,10 +7,12 @@ import {
   WalletIntelligenceContext,
   WalletIntelligenceFeatures,
   WalletIntelligenceLiteResponse,
+  WalletIntelligenceMetrics,
   WalletIntelligenceOptions,
   WalletIntelligenceResponse,
   WalletIntelligenceResult,
   WalletIntelligenceScore,
+  WalletPortfolioSummary,
   WalletContextResponse,
   WalletDexMetricsResult,
   WalletFeaturesResponse,
@@ -34,6 +36,7 @@ import { WalletContextService } from './wallet-context.service';
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
+import { PricedTrade } from './wallet-pricing.service';
 import { WalletScoringService } from './scoring.service';
 import { WalletTriageService } from './wallet-triage.service';
 
@@ -129,6 +132,7 @@ export class WalletService {
         normalizedAddress,
         { summary },
       );
+      const metrics = await this.buildRoiMetrics(normalizedAddress, summary);
 
       const [score, classification] =
         triage && !triage.traderEligible
@@ -145,6 +149,7 @@ export class WalletService {
         address: summary.address,
         analyzedAt,
         summary,
+        metrics,
         score: this.shapeScoreByVerbosity(score, verbose),
         classification: this.shapeClassificationByVerbosity(
           classification,
@@ -156,7 +161,7 @@ export class WalletService {
       return response;
     }
 
-    const [summary, activity, holdTime, riskMetrics, portfolio] =
+    const [summary, activity, holdTime, riskMetrics, fullPortfolio] =
       await Promise.all([
         this.walletPnlService.getWalletSummary(normalizedAddress),
         this.walletAnalyticsService.getActivityMetrics(normalizedAddress),
@@ -164,6 +169,18 @@ export class WalletService {
         this.walletAnalyticsService.getRiskMetrics(normalizedAddress),
         this.walletPortfolioService.getPortfolio(normalizedAddress),
       ]);
+    const metrics = await this.buildRoiMetrics(
+      normalizedAddress,
+      summary,
+      fullPortfolio,
+    );
+    const portfolioSummary = this.buildPortfolioSummary(fullPortfolio);
+    const visiblePortfolio = fullPortfolio.filter(
+      (item) => item.displayTier !== 'hidden',
+    );
+    const hiddenPortfolio = fullPortfolio.filter(
+      (item) => item.displayTier === 'hidden',
+    );
     const triage = await this.walletTriageService.getWalletTriage(
       normalizedAddress,
       {
@@ -207,9 +224,18 @@ export class WalletService {
       analyzedAt,
       context: this.shapeContextByVerbosity(context, verbose),
       summary,
+      metrics,
       score: this.shapeScoreByVerbosity(score, verbose),
       classification: this.shapeClassificationByVerbosity(classification, verbose),
-      portfolio,
+      portfolio: visiblePortfolio,
+      visiblePortfolio,
+      portfolioSummary,
+      ...(verbose
+        ? {
+            hiddenPortfolio,
+            fullPortfolio,
+          }
+        : {}),
       features,
     };
 
@@ -370,6 +396,125 @@ export class WalletService {
     }
 
     return features;
+  }
+
+  private async buildRoiMetrics(
+    address: string,
+    summary: WalletSummaryResponse,
+    portfolio: WalletPortfolioResponse = [],
+  ): Promise<WalletIntelligenceMetrics> {
+    const pricedTrades = await this.walletPnlService.getPricedTrades(address);
+    const capitalBase = this.computeCapitalBase(pricedTrades, portfolio);
+    const weightedRoiThreshold = 100;
+    const weightedROI =
+      capitalBase > 0
+        ? this.roundDecimal(
+            (summary.totalRealizedPnL / Math.max(capitalBase, weightedRoiThreshold)) *
+              100,
+          )
+        : 0;
+
+    if (capitalBase < 25) {
+      return {
+        weightedROI,
+        capitalBase: this.roundDecimal(capitalBase),
+        roiConfidence: 'low',
+        headlineRoiVisible: false,
+        headlineRoiNotice:
+          'ROI statistically unreliable due to very low capital base',
+      };
+    }
+
+    return {
+      weightedROI,
+      capitalBase: this.roundDecimal(capitalBase),
+      roiConfidence: capitalBase < 100 ? 'low' : capitalBase < 500 ? 'medium' : 'high',
+      headlineRoiVisible: true,
+      headlineRoiNotice: null,
+    };
+  }
+
+  private computeCapitalBase(
+    pricedTrades: PricedTrade[],
+    portfolio: WalletPortfolioResponse,
+  ): number {
+    const sortedTrades = [...pricedTrades].sort(
+      (left, right) => left.timestamp - right.timestamp,
+    );
+    let deployedCapital = 0;
+    let runningPortfolioEstimate = 0;
+    let maxHistoricalPortfolioEstimate = 0;
+
+    for (const trade of sortedTrades) {
+      const amount = Number(trade.amount);
+
+      if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(trade.price) || trade.price <= 0) {
+        continue;
+      }
+
+      const notionalUsd = amount * trade.price;
+
+      if (!Number.isFinite(notionalUsd) || notionalUsd <= 0) {
+        continue;
+      }
+
+      if (trade.type === 'BUY') {
+        deployedCapital += notionalUsd;
+        runningPortfolioEstimate += notionalUsd;
+      } else {
+        runningPortfolioEstimate = Math.max(0, runningPortfolioEstimate - notionalUsd);
+      }
+
+      maxHistoricalPortfolioEstimate = Math.max(
+        maxHistoricalPortfolioEstimate,
+        runningPortfolioEstimate,
+      );
+    }
+
+    const currentPortfolioEstimate = portfolio.reduce((total, item) => {
+      const usdValue = Number(item.usdValue);
+      return total + (Number.isFinite(usdValue) && usdValue > 0 ? usdValue : 0);
+    }, 0);
+
+    return Math.max(
+      this.roundDecimal(deployedCapital),
+      this.roundDecimal(maxHistoricalPortfolioEstimate),
+      this.roundDecimal(currentPortfolioEstimate),
+    );
+  }
+
+  private buildPortfolioSummary(
+    portfolio: WalletPortfolioResponse,
+  ): WalletPortfolioSummary {
+    const hiddenItems = portfolio.filter((item) => item.displayTier === 'hidden');
+    const hiddenUsdValue = hiddenItems.reduce((total, item) => {
+      const usdValue = Number(item.usdValue);
+      return total + (Number.isFinite(usdValue) && usdValue > 0 ? usdValue : 0);
+    }, 0);
+    const spamCount = hiddenItems.filter((item) => {
+      const reason = item.hiddenReason?.toLowerCase() ?? '';
+      return (
+        reason.includes('spam') ||
+        reason.includes('promo') ||
+        reason.includes('airdrop') ||
+        reason.includes('unknown')
+      );
+    }).length;
+
+    return {
+      hiddenCount: hiddenItems.length,
+      hiddenUsdValue: this.roundDecimal(hiddenUsdValue).toString(),
+      spamCount,
+      uiSummary: `+${hiddenItems.length} hidden inactive / spam assets`,
+    };
+  }
+
+  private roundDecimal(value: number, decimals = 6): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+
+    return Number(value.toFixed(decimals));
   }
 
   private buildIntelligenceCacheKey(input: {
