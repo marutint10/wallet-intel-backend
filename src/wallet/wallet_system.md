@@ -68,7 +68,7 @@ Responsibilities:
 - delegate live holdings to `HybridHoldingsService`
 - delegate risk, hold-time, and activity analytics to `WalletAnalyticsService`
 - delegate wallet archetype/context detection to `WalletContextService`
-- run contract triage through `WalletTriageService` before score and behavior classification endpoints
+- run contract and operational triage through `WalletTriageService` before score and behavior classification endpoints
 - delegate wallet behavior classification to `ClassificationService`
 - delegate V1 smart-money scoring to `WalletScoringService`
 - compose the unified wallet features response from existing service methods
@@ -108,22 +108,22 @@ This is the pre-scoring wallet context layer.
 
 Responsibilities:
 
-- detect whether an address behaves like an `EOA` or `Contract` from on-chain bytecode
-- detect likely Gnosis Safe wallets with a Safe proxy bytecode heuristic when possible
+- reuse canonical triage output for contract subtype and operational non-trader routing
 - classify whether the wallet qualifies as a trader from summary swap count
-- infer simple operational-treasury and bot-like subtypes from summary and activity metrics
+- infer bot-like subtype from activity metrics when no triage override is present
 - return reasoning and confidence for downstream scoring decisions
 
 ### WalletTriageService
 
-This is the contract-first triage layer that runs before score and classification.
+This is the contract-and-operational triage layer that runs before score and classification.
 
 Responsibilities:
 
 - detect smart contracts from on-chain bytecode (`eth_getCode`)
 - classify contract wallets into `Vesting / Distribution`, `Treasury / Multisig`, `Exchange / Custody`, or `Unknown Contract`
-- return a triage payload: `walletType`, `walletSubtype`, `traderEligible`, confidence fields, `score`, `scoreBand`, and `reasoning`
-- short-circuit contract wallets so trader scoring and trader archetype classification are skipped
+- classify transfer-heavy EOAs with zero swaps as `Operational/Treasury` non-trader wallets
+- return a triage payload: `walletType`, `walletSubtype`, `traderEligible`, `scorePath`, confidence fields, `score`, `scoreBand`, and `reasoning`
+- short-circuit triaged wallets so trader scoring and trader archetype classification are skipped
 
 ### WalletScoringService
 
@@ -137,7 +137,7 @@ Responsibilities:
 - score holder wallets across portfolio quality, conviction, portfolio size, and asset selection
 - return `balancesAvailable` so downstream consumers can distinguish empty holdings from unavailable live balances
 - assign confidence from swap count and trading-span coverage for traders, and from portfolio breadth, size, and holding duration for holders
-- return a structured score response with dimension breakdowns
+- return a structured score response with dimension breakdowns and explicit `scorePath` (`trader` or `holder`)
 
 ### WalletConfidenceService
 
@@ -231,6 +231,7 @@ Responsibilities:
 - compute token flow and net flow from normalized history
 - compute holding duration and cost basis analytics from FIFO lots
 - compute current-price-based unrealized PnL and ROI
+- enforce null `holdingSince`, `holdingDays`, `avgBuyPrice`, and ROI semantics when no transaction history is available
 
 ### PortfolioTierClassifier
 
