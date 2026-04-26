@@ -87,6 +87,9 @@ export interface Trade {
   decimals?: number;
   contractAddress?: string;
   timestamp: number;
+  transactionHash?: string;
+  routeHopIndex?: number;
+  rawAmount?: string;
 }
 
 export interface WalletTokenPnL {
@@ -489,7 +492,11 @@ export interface WalletPortfolioItem {
   contractAddress?: string;
   displayTier: PortfolioDisplayTier;
   tokenQualityScore?: number;
-  tokenQualityLabel?: 'visible' | 'speculative' | 'hidden';
+  tokenQualityLabel?:
+    | 'visible'
+    | 'speculative'
+    | 'hidden'
+    | 'spoofed_major_symbol';
   priceSources?: string[];
   liquidityUsd?: string | null;
   hiddenReason?: string;
@@ -536,6 +543,11 @@ export interface WalletIntelligenceFeatures {
 export interface WalletIntelligenceMetrics {
   weightedROI: number;
   capitalBase: number;
+  portfolioTotalValueUsd: number;
+  lifetimeTradeVolumeUsd: number;
+  lifetimeTradeCounted: number;
+  lifetimeTradeSkipped: number;
+  lifetimeTradeConfidence: number;
   roiConfidence: WalletConfidenceLabel;
   headlineRoiVisible: boolean;
   headlineRoiNotice: string | null;
