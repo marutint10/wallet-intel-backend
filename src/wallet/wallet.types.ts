@@ -168,17 +168,20 @@ export type WalletDexMetricsResult =
 
 export type WalletType = 'EOA' | 'Contract';
 
-export type WalletSubtype =
-  | 'Gnosis Safe'
-  | 'Operational/Treasury'
-  | 'Automated/Bot-like'
-  | null;
-
 export type WalletContractSubtype =
   | 'Vesting / Distribution'
   | 'Treasury / Multisig'
   | 'Exchange / Custody'
   | 'Unknown Contract';
+
+export type WalletOperationalSubtype =
+  | 'Operational/Treasury'
+  | 'Automated/Bot-like';
+
+export type WalletSubtype =
+  | WalletContractSubtype
+  | WalletOperationalSubtype
+  | null;
 
 export interface WalletContextResponse {
   walletType: WalletType;
@@ -213,6 +216,12 @@ export type WalletScoreGateStatus =
   | 'Insufficient Data'
   | 'No Trading Activity'
   | 'Empty Wallet';
+
+export type WalletScorePath =
+  | 'trader'
+  | 'holder'
+  | 'triage_contract'
+  | 'triage_operational';
 
 export type WalletScoreBand =
   | 'Unscored'
@@ -250,6 +259,7 @@ export type WalletScoreBreakdown =
 export interface WalletScoreResponse {
   address: string;
   score: number;
+  scorePath: WalletScorePath;
   confidence: WalletScoreConfidence;
   confidenceLabel: WalletConfidenceLabel;
   confidenceScore: number;
@@ -372,9 +382,10 @@ export interface WalletScoreDebugResponse extends WalletScoreResponse {
 export type WalletScoreResult = WalletScoreResponse | WalletScoreDebugResponse;
 
 export interface WalletTriageResponse {
-  walletType: 'Contract';
-  walletSubtype: WalletContractSubtype;
+  walletType: WalletType;
+  walletSubtype: WalletContractSubtype | 'Operational/Treasury';
   traderEligible: false;
+  scorePath: 'triage_contract' | 'triage_operational';
   confidence: WalletConfidenceLabel;
   confidenceLabel: WalletConfidenceLabel;
   confidenceScore: number;

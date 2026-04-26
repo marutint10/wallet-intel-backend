@@ -99,6 +99,7 @@ export class WalletScoringService {
 				const response: WalletScoreResponse = {
 					address: summary.address,
 					score: 0,
+					scorePath: 'holder',
 					...confidenceProfile,
 					band: 'Unscored',
 					breakdown: this.createEmptyHolderBreakdown(),
@@ -157,6 +158,7 @@ export class WalletScoringService {
 			const response: WalletScoreResponse = {
 				address: summary.address,
 				score: 0,
+				scorePath: 'trader',
 				...confidenceProfile,
 				band: 'Unscored',
 				breakdown: this.createEmptyTraderBreakdown(),
@@ -217,6 +219,7 @@ export class WalletScoringService {
 		const response: WalletScoreResponse = {
 			address: summary.address,
 			score,
+			scorePath: 'trader',
 			...confidenceProfile,
 			band: this.resolveBand(score),
 			breakdown,
@@ -487,6 +490,7 @@ export class WalletScoringService {
 		const response: WalletScoreResponse = {
 			address,
 			score,
+			scorePath: 'holder',
 			...confidenceProfile,
 			band: this.resolveBand(score),
 			breakdown,
