@@ -5,7 +5,11 @@ import { TokenMarketSignal } from './wallet-pricing.service';
 export interface TierClassification {
   displayTier: PortfolioDisplayTier;
   tokenQualityScore: number;
-  tokenQualityLabel: 'visible' | 'speculative' | 'hidden';
+  tokenQualityLabel:
+    | 'visible'
+    | 'speculative'
+    | 'hidden'
+    | 'spoofed_major_symbol';
   priceSources: string[];
   liquidityUsd: string | null;
   hiddenReason?: string;
@@ -23,6 +27,7 @@ export interface PortfolioItemForTier {
   currentPrice: string | null;
   priceUnavailable: boolean;
   contractAddress?: string;
+  isSpoofedMajorSymbol?: boolean;
 }
 
 export interface PortfolioTierSignals {
@@ -85,6 +90,17 @@ export function classifyPortfolioTier(
   signals: PortfolioTierSignals,
   marketSignal: TokenMarketSignal | null = null,
 ): TierClassification {
+  if (item.isSpoofedMajorSymbol) {
+    return {
+      displayTier: 'hidden',
+      tokenQualityScore: 0,
+      tokenQualityLabel: 'spoofed_major_symbol',
+      priceSources: marketSignal?.priceSources ?? [],
+      liquidityUsd: formatOptionalUsd(marketSignal?.liquidityUsd ?? null),
+      hiddenReason: 'spoofed major-asset symbol with untrusted contract',
+    };
+  }
+
   const tokenLower = item.token.toLowerCase();
   const tokenIdentity = toTokenIdentity(item.token, item.contractAddress);
   const usdValue = toFiniteNumber(item.usdValue);

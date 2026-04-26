@@ -132,6 +132,11 @@ export class WalletPortfolioService {
             currentPrice,
             priceUnavailable,
             contractAddress: holding.contractAddress,
+            isSpoofedMajorSymbol:
+              this.walletPricingService.isSpoofedMajorSymbol(
+                holding.token,
+                holding.contractAddress,
+              ),
           },
           tierSignals,
           this.getMarketSignalForHolding(holding, marketSignalsByContract),
