@@ -2,8 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JsonRpcProvider } from 'ethers';
 import {
+  WalletActivityMetricsResponse,
   WalletContextResponse,
   WalletSubtype,
+  WalletSummaryResponse,
   WalletType,
 } from '../wallet.types';
 import { WalletAnalyticsService } from './wallet-analytics.service';
@@ -36,11 +38,21 @@ export class WalletContextService {
     );
   }
 
-  async getWalletContext(address: string): Promise<WalletContextResponse> {
+  async getWalletContext(
+    address: string,
+    input: {
+      summary?: WalletSummaryResponse;
+      activity?: WalletActivityMetricsResponse;
+    } = {},
+  ): Promise<WalletContextResponse> {
     const [bytecode, summary, activity] = await Promise.all([
       this.fetchBytecode(address),
-      this.walletPnlService.getWalletSummary(address),
-      this.walletAnalyticsService.getActivityMetrics(address),
+      input.summary
+        ? Promise.resolve(input.summary)
+        : this.walletPnlService.getWalletSummary(address),
+      input.activity
+        ? Promise.resolve(input.activity)
+        : this.walletAnalyticsService.getActivityMetrics(address),
     ]);
     const reasoning: string[] = [];
     const walletType: WalletType = this.hasBytecode(bytecode) ? 'Contract' : 'EOA';
