@@ -195,7 +195,16 @@ export interface WalletFeaturesResponse {
   activity: WalletActivityMetricsResponse;
 }
 
-export type WalletScoreConfidence = 'low' | 'medium' | 'high';
+export type WalletConfidenceLabel = 'low' | 'medium' | 'high';
+
+export interface WalletConfidenceFields {
+  confidence: WalletConfidenceLabel;
+  confidenceLabel: WalletConfidenceLabel;
+  confidenceScore: number;
+  confidenceReasoning: string[];
+}
+
+export type WalletScoreConfidence = WalletConfidenceLabel;
 
 export type WalletScoreGateStatus =
   | 'Eligible'
@@ -242,6 +251,9 @@ export interface WalletScoreResponse {
   address: string;
   score: number;
   confidence: WalletScoreConfidence;
+  confidenceLabel: WalletConfidenceLabel;
+  confidenceScore: number;
+  confidenceReasoning: string[];
   band: WalletScoreBand;
   breakdown: WalletScoreBreakdown;
   gateStatus: WalletScoreGateStatus;
@@ -363,6 +375,10 @@ export interface WalletTriageResponse {
   walletType: 'Contract';
   walletSubtype: WalletContractSubtype;
   traderEligible: false;
+  confidence: WalletConfidenceLabel;
+  confidenceLabel: WalletConfidenceLabel;
+  confidenceScore: number;
+  confidenceReasoning: string[];
   score: null;
   scoreBand: null;
   reasoning: string[];
@@ -375,7 +391,10 @@ export interface WalletClassification {
   type: string;
   primaryType: string;
   primaryScore: number;
-  confidence: 'low' | 'medium' | 'high';
+  confidence: WalletConfidenceLabel;
+  confidenceLabel: WalletConfidenceLabel;
+  confidenceScore: number;
+  confidenceReasoning: string[];
   description: string;
   traits: string[];
   riskProfile: 'conservative' | 'moderate' | 'aggressive';
