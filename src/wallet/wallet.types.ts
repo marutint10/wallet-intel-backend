@@ -539,6 +539,19 @@ export interface WalletIntelligenceMetrics {
   roiConfidence: WalletConfidenceLabel;
   headlineRoiVisible: boolean;
   headlineRoiNotice: string | null;
+  pricingCoverage: WalletPricingCoverage;
+  pricingCoverageNotice: string;
+}
+
+export interface WalletPricingCoverage {
+  totalTrades: number;
+  pricedTrades: number;
+  unpricedTrades: number;
+  coveragePercent: number;
+  unsupportedTokens: string[];
+  requestsBlockedCount: number;
+  providerStatus: Record<string, 'active' | 'cooldown'>;
+  cooldownUntil: Record<string, string | null>;
 }
 
 export interface WalletIntelligenceLiteResponse {
