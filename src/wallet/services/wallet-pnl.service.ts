@@ -259,52 +259,19 @@ export class WalletPnlService {
 
   async getPnL(address: string): Promise<WalletPnLResponse> {
     const pricedTrades = await this.getPricedTrades(address);
-    const {
-      realizedPnLByToken,
-      realizedCostBasisByToken,
-      sellStatsByToken,
-    } = this.analyzePricedTrades(pricedTrades);
+    const analysis = this.analyzePricedTrades(pricedTrades);
 
-    return Object.fromEntries(
-      Array.from(realizedPnLByToken.entries()).map(([token, realizedPnL]) => {
-        const costBasis = realizedCostBasisByToken.get(token) ?? 0;
-        const sellStats = sellStatsByToken.get(token) ?? {
-          wins: 0,
-          losses: 0,
-          bestTrade: 0,
-          worstTrade: 0,
-        };
-        const totalClosedTrades = sellStats.wins + sellStats.losses;
-        const roundedRealizedPnL = this.roundDecimal(realizedPnL);
-        const roi =
-          costBasis > 0
-            ? this.roundDecimal((roundedRealizedPnL / costBasis) * 100)
-            : 0;
-        const winRate =
-          totalClosedTrades > 0
-            ? this.roundDecimal((sellStats.wins / totalClosedTrades) * 100)
-            : 0;
-
-        return [
-          token,
-          {
-            realizedPnL: roundedRealizedPnL,
-            roi,
-            winRate,
-            bestTrade: this.roundDecimal(sellStats.bestTrade),
-            worstTrade: this.roundDecimal(sellStats.worstTrade),
-          },
-        ];
-      }),
-    );
+    return this.buildPnlByToken(analysis);
   }
 
   async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
     const walletAddress = address.toLowerCase();
-    const [transactions, pnlByToken] = await Promise.all([
+    const [transactions, pricedTrades] = await Promise.all([
       this.walletCoreService.getTransactionEntitiesUnordered(address),
-      this.getPnL(address),
+      this.getPricedTrades(address),
     ]);
+    const analysis = this.analyzePricedTrades(pricedTrades);
+    const pnlByToken = this.buildPnlByToken(analysis);
 
     let totalSwaps = 0;
     let totalTransfers = 0;
@@ -339,9 +306,8 @@ export class WalletPnlService {
         metrics.worstTrade !== 0 ||
         metrics.winRate !== 0,
     );
-    const roiValues = pnlEntries
-      .filter(([, metrics]) => metrics.realizedPnL !== 0)
-      .map(([, metrics]) => metrics.roi)
+    const roiValues = analysis.realizedTradeMetrics
+      .map((metric) => metric.roi)
       .filter((roi) => Number.isFinite(roi));
     const winRateValues = activeTokens.map(([, metrics]) => metrics.winRate);
     const bestTradeCandidates = activeTokens.map(
@@ -420,6 +386,47 @@ export class WalletPnlService {
     }
 
     return 'neutral';
+  }
+
+  private buildPnlByToken(analysis: PricedTradeAnalysis): WalletPnLResponse {
+    const {
+      realizedPnLByToken,
+      realizedCostBasisByToken,
+      sellStatsByToken,
+    } = analysis;
+
+    return Object.fromEntries(
+      Array.from(realizedPnLByToken.entries()).map(([token, realizedPnL]) => {
+        const costBasis = realizedCostBasisByToken.get(token) ?? 0;
+        const sellStats = sellStatsByToken.get(token) ?? {
+          wins: 0,
+          losses: 0,
+          bestTrade: 0,
+          worstTrade: 0,
+        };
+        const totalClosedTrades = sellStats.wins + sellStats.losses;
+        const roundedRealizedPnL = this.roundDecimal(realizedPnL);
+        const roi =
+          costBasis > 0
+            ? this.roundDecimal((roundedRealizedPnL / costBasis) * 100)
+            : 0;
+        const winRate =
+          totalClosedTrades > 0
+            ? this.roundDecimal((sellStats.wins / totalClosedTrades) * 100)
+            : 0;
+
+        return [
+          token,
+          {
+            realizedPnL: roundedRealizedPnL,
+            roi,
+            winRate,
+            bestTrade: this.roundDecimal(sellStats.bestTrade),
+            worstTrade: this.roundDecimal(sellStats.worstTrade),
+          },
+        ];
+      }),
+    );
   }
 
   private isValidTradePrice(price: number): boolean {
