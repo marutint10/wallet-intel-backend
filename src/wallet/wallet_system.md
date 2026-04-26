@@ -603,6 +603,30 @@ Current behavior notes:
 - smart-contract triage is evaluated once; when triage applies, both score and classification preserve the existing triage payload behavior
 - responses are cached in-memory by `address + lite + verbose` key with short TTL to reduce repeated heavy computations
 
+ROI field naming transition (intelligence payload):
+
+- canonical metric keys:
+	- `metrics.realizedRoi`
+	- `metrics.unrealizedRoi`
+	- `metrics.averageTradeRoi`
+	- `metrics.medianTradeRoi`
+	- `metrics.scoreAdjustedRoi`
+- canonical summary key:
+	- `summary.averageTradeRoi`
+- canonical label and warning keys:
+	- `metrics.roiLabels.realizedRoi`, `averageTradeRoi`, `medianTradeRoi`, `unrealizedRoi`, `scoreAdjustedRoi`
+	- `metrics.roiSampleWarnings.realizedRoi`, `averageTradeRoi`, `medianTradeRoi`, `unrealizedRoi`, `scoreAdjustedRoi`
+- temporary deprecated aliases are still emitted for backward compatibility:
+	- `realizedCapitalROI` -> `realizedRoi`
+	- `openPortfolioROI` -> `unrealizedRoi`
+	- `averagePerTradeROI` -> `averageTradeRoi`
+	- `medianTradeROI` -> `medianTradeRoi`
+	- `scoreAdjustedROI` -> `scoreAdjustedRoi`
+
+Deprecation note:
+
+- aliases are transitional and should be removed after downstream clients migrate to the canonical `*Roi` keys.
+
 ### GET /wallet/:address/context
 
 Returns wallet archetype/context classification intended to run before smart-money scoring.
