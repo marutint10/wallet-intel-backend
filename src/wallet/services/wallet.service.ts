@@ -12,6 +12,7 @@ import {
   WalletIntelligenceResponse,
   WalletIntelligenceResult,
   WalletIntelligenceScore,
+  WalletIntelligenceSummary,
   WalletPortfolioSummary,
   WalletContextResponse,
   WalletDexMetricsResult,
@@ -22,6 +23,7 @@ import {
   WalletNetFlowResponse,
   WalletPnLResponse,
   WalletPortfolioResponse,
+  WalletRiskMetricsResponse,
   WalletRiskMetricsResult,
   WalletScoreOrTriageResult,
   StoredWalletTransactionsResponse,
@@ -134,12 +136,20 @@ export class WalletService {
     const analyzedAt = new Date().toISOString();
 
     if (lite) {
-      const summary = await this.walletPnlService.getWalletSummary(normalizedAddress);
+      const [summary, litePortfolio] = await Promise.all([
+        this.walletPnlService.getWalletSummary(normalizedAddress),
+        this.walletPortfolioService.getPortfolio(normalizedAddress),
+      ]);
       const triage = await this.walletTriageService.getWalletTriage(
         normalizedAddress,
         { summary },
       );
-      const metrics = await this.buildRoiMetrics(normalizedAddress, summary);
+      const intelligenceSummary = this.buildIntelligenceSummary(summary);
+      const metrics = await this.buildRoiMetrics(
+        normalizedAddress,
+        summary,
+        litePortfolio,
+      );
 
       const [score, classification] =
         triage && !triage.traderEligible
@@ -155,7 +165,7 @@ export class WalletService {
       const response: WalletIntelligenceLiteResponse = {
         address: summary.address,
         analyzedAt,
-        summary,
+        summary: intelligenceSummary,
         metrics,
         score: this.shapeScoreByVerbosity(score, verbose),
         classification: this.shapeClassificationByVerbosity(
@@ -180,6 +190,7 @@ export class WalletService {
       normalizedAddress,
       summary,
       fullPortfolio,
+      riskMetrics,
     );
     const portfolioSummary = this.buildPortfolioSummary(fullPortfolio, metrics);
     const visiblePortfolio = fullPortfolio.filter(
@@ -227,7 +238,7 @@ export class WalletService {
           ]);
 
     const features = this.buildIntelligenceFeatures(
-      summary,
+      this.buildIntelligenceSummary(summary),
       {
         profitFactor: riskMetrics.profitFactor,
         maxDrawdown: riskMetrics.maxDrawdown,
@@ -242,7 +253,7 @@ export class WalletService {
       address: summary.address,
       analyzedAt,
       context: this.shapeContextByVerbosity(context, verbose),
-      summary,
+      summary: this.buildIntelligenceSummary(summary),
       metrics,
       score: this.shapeScoreByVerbosity(score, verbose),
       classification: this.shapeClassificationByVerbosity(classification, verbose),
@@ -388,7 +399,7 @@ export class WalletService {
   }
 
   private buildIntelligenceFeatures(
-    summary: WalletSummaryResponse,
+    summary: WalletIntelligenceSummary,
     risk: {
       profitFactor: number;
       maxDrawdown: number;
@@ -417,11 +428,27 @@ export class WalletService {
     return features;
   }
 
+  private buildIntelligenceSummary(
+    summary: WalletSummaryResponse,
+  ): WalletIntelligenceSummary {
+    const { avgROI, ...rest } = summary;
+    const averageTradeRoi = this.roundDecimal(avgROI, 4);
+
+    return {
+      ...rest,
+      averageTradeRoi,
+      averagePerTradeROI: averageTradeRoi,
+    };
+  }
+
   private async buildRoiMetrics(
     address: string,
     summary: WalletSummaryResponse,
     portfolio: WalletPortfolioResponse = [],
+    riskMetrics?: WalletRiskMetricsResponse,
   ): Promise<WalletIntelligenceMetrics> {
+    const resolvedRiskMetrics =
+      riskMetrics ?? (await this.walletAnalyticsService.getRiskMetrics(address));
     const pricedTrades = await this.walletPnlService.getPricedTrades(address);
     const pricingCoverage = this.walletPricingService.buildPricingCoverage(
       pricedTrades,
@@ -434,46 +461,271 @@ export class WalletService {
       pricedTrades,
       capitalBase,
     );
-    const weightedRoiThreshold = 100;
-    const weightedROI =
+    const realizedRoiThreshold = 100;
+    const realizedRoi =
       capitalBase > 0
         ? this.roundDecimal(
-            (summary.totalRealizedPnL / Math.max(capitalBase, weightedRoiThreshold)) *
+            (summary.totalRealizedPnL /
+              Math.max(capitalBase, realizedRoiThreshold)) *
               100,
           )
         : 0;
-
-    if (capitalBase < 25) {
-      return {
-        weightedROI,
-        capitalBase: this.roundDecimal(capitalBase),
-        portfolioTotalValueUsd,
-        lifetimeTradeVolumeUsd: lifetimeTradeMetrics.lifetimeTradeVolumeUsd,
-        lifetimeTradeCounted: lifetimeTradeMetrics.lifetimeTradeCounted,
-        lifetimeTradeSkipped: lifetimeTradeMetrics.lifetimeTradeSkipped,
-        lifetimeTradeConfidence: lifetimeTradeMetrics.lifetimeTradeConfidence,
-        roiConfidence: 'low',
-        headlineRoiVisible: false,
-        headlineRoiNotice:
-          'ROI statistically unreliable due to very low capital base',
+    const averageTradeRoi = this.roundDecimal(summary.avgROI, 4);
+    const medianTradeRoi =
+      this.walletPnlService.computeMedianRealizedTradeRoi(pricedTrades);
+    const unrealizedRoi = this.computeUnrealizedRoi(portfolio);
+    const rawScoreAdjustedRoi =
+      this.walletScoringService.getTraderWeightedRoiValue(
+        summary,
+        resolvedRiskMetrics,
+      );
+    const scoreAdjustedRoiReliability =
+      this.resolveScoreAdjustedRoiReliability(summary.total_swaps);
+    const scoreAdjustedRoi = scoreAdjustedRoiReliability.visible
+      ? this.roundDecimal(
+          rawScoreAdjustedRoi * scoreAdjustedRoiReliability.multiplier,
+          4,
+        )
+      : null;
+    const realizedPnL = this.roundDecimal(summary.totalRealizedPnL, 4);
+    const unrealizedPnL = this.computeUnrealizedPortfolioPnl(portfolio);
+    const netPnL = this.roundDecimal(realizedPnL + unrealizedPnL, 4);
+    const roiLabels = this.buildRoiLabels();
+    const pnlLabels = this.buildPnlLabels();
+    const roiSampleWarnings = this.buildRoiSampleWarnings(
+      summary.total_swaps,
+      lifetimeTradeMetrics.lifetimeTradeCounted,
+      scoreAdjustedRoiReliability.warning,
+    );
+    const realizedCapitalRoiVisible = capitalBase >= 25;
+    const realizedCapitalRoiNotice = realizedCapitalRoiVisible
+      ? null
+      : 'ROI statistically unreliable due to very low capital base';
+    const roiConfidence: WalletIntelligenceMetrics['roiConfidence'] =
+      capitalBase < 100 ? 'low' : capitalBase < 500 ? 'medium' : 'high';
+    const trustSignals = {
+      confidence: roiConfidence,
+      sampleSize: {
+        totalSwaps: summary.total_swaps,
+        pricedTrades: lifetimeTradeMetrics.lifetimeTradeCounted,
+        minimumRecommendedSwaps: 10,
+        minimumRecommendedPricedTrades: 10,
+      },
+      pricingCoverage,
+      warnings: this.buildTrustWarnings(
+        roiSampleWarnings,
+        realizedCapitalRoiNotice,
         pricingCoverage,
-        pricingCoverageNotice,
-      };
-    }
+      ),
+    };
 
     return {
-      weightedROI,
+      realizedRoi,
+      averageTradeRoi,
+      medianTradeRoi,
+      unrealizedRoi,
+      scoreAdjustedRoi,
+      realizedCapitalROI: realizedRoi,
+      averagePerTradeROI: averageTradeRoi,
+      medianTradeROI: medianTradeRoi,
+      openPortfolioROI: unrealizedRoi,
+      scoreAdjustedROI: scoreAdjustedRoi,
+      realizedPnL,
+      unrealizedPnL,
+      netPnL,
+      roiLabels,
+      pnlLabels,
+      roiSampleWarnings,
+      trustSignals,
+      trustSignalLabels: this.buildTrustSignalLabels(),
       capitalBase: this.roundDecimal(capitalBase),
       portfolioTotalValueUsd,
       lifetimeTradeVolumeUsd: lifetimeTradeMetrics.lifetimeTradeVolumeUsd,
       lifetimeTradeCounted: lifetimeTradeMetrics.lifetimeTradeCounted,
       lifetimeTradeSkipped: lifetimeTradeMetrics.lifetimeTradeSkipped,
       lifetimeTradeConfidence: lifetimeTradeMetrics.lifetimeTradeConfidence,
-      roiConfidence: capitalBase < 100 ? 'low' : capitalBase < 500 ? 'medium' : 'high',
-      headlineRoiVisible: true,
-      headlineRoiNotice: null,
+      roiConfidence,
+      realizedCapitalRoiVisible,
+      realizedCapitalRoiNotice,
       pricingCoverage,
       pricingCoverageNotice,
+    };
+  }
+
+  private computeUnrealizedRoi(portfolio: WalletPortfolioResponse): number {
+    let totalUnrealizedPnlUsd = 0;
+    let totalCostBasisUsd = 0;
+
+    for (const item of portfolio) {
+      if (item.tokenQualityLabel === 'spoofed_major_symbol') {
+        continue;
+      }
+
+      const usdValue = Number(item.usdValue);
+      const pnlValue = Number(item.pnl);
+
+      if (!Number.isFinite(usdValue) || !Number.isFinite(pnlValue)) {
+        continue;
+      }
+
+      const costBasisUsd = usdValue - pnlValue;
+
+      if (!Number.isFinite(costBasisUsd) || costBasisUsd <= 0) {
+        continue;
+      }
+
+      totalUnrealizedPnlUsd += pnlValue;
+      totalCostBasisUsd += costBasisUsd;
+    }
+
+    if (totalCostBasisUsd <= 0) {
+      return 0;
+    }
+
+    return this.roundDecimal((totalUnrealizedPnlUsd / totalCostBasisUsd) * 100, 4);
+  }
+
+  private computeUnrealizedPortfolioPnl(
+    portfolio: WalletPortfolioResponse,
+  ): number {
+    const totalUnrealizedPnlUsd = portfolio.reduce((total, item) => {
+      if (item.tokenQualityLabel === 'spoofed_major_symbol') {
+        return total;
+      }
+
+      const pnlValue = Number(item.pnl);
+
+      if (!Number.isFinite(pnlValue)) {
+        return total;
+      }
+
+      return total + pnlValue;
+    }, 0);
+
+    return this.roundDecimal(totalUnrealizedPnlUsd, 4);
+  }
+
+  private buildRoiLabels(): WalletIntelligenceMetrics['roiLabels'] {
+    const realizedRoiLabel = 'Realized ROI (%)';
+    const averageTradeRoiLabel = 'Average Trade ROI (%)';
+    const medianTradeRoiLabel = 'Median Trade ROI (%)';
+    const unrealizedRoiLabel = 'Unrealized ROI (%)';
+    const scoreAdjustedRoiLabel = 'Score-Adjusted ROI (%)';
+
+    return {
+      realizedRoi: realizedRoiLabel,
+      averageTradeRoi: averageTradeRoiLabel,
+      medianTradeRoi: medianTradeRoiLabel,
+      unrealizedRoi: unrealizedRoiLabel,
+      scoreAdjustedRoi: scoreAdjustedRoiLabel,
+      realizedCapitalROI: realizedRoiLabel,
+      averagePerTradeROI: averageTradeRoiLabel,
+      medianTradeROI: medianTradeRoiLabel,
+      openPortfolioROI: unrealizedRoiLabel,
+      scoreAdjustedROI: scoreAdjustedRoiLabel,
+    };
+  }
+
+  private buildPnlLabels(): WalletIntelligenceMetrics['pnlLabels'] {
+    return {
+      realizedPnL: 'Realized PnL (USD)',
+      unrealizedPnL: 'Unrealized PnL (USD)',
+      netPnL: 'Net PnL (USD)',
+    };
+  }
+
+  private buildRoiSampleWarnings(
+    totalSwaps: number,
+    countedPricedTrades: number,
+    scoreAdjustedWarning: string | null,
+  ): WalletIntelligenceMetrics['roiSampleWarnings'] {
+    const perSwapWarning =
+      totalSwaps < 10
+        ? `Low sample size: only ${totalSwaps} swaps available (minimum recommended: 10).`
+        : null;
+    const realizedWarning =
+      countedPricedTrades < 10
+        ? `Low sample size: only ${countedPricedTrades} priced trades contributed (minimum recommended: 10).`
+        : null;
+
+    return {
+      realizedRoi: realizedWarning,
+      averageTradeRoi: perSwapWarning,
+      medianTradeRoi: perSwapWarning,
+      unrealizedRoi: null,
+      scoreAdjustedRoi: scoreAdjustedWarning,
+      realizedCapitalROI: realizedWarning,
+      averagePerTradeROI: perSwapWarning,
+      medianTradeROI: perSwapWarning,
+      openPortfolioROI: null,
+      scoreAdjustedROI: scoreAdjustedWarning,
+    };
+  }
+
+  private resolveScoreAdjustedRoiReliability(totalSwaps: number): {
+    visible: boolean;
+    multiplier: number;
+    warning: string | null;
+  } {
+    if (totalSwaps <= 4) {
+      return {
+        visible: false,
+        multiplier: 0,
+        warning: `Score-adjusted ROI hidden: only ${totalSwaps} swaps available (minimum required: 5).`,
+      };
+    }
+
+    if (totalSwaps <= 9) {
+      return {
+        visible: true,
+        multiplier: 0.25,
+        warning: `Score-adjusted ROI reduced by 75% due to limited sample size (${totalSwaps} swaps).`,
+      };
+    }
+
+    if (totalSwaps <= 19) {
+      return {
+        visible: true,
+        multiplier: 0.65,
+        warning: `Score-adjusted ROI reduced by 35% until at least 20 swaps are available (current: ${totalSwaps}).`,
+      };
+    }
+
+    return {
+      visible: true,
+      multiplier: 1,
+      warning: null,
+    };
+  }
+
+  private buildTrustWarnings(
+    roiSampleWarnings: WalletIntelligenceMetrics['roiSampleWarnings'],
+    realizedCapitalRoiNotice: string | null,
+    pricingCoverage: WalletIntelligenceMetrics['pricingCoverage'],
+  ): string[] {
+    const pricingCoverageWarning =
+      pricingCoverage.unpricedTrades > 0
+        ? `${pricingCoverage.unpricedTrades} trades were excluded due to missing historical pricing.`
+        : null;
+
+    const warnings = [
+      roiSampleWarnings.realizedRoi,
+      roiSampleWarnings.averageTradeRoi,
+      roiSampleWarnings.medianTradeRoi,
+      roiSampleWarnings.scoreAdjustedRoi,
+      realizedCapitalRoiNotice,
+      pricingCoverageWarning,
+    ].filter((warning): warning is string => Boolean(warning));
+
+    return Array.from(new Set(warnings));
+  }
+
+  private buildTrustSignalLabels(): WalletIntelligenceMetrics['trustSignalLabels'] {
+    return {
+      confidence: 'ROI Confidence',
+      sampleSize: 'Sample Size',
+      pricingCoverage: 'Pricing Coverage',
+      warnings: 'Trust Warnings',
     };
   }
 
