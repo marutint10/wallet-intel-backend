@@ -248,7 +248,7 @@ export interface WalletScoreDimensionBreakdown {
 }
 
 export interface TraderWalletScoreBreakdown {
-  weightedROI: WalletScoreDimensionBreakdown;
+  traderWeightedROI: WalletScoreDimensionBreakdown;
   realizedPnLQuality: WalletScoreDimensionBreakdown;
   profitability: WalletScoreDimensionBreakdown;
   consistency: WalletScoreDimensionBreakdown;
@@ -293,7 +293,7 @@ export interface WalletScoreResponse {
 
 export interface WalletScoreWeightedRoiDebug
   extends WalletScoreDimensionDebugSummary {
-  weightedROI: WalletScoreMetricDebug;
+  traderWeightedROI: WalletScoreMetricDebug;
   avgROI: WalletScoreMetricDebug;
   sampleSizeMultiplier: WalletScoreMetricDebug;
   qualityMultiplier: WalletScoreMetricDebug;
@@ -400,7 +400,7 @@ export interface WalletHolderScoreAssetSelectionDebug
 }
 
 export interface TraderWalletScoreDebugData {
-  weightedROI: WalletScoreWeightedRoiDebug;
+  traderWeightedROI: WalletScoreWeightedRoiDebug;
   realizedPnLQuality: WalletScoreRealizedPnLQualityDebug;
   profitability: WalletScoreProfitabilityDebug;
   consistency: WalletScoreConsistencyDebug;
@@ -565,8 +565,15 @@ export type WalletIntelligenceScore =
 export type WalletIntelligenceClassification =
   OptionalReasoningFields<WalletClassificationResult>;
 
+export interface WalletIntelligenceSummary
+  extends Omit<WalletSummaryResponse, 'avgROI'> {
+  averageTradeRoi: number;
+  /** @deprecated Use averageTradeRoi instead. */
+  averagePerTradeROI: number;
+}
+
 export interface WalletIntelligenceFeatures {
-  summary: WalletSummaryResponse;
+  summary: WalletIntelligenceSummary;
   risk: WalletRiskMetricsResponse;
   holdTime: WalletHoldTimeMetricsResponse;
   activity: WalletActivityMetricsResponse;
@@ -577,8 +584,93 @@ export interface WalletIntelligenceFeatures {
   };
 }
 
+export interface WalletIntelligenceRoiLabels {
+  realizedRoi: string;
+  averageTradeRoi: string;
+  medianTradeRoi: string;
+  unrealizedRoi: string;
+  scoreAdjustedRoi: string;
+  /** @deprecated Use realizedRoi instead. */
+  realizedCapitalROI: string;
+  /** @deprecated Use averageTradeRoi instead. */
+  averagePerTradeROI: string;
+  /** @deprecated Use medianTradeRoi instead. */
+  medianTradeROI: string;
+  /** @deprecated Use unrealizedRoi instead. */
+  openPortfolioROI: string;
+  /** @deprecated Use scoreAdjustedRoi instead. */
+  scoreAdjustedROI: string;
+}
+
+export interface WalletIntelligenceRoiSampleWarnings {
+  realizedRoi: string | null;
+  averageTradeRoi: string | null;
+  medianTradeRoi: string | null;
+  unrealizedRoi: string | null;
+  scoreAdjustedRoi: string | null;
+  /** @deprecated Use realizedRoi instead. */
+  realizedCapitalROI: string | null;
+  /** @deprecated Use averageTradeRoi instead. */
+  averagePerTradeROI: string | null;
+  /** @deprecated Use medianTradeRoi instead. */
+  medianTradeROI: string | null;
+  /** @deprecated Use unrealizedRoi instead. */
+  openPortfolioROI: string | null;
+  /** @deprecated Use scoreAdjustedRoi instead. */
+  scoreAdjustedROI: string | null;
+}
+
+export interface WalletIntelligencePnlLabels {
+  realizedPnL: string;
+  unrealizedPnL: string;
+  netPnL: string;
+}
+
+export interface WalletIntelligenceTrustSignalSampleSize {
+  totalSwaps: number;
+  pricedTrades: number;
+  minimumRecommendedSwaps: number;
+  minimumRecommendedPricedTrades: number;
+}
+
+export interface WalletIntelligenceTrustSignals {
+  confidence: WalletConfidenceLabel;
+  sampleSize: WalletIntelligenceTrustSignalSampleSize;
+  pricingCoverage: WalletPricingCoverage;
+  warnings: string[];
+}
+
+export interface WalletIntelligenceTrustSignalLabels {
+  confidence: string;
+  sampleSize: string;
+  pricingCoverage: string;
+  warnings: string;
+}
+
 export interface WalletIntelligenceMetrics {
-  weightedROI: number;
+  realizedRoi: number;
+  averageTradeRoi: number;
+  medianTradeRoi: number;
+  unrealizedRoi: number;
+  scoreAdjustedRoi: number | null;
+  /** @deprecated Use realizedRoi instead. */
+  realizedCapitalROI: number;
+  /** @deprecated Use averageTradeRoi instead. */
+  averagePerTradeROI: number;
+  /** @deprecated Use medianTradeRoi instead. */
+  medianTradeROI: number;
+  /** @deprecated Use unrealizedRoi instead. */
+  openPortfolioROI: number;
+  /** @deprecated Use scoreAdjustedRoi instead. */
+  scoreAdjustedROI: number | null;
+  realizedPnL: number;
+  unrealizedPnL: number;
+  netPnL: number;
+  roiLabels: WalletIntelligenceRoiLabels;
+  pnlLabels: WalletIntelligencePnlLabels;
+  roiSampleWarnings: WalletIntelligenceRoiSampleWarnings;
+  trustSignals: WalletIntelligenceTrustSignals;
+  trustSignalLabels: WalletIntelligenceTrustSignalLabels;
   capitalBase: number;
   portfolioTotalValueUsd: number;
   lifetimeTradeVolumeUsd: number;
@@ -586,8 +678,8 @@ export interface WalletIntelligenceMetrics {
   lifetimeTradeSkipped: number;
   lifetimeTradeConfidence: number;
   roiConfidence: WalletConfidenceLabel;
-  headlineRoiVisible: boolean;
-  headlineRoiNotice: string | null;
+  realizedCapitalRoiVisible: boolean;
+  realizedCapitalRoiNotice: string | null;
   pricingCoverage: WalletPricingCoverage;
   pricingCoverageNotice: string;
 }
@@ -606,7 +698,7 @@ export interface WalletPricingCoverage {
 export interface WalletIntelligenceLiteResponse {
   address: string;
   analyzedAt: string;
-  summary: WalletSummaryResponse;
+  summary: WalletIntelligenceSummary;
   metrics: WalletIntelligenceMetrics;
   score: WalletIntelligenceScore;
   classification: WalletIntelligenceClassification;
