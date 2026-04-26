@@ -132,6 +132,7 @@ export class WalletTriageService {
     confidence: WalletConfidenceLabel;
     confidenceLabel: WalletConfidenceLabel;
     confidenceScore: number;
+    confidenceReason: string;
     confidenceReasoning: string[];
   } {
     const baseScoreBySubtype: Record<WalletContractSubtype, number> = {
@@ -158,6 +159,7 @@ export class WalletTriageService {
       confidence: confidenceLabel,
       confidenceLabel,
       confidenceScore,
+      confidenceReason: `Triage confidence is ${confidenceLabel} because subtype=${subtype} with ${activity.totalTransactions} supporting transactions.`,
       confidenceReasoning: [
         `Subtype match confidence starts at ${baseScoreBySubtype[subtype]} for ${subtype}.`,
         `Activity depth bonus is +${dataDepthBonus} from ${activity.totalTransactions} stored transactions.`,
@@ -173,6 +175,7 @@ export class WalletTriageService {
     confidence: WalletConfidenceLabel;
     confidenceLabel: WalletConfidenceLabel;
     confidenceScore: number;
+    confidenceReason: string;
     confidenceReasoning: string[];
   } {
     const baseScore = 68;
@@ -202,6 +205,7 @@ export class WalletTriageService {
       confidence: confidenceLabel,
       confidenceLabel,
       confidenceScore,
+      confidenceReason: `Triage confidence is ${confidenceLabel} because this EOA shows an operational transfer profile with ${summary.total_transactions} transactions and ${this.toPercent(transferRatio)} transfer share.`,
       confidenceReasoning: [
         `EOA operational triage baseline score is ${baseScore}.`,
         `Transaction-depth bonus is +${txDepthBonus} from ${summary.total_transactions} total transactions.`,
