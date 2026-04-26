@@ -4,7 +4,7 @@ import {
   StoredWalletTransactionsResponse,
   Trade,
   WalletActivityMetricsResponse,
-  WalletClassification,
+  WalletClassificationResult,
   WalletContextResponse,
   WalletDexMetricsResult,
   WalletFeaturesResponse,
@@ -15,8 +15,7 @@ import {
   WalletPnLResponse,
   WalletPortfolioResponse,
   WalletRiskMetricsResult,
-  WalletRiskMetricsResponse,
-  WalletScoreResult,
+  WalletScoreOrTriageResult,
   WalletSummaryResponse,
   WalletTokenCategoryMetricsResponse,
   WalletTokenFlowResponse,
@@ -120,7 +119,7 @@ export class WalletController {
   async getWalletScore(
     @Param('address') address: string,
     @Query('debug') debug?: string,
-  ): Promise<WalletScoreResult> {
+  ): Promise<WalletScoreOrTriageResult> {
     if (!isEthereumAddress(address)) {
       throw new BadRequestException('Invalid Ethereum wallet address');
     }
@@ -131,7 +130,7 @@ export class WalletController {
   @Get(':address/classification')
   async getClassification(
     @Param('address') address: string,
-  ): Promise<WalletClassification> {
+  ): Promise<WalletClassificationResult> {
     this.validateAddress(address);
 
     return this.walletService.getClassification(address);
