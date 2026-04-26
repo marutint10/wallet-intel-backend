@@ -390,6 +390,8 @@ export interface WalletHolderScorePortfolioSizeDebug
   largestPositionUsd: WalletScoreMetricDebug;
   nonDustCount: WalletScoreMetricDebug;
   portfolioSizeMultiplier: WalletScoreMetricDebug;
+  liquidityExcludedHoldingsCount: number;
+  adjustedPortfolioUsdForScoring: number;
 }
 
 export interface WalletHolderScoreAssetSelectionDebug
