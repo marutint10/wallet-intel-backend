@@ -5,9 +5,11 @@ import {
   NormalizedTransaction,
   WalletConfidenceLabel,
   WalletContractSubtype,
+  WalletSummaryResponse,
   WalletTriageResponse,
 } from '../wallet.types';
 import { WalletCoreService } from './wallet-core.service';
+import { WalletPnlService } from './wallet-pnl.service';
 
 interface ContractActivitySnapshot {
   totalTransactions: number;
@@ -30,6 +32,7 @@ export class WalletTriageService {
   constructor(
     private readonly configService: ConfigService,
     private readonly walletCoreService: WalletCoreService,
+    private readonly walletPnlService: WalletPnlService,
   ) {
     const configuredRpcUrl =
       this.configService.get<string>('rpc.url') ??
@@ -48,42 +51,81 @@ export class WalletTriageService {
     );
   }
 
-  async getWalletTriage(address: string): Promise<WalletTriageResponse | null> {
-    const bytecode = await this.fetchBytecode(address);
+  async getWalletTriage(
+    address: string,
+    input: {
+      summary?: WalletSummaryResponse;
+      bytecode?: string;
+    } = {},
+  ): Promise<WalletTriageResponse | null> {
+    const bytecode = input.bytecode
+      ? input.bytecode
+      : await this.fetchBytecode(address);
 
-    if (!this.hasBytecode(bytecode)) {
-      return null;
+    if (this.hasBytecode(bytecode)) {
+      const storedTransactions = await this.walletCoreService.getStoredTransactions(
+        address,
+      );
+      const activity = this.buildActivitySnapshot(
+        address,
+        storedTransactions.transactions,
+      );
+      const { subtype, subtypeReasoning } = this.resolveContractSubtype(
+        bytecode,
+        activity,
+      );
+      const confidenceProfile = this.resolveContractTriageConfidence(
+        subtype,
+        activity,
+      );
+
+      return {
+        walletType: 'Contract',
+        walletSubtype: subtype,
+        traderEligible: false,
+        scorePath: 'triage_contract',
+        ...confidenceProfile,
+        score: null,
+        scoreBand: null,
+        reasoning: [
+          'On-chain bytecode is present, so this address is treated as a smart contract wallet.',
+          `Contract activity snapshot: transfers=${activity.transferCount}, swaps=${activity.swapCount}, uniqueCounterparties=${activity.uniqueCounterparties}.`,
+          ...subtypeReasoning,
+        ],
+      };
     }
 
-    const storedTransactions = await this.walletCoreService.getStoredTransactions(
-      address,
-    );
-    const activity = this.buildActivitySnapshot(
-      address,
-      storedTransactions.transactions,
-    );
-    const { subtype, subtypeReasoning } = this.resolveContractSubtype(
-      bytecode,
-      activity,
-    );
-    const confidenceProfile = this.resolveTriageConfidence(subtype, activity);
+    const summary = input.summary
+      ? input.summary
+      : await this.walletPnlService.getWalletSummary(address);
 
-    return {
-      walletType: 'Contract',
-      walletSubtype: subtype,
-      traderEligible: false,
-      ...confidenceProfile,
-      score: null,
-      scoreBand: null,
-      reasoning: [
-        'On-chain bytecode is present, so this address is treated as a smart contract wallet.',
-        `Contract activity snapshot: transfers=${activity.transferCount}, swaps=${activity.swapCount}, uniqueCounterparties=${activity.uniqueCounterparties}.`,
-        ...subtypeReasoning,
-      ],
-    };
+    if (this.isOperationalEoa(summary)) {
+      const transferRatio = this.computeTransferRatio(summary);
+      const confidenceProfile = this.resolveOperationalTriageConfidence(
+        summary,
+        transferRatio,
+      );
+
+      return {
+        walletType: 'EOA',
+        walletSubtype: 'Operational/Treasury',
+        traderEligible: false,
+        scorePath: 'triage_operational',
+        ...confidenceProfile,
+        score: null,
+        scoreBand: null,
+        reasoning: [
+          'EOA operational triage matched from wallet behavior heuristics.',
+          `Operational signal: swaps=${summary.total_swaps}, transferRatio=${this.toPercent(transferRatio)}, totalTransactions=${summary.total_transactions}.`,
+          'Wallet is marked non-trader operational, so trader score/classification paths are skipped.',
+        ],
+      };
+    }
+
+    return null;
   }
 
-  private resolveTriageConfidence(
+  private resolveContractTriageConfidence(
     subtype: WalletContractSubtype,
     activity: ContractActivitySnapshot,
   ): {
@@ -119,6 +161,51 @@ export class WalletTriageService {
       confidenceReasoning: [
         `Subtype match confidence starts at ${baseScoreBySubtype[subtype]} for ${subtype}.`,
         `Activity depth bonus is +${dataDepthBonus} from ${activity.totalTransactions} stored transactions.`,
+        `Final triage confidence is ${confidenceLabel} (${confidenceScore}/100).`,
+      ],
+    };
+  }
+
+  private resolveOperationalTriageConfidence(
+    summary: WalletSummaryResponse,
+    transferRatio: number,
+  ): {
+    confidence: WalletConfidenceLabel;
+    confidenceLabel: WalletConfidenceLabel;
+    confidenceScore: number;
+    confidenceReasoning: string[];
+  } {
+    const baseScore = 68;
+    const txDepthBonus =
+      summary.total_transactions >= 250
+        ? 14
+        : summary.total_transactions >= 120
+          ? 10
+          : summary.total_transactions >= 60
+            ? 6
+            : 0;
+    const transferRatioBonus =
+      transferRatio >= 0.95
+        ? 12
+        : transferRatio >= 0.9
+          ? 8
+          : transferRatio >= 0.85
+            ? 5
+            : 0;
+    const confidenceScore = Math.min(
+      100,
+      baseScore + txDepthBonus + transferRatioBonus,
+    );
+    const confidenceLabel = this.toConfidenceLabel(confidenceScore);
+
+    return {
+      confidence: confidenceLabel,
+      confidenceLabel,
+      confidenceScore,
+      confidenceReasoning: [
+        `EOA operational triage baseline score is ${baseScore}.`,
+        `Transaction-depth bonus is +${txDepthBonus} from ${summary.total_transactions} total transactions.`,
+        `Transfer-ratio bonus is +${transferRatioBonus} from ${this.toPercent(transferRatio)} transfer share.`,
         `Final triage confidence is ${confidenceLabel} (${confidenceScore}/100).`,
       ],
     };
@@ -278,6 +365,24 @@ export class WalletTriageService {
       lowSwapActivity &&
       (concentratedCounterparties || biDirectionalTreasuryFlow)
     );
+  }
+
+  private isOperationalEoa(summary: WalletSummaryResponse): boolean {
+    const transferRatio = this.computeTransferRatio(summary);
+
+    return (
+      summary.total_swaps === 0 &&
+      summary.total_transactions >= 60 &&
+      transferRatio >= 0.85
+    );
+  }
+
+  private computeTransferRatio(summary: WalletSummaryResponse): number {
+    if (summary.total_transactions <= 0) {
+      return 0;
+    }
+
+    return summary.total_transfers / summary.total_transactions;
   }
 
   private async fetchBytecode(address: string): Promise<string> {
