@@ -91,28 +91,128 @@ export class WalletPnlService {
   async getPricedTrades(address: string): Promise<PricedTrade[]> {
     const trades = await this.getTrades(address);
 
-    const priceCache = new Map<string, number>();
-    const pricedTrades: PricedTrade[] = [];
+    const externalPriceCache = new Map<string, number>();
+    const pricedTrades: PricedTrade[] = trades.map((trade) => ({
+      ...trade,
+      price: 0,
+    }));
+    const tradesByTimestamp = new Map<number, PricedTrade[]>();
 
-    for (const trade of trades) {
-      const cacheKey = `${trade.contractAddress?.toLowerCase() ?? trade.token}-${trade.timestamp}`;
+    for (const trade of pricedTrades) {
+      const bucket = tradesByTimestamp.get(trade.timestamp) ?? [];
+      bucket.push(trade);
+      tradesByTimestamp.set(trade.timestamp, bucket);
+    }
 
-      let price = priceCache.get(cacheKey);
-
-      if (price === undefined) {
-        price =
-          await this.walletPricingService.fetchHistoricalTradePrice(
-            trade.token,
-            trade.contractAddress,
-            trade.timestamp,
-          );
-        priceCache.set(cacheKey, price);
+    for (const tradesAtTimestamp of tradesByTimestamp.values()) {
+      if (tradesAtTimestamp.length !== 2) {
+        continue;
       }
 
-      pricedTrades.push({ ...trade, price });
+      const [firstTrade, secondTrade] = tradesAtTimestamp;
+
+      if (firstTrade.type === secondTrade.type) {
+        continue;
+      }
+
+      for (const trade of tradesAtTimestamp) {
+        const inferredCandidate = this.walletPricingService.getHistoricalPriceCandidate(
+          trade.token,
+          trade.contractAddress,
+          trade.timestamp,
+        );
+
+        if (inferredCandidate) {
+          trade.price = inferredCandidate.price;
+          continue;
+        }
+
+        if (
+          !this.walletPricingService.isKnownInferenceAsset(
+            trade.token,
+            trade.contractAddress,
+          )
+        ) {
+          continue;
+        }
+
+        trade.price = await this.fetchHistoricalTradePriceCached(
+          trade,
+          externalPriceCache,
+        );
+      }
+
+      const knownTrade = tradesAtTimestamp.find((trade) => trade.price > 0);
+      const unknownTrade = tradesAtTimestamp.find((trade) => trade.price <= 0);
+
+      if (!knownTrade || !unknownTrade) {
+        continue;
+      }
+
+      const inferenceDecision = this.walletPricingService.tryInferUnknownSidePrice(
+        knownTrade,
+        knownTrade.price,
+        unknownTrade,
+        tradesAtTimestamp.length,
+      );
+
+      if (!inferenceDecision) {
+        continue;
+      }
+
+      unknownTrade.price = inferenceDecision.price;
+      this.walletPricingService.recordInferredHistoricalPrice(
+        unknownTrade.token,
+        unknownTrade.contractAddress,
+        unknownTrade.timestamp,
+        inferenceDecision.price,
+        inferenceDecision.confidenceScore,
+      );
+    }
+
+    for (const trade of pricedTrades) {
+      if (trade.price > 0) {
+        continue;
+      }
+
+      const inferredCandidate = this.walletPricingService.getHistoricalPriceCandidate(
+        trade.token,
+        trade.contractAddress,
+        trade.timestamp,
+      );
+
+      if (inferredCandidate) {
+        trade.price = inferredCandidate.price;
+        continue;
+      }
+
+      trade.price = await this.fetchHistoricalTradePriceCached(
+        trade,
+        externalPriceCache,
+      );
     }
 
     return this.walletPricingService.inferMissingSwapPrices(pricedTrades);
+  }
+
+  private async fetchHistoricalTradePriceCached(
+    trade: Trade,
+    priceCache: Map<string, number>,
+  ): Promise<number> {
+    const cacheKey = `${trade.contractAddress?.toLowerCase() ?? trade.token.toUpperCase()}-${trade.timestamp}`;
+    const cached = priceCache.get(cacheKey);
+
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const fetchedPrice = await this.walletPricingService.fetchHistoricalTradePrice(
+      trade.token,
+      trade.contractAddress,
+      trade.timestamp,
+    );
+    priceCache.set(cacheKey, fetchedPrice);
+    return fetchedPrice;
   }
 
   async getRealizedTradeMetrics(address: string): Promise<RealizedTradeMetrics[]> {
