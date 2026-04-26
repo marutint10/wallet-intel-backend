@@ -36,7 +36,7 @@ import { WalletContextService } from './wallet-context.service';
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
-import { PricedTrade } from './wallet-pricing.service';
+import { PricedTrade, WalletPricingService } from './wallet-pricing.service';
 import { WalletScoringService } from './scoring.service';
 import { WalletTriageService } from './wallet-triage.service';
 
@@ -51,6 +51,7 @@ export class WalletService {
   constructor(
     private readonly walletCoreService: WalletCoreService,
     private readonly walletPnlService: WalletPnlService,
+    private readonly walletPricingService: WalletPricingService,
     private readonly walletPortfolioService: WalletPortfolioService,
     private readonly walletAnalyticsService: WalletAnalyticsService,
     private readonly walletContextService: WalletContextService,
@@ -416,6 +417,11 @@ export class WalletService {
     portfolio: WalletPortfolioResponse = [],
   ): Promise<WalletIntelligenceMetrics> {
     const pricedTrades = await this.walletPnlService.getPricedTrades(address);
+    const pricingCoverage = this.walletPricingService.buildPricingCoverage(
+      pricedTrades,
+    );
+    const pricingCoverageNotice =
+      'PnL based on priced subset of trades where historical pricing was available.';
     const capitalBase = this.computeCapitalBase(pricedTrades, portfolio);
     const weightedRoiThreshold = 100;
     const weightedROI =
@@ -434,6 +440,8 @@ export class WalletService {
         headlineRoiVisible: false,
         headlineRoiNotice:
           'ROI statistically unreliable due to very low capital base',
+        pricingCoverage,
+        pricingCoverageNotice,
       };
     }
 
@@ -443,6 +451,8 @@ export class WalletService {
       roiConfidence: capitalBase < 100 ? 'low' : capitalBase < 500 ? 'medium' : 'high',
       headlineRoiVisible: true,
       headlineRoiNotice: null,
+      pricingCoverage,
+      pricingCoverageNotice,
     };
   }
 
