@@ -41,6 +41,18 @@ interface DefiLlamaPriceResponse {
   };
 }
 
+interface DexScreenerPair {
+  chainId?: string;
+  baseToken?: { address?: string };
+  quoteToken?: { address?: string };
+  priceUsd?: string;
+  liquidity?: { usd?: number };
+}
+
+interface DexScreenerTokenResponse {
+  pairs?: DexScreenerPair[];
+}
+
 interface HistoricalPriceFetchResult {
   value: number | null;
   shouldCache: boolean;
@@ -61,6 +73,14 @@ interface PriceCacheEntry {
 
 const COINGECKO_API_BASE_URL = 'https://api.coingecko.com/api/v3';
 const DEFILLAMA_API_BASE_URL = 'https://coins.llama.fi';
+const DEXSCREENER_API_BASE_URL = 'https://api.dexscreener.com';
+
+export interface TokenMarketSignal {
+  price: number | null;
+  liquidityUsd: number | null;
+  priceSources: string[];
+  liquiditySources: string[];
+}
 
 export type PricedTrade = Trade & { price: number };
 
@@ -265,6 +285,110 @@ export class WalletPricingService {
     }
 
     return result;
+  }
+
+  async fetchTokenMarketSignals(
+    contractAddresses: string[],
+  ): Promise<Record<string, TokenMarketSignal>> {
+    const normalizedAddresses = Array.from(
+      new Set(
+        contractAddresses
+          .map((address) => address.toLowerCase())
+          .filter((address) => Boolean(address)),
+      ),
+    );
+
+    if (normalizedAddresses.length === 0) {
+      return {};
+    }
+
+    const [defiLlamaResult, dexScreenerResult, coinGeckoResult] =
+      await Promise.allSettled([
+        this.fetchDefiLlamaCurrentTokenPrices(normalizedAddresses),
+        this.fetchDexScreenerTokenSignals(normalizedAddresses),
+        this.fetchCoinGeckoTokenPrices(normalizedAddresses),
+      ]);
+
+    if (defiLlamaResult.status === 'rejected') {
+      this.logger.warn(
+        'DefiLlama live pricing lookup failed for token-quality filtering',
+        defiLlamaResult.reason instanceof Error
+          ? defiLlamaResult.reason.stack
+          : undefined,
+      );
+    }
+
+    if (dexScreenerResult.status === 'rejected') {
+      this.logger.warn(
+        'DexScreener market lookup failed for token-quality filtering',
+        dexScreenerResult.reason instanceof Error
+          ? dexScreenerResult.reason.stack
+          : undefined,
+      );
+    }
+
+    if (coinGeckoResult.status === 'rejected') {
+      this.logger.warn(
+        'CoinGecko fallback lookup failed for token-quality filtering',
+        coinGeckoResult.reason instanceof Error
+          ? coinGeckoResult.reason.stack
+          : undefined,
+      );
+    }
+
+    const defiLlamaPrices =
+      defiLlamaResult.status === 'fulfilled' ? defiLlamaResult.value : {};
+    const dexScreenerSignals =
+      dexScreenerResult.status === 'fulfilled' ? dexScreenerResult.value : {};
+    const coinGeckoPrices =
+      coinGeckoResult.status === 'fulfilled' ? coinGeckoResult.value : {};
+    const marketSignals: Record<string, TokenMarketSignal> = {};
+
+    for (const address of normalizedAddresses) {
+      const defiLlamaPrice = defiLlamaPrices[address] ?? 0;
+      const dexSignal = dexScreenerSignals[address] ?? {
+        price: null,
+        liquidityUsd: null,
+      };
+      const coinGeckoPrice = coinGeckoPrices[address] ?? 0;
+      const priceSources: string[] = [];
+
+      if (defiLlamaPrice > 0) {
+        priceSources.push('defillama');
+      }
+
+      if ((dexSignal.price ?? 0) > 0) {
+        priceSources.push('dexscreener');
+      }
+
+      if (coinGeckoPrice > 0) {
+        priceSources.push('coingecko');
+      }
+
+      marketSignals[address] = {
+        price:
+          defiLlamaPrice > 0
+            ? defiLlamaPrice
+            : (dexSignal.price ?? 0) > 0
+              ? dexSignal.price
+              : coinGeckoPrice > 0
+                ? coinGeckoPrice
+                : null,
+        liquidityUsd:
+          Number.isFinite(dexSignal.liquidityUsd) &&
+          (dexSignal.liquidityUsd ?? 0) > 0
+            ? dexSignal.liquidityUsd
+            : null,
+        priceSources,
+        liquiditySources:
+          Number.isFinite(dexSignal.liquidityUsd) &&
+          (dexSignal.liquidityUsd ?? 0) > 0
+            ? ['dexscreener']
+            : [],
+      };
+    }
+
+    return marketSignals;
   }
 
   async fetchEthereumUsdPrice(): Promise<number> {
@@ -524,6 +648,154 @@ export class WalletPricingService {
         };
       }
     }).then((result) => result.value ?? 0);
+  }
+
+  private async fetchDefiLlamaCurrentTokenPrices(
+    contractAddresses: string[],
+  ): Promise<Record<string, number>> {
+    const results: Record<string, number> = {};
+    const addressBatches = this.chunkArray(contractAddresses, 80);
+
+    for (const addressBatch of addressBatches) {
+      const coinKeys = addressBatch.map((address) => `ethereum:${address}`);
+      const url = `${DEFILLAMA_API_BASE_URL}/prices/current/${coinKeys.join(',')}`;
+
+      try {
+        const response = await axios.get<DefiLlamaPriceResponse>(url, {
+          timeout: 10000,
+        });
+
+        for (const [coinKey, coinData] of Object.entries(
+          response.data?.coins ?? {},
+        )) {
+          const contractAddress = this.extractContractAddressFromDefiLlamaKey(
+            coinKey,
+          );
+
+          if (!contractAddress) {
+            continue;
+          }
+
+          const price = this.toFinitePositiveNumber(coinData?.price);
+
+          if (price === null) {
+            continue;
+          }
+
+          results[contractAddress] = price;
+        }
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          this.logger.warn(
+            `[DefiLlama] Live price lookup failed for ${addressBatch.length} contracts with HTTP ${error.response?.status ?? error.code ?? 'NO_RESPONSE'}`,
+          );
+        } else {
+          this.logger.warn(
+            `[DefiLlama] Live price lookup failed for ${addressBatch.length} contracts`,
+            error instanceof Error ? error.stack : undefined,
+          );
+        }
+      }
+    }
+
+    return results;
+  }
+
+  private async fetchDexScreenerTokenSignals(
+    contractAddresses: string[],
+  ): Promise<Record<string, { price: number | null; liquidityUsd: number | null }>> {
+    const results: Record<string, { price: number | null; liquidityUsd: number | null }> = {};
+    const requestedAddressSet = new Set(contractAddresses.map((address) => address.toLowerCase()));
+    const addressBatches = this.chunkArray(contractAddresses, 30);
+
+    for (const addressBatch of addressBatches) {
+      const url = `${DEXSCREENER_API_BASE_URL}/latest/dex/tokens/${addressBatch.join(',')}`;
+
+      try {
+        const response = await axios.get<DexScreenerTokenResponse>(url, {
+          timeout: 10000,
+        });
+        const pairs = response.data?.pairs ?? [];
+
+        for (const pair of pairs) {
+          if ((pair.chainId ?? '').toLowerCase() !== 'ethereum') {
+            continue;
+          }
+
+          const pairPrice = this.toFinitePositiveNumber(pair.priceUsd);
+          const pairLiquidityUsd = this.toFinitePositiveNumber(pair.liquidity?.usd);
+          const baseTokenAddress = pair.baseToken?.address?.toLowerCase() ?? '';
+
+          // DexScreener priceUsd is reliable for the base token side only.
+          if (!requestedAddressSet.has(baseTokenAddress)) {
+            continue;
+          }
+
+          const current = results[baseTokenAddress] ?? {
+            price: null,
+            liquidityUsd: null,
+          };
+          const currentLiquidity = current.liquidityUsd ?? -1;
+          const nextLiquidity = pairLiquidityUsd ?? -1;
+
+          if (nextLiquidity >= currentLiquidity) {
+            results[baseTokenAddress] = {
+              price: pairPrice ?? current.price,
+              liquidityUsd: pairLiquidityUsd,
+            };
+          }
+        }
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          this.logger.warn(
+            `[DexScreener] Market lookup failed for ${addressBatch.length} contracts with HTTP ${error.response?.status ?? error.code ?? 'NO_RESPONSE'}`,
+          );
+        } else {
+          this.logger.warn(
+            `[DexScreener] Market lookup failed for ${addressBatch.length} contracts`,
+            error instanceof Error ? error.stack : undefined,
+          );
+        }
+      }
+    }
+
+    return results;
+  }
+
+  private extractContractAddressFromDefiLlamaKey(
+    coinKey: string,
+  ): string | null {
+    const [chain, contractAddress] = coinKey.split(':');
+
+    if (chain !== 'ethereum' || !contractAddress) {
+      return null;
+    }
+
+    return contractAddress.toLowerCase();
+  }
+
+  private toFinitePositiveNumber(value: unknown): number | null {
+    const parsedValue = Number(value);
+
+    if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+      return null;
+    }
+
+    return parsedValue;
+  }
+
+  private chunkArray<T>(values: T[], chunkSize: number): T[][] {
+    if (values.length === 0 || chunkSize <= 0) {
+      return [];
+    }
+
+    const chunks: T[][] = [];
+
+    for (let index = 0; index < values.length; index += chunkSize) {
+      chunks.push(values.slice(index, index + chunkSize));
+    }
+
+    return chunks;
   }
 
   private extractHistoricalUsdPrice(
