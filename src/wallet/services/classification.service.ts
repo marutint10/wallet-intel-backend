@@ -14,22 +14,17 @@ import {
 	WalletTokenCategoryMetricsResponse,
 } from '../wallet.types';
 import { WalletAnalyticsService } from './wallet-analytics.service';
+import {
+	TraderArchetype,
+	TraderArchetypeInputs,
+	scoreTraderArchetypes,
+} from './classification/trader-archetype.scorer';
 import { WalletConfidenceService } from './wallet-confidence.service';
 import { WalletContextService } from './wallet-context.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
 
-type TraderType =
-	| 'Diamond Hand'
-	| 'Swing Trader'
-	| 'Day Trader'
-	| 'Sniper'
-	| 'Degen / Ape'
-	| 'Bot / Automated'
-	| 'Whale'
-	| 'Paper Hand'
-	| 'Accumulator'
-	| 'DeFi Strategist';
+type TraderType = TraderArchetype;
 
 type HolderType =
 	| 'Diamond Hands'
@@ -65,6 +60,17 @@ interface ClassificationInputs {
 	under1hRatio: number;
 	shortHoldRatio: number;
 	defiTradePercent: number;
+}
+
+interface TraderNarrativeInputs {
+	summary: WalletSummaryResponse;
+	holdTime: WalletHoldTimeMetricsResponse;
+	activity: WalletActivityMetricsResponse;
+	tokenCategories: WalletTokenCategoryMetricsResponse;
+	risk: WalletRiskMetricsResponse;
+	buySellRatio: number;
+	sellRatio: number;
+	capitalBaseUsd: number;
 }
 
 interface HolderClassificationInputs {
@@ -130,10 +136,9 @@ export class ClassificationService {
 			);
 		}
 
-		const [holdTime, activity, dexMetrics, risk, trades] = await Promise.all([
+		const [holdTime, activity, risk, trades] = await Promise.all([
 			this.walletAnalyticsService.getHoldTimeMetrics(address),
 			this.walletAnalyticsService.getActivityMetrics(address),
-			this.walletAnalyticsService.getDexMetrics(address),
 			this.walletAnalyticsService.getRiskMetrics(address),
 			this.walletPnlService.getTrades(address),
 		]);
@@ -153,9 +158,9 @@ export class ClassificationService {
 			holdTime,
 			activity,
 			tokenCategories,
-			dexMetrics,
 			risk,
 			trades,
+			portfolioResult.portfolio,
 			confidenceProfile,
 		);
 	}
@@ -166,88 +171,62 @@ export class ClassificationService {
 		holdTime: WalletHoldTimeMetricsResponse,
 		activity: WalletActivityMetricsResponse,
 		tokenCategories: WalletTokenCategoryMetricsResponse,
-		dexMetrics: WalletDexMetricsResponse,
 		risk: WalletRiskMetricsResponse,
 		trades: Trade[],
+		portfolio: WalletPortfolioItem[],
 		confidenceProfile: WalletConfidenceFields,
 	): WalletClassification {
-
-		const totalHolds = this.computeTotalHolds(holdTime.holdBuckets);
-		const input: ClassificationInputs = {
-			summary,
-			holdTime,
-			activity,
-			tokenCategories,
-			dexMetrics,
-			risk,
-			trades,
-			buySellRatio: this.computeBuySellRatio(trades),
-			sellRatio: this.computeSellRatio(trades),
-			totalHolds,
-			avgTradeSize:
-				Math.abs(summary.totalRealizedPnL) / Math.max(summary.total_swaps, 1),
-			under1hRatio:
-				totalHolds > 0 ? holdTime.holdBuckets.under1h / totalHolds : 0,
-			shortHoldRatio:
-				totalHolds > 0
-					? (holdTime.holdBuckets.under1h + holdTime.holdBuckets.under24h) /
-						totalHolds
-					: 0,
-			defiTradePercent: this.computeCategoryTradePercent(
-				tokenCategories,
-				TokenCategory.DEFI,
-			),
+		const buySellRatio = this.computeBuySellRatio(trades);
+		const sellRatio = this.computeSellRatio(trades);
+		const totalPortfolioUsd = this.computeTotalPortfolioUsd(
+			this.filterPortfolioByUsdValue(portfolio, 0),
+		);
+		const traderInputs: TraderArchetypeInputs = {
+			totalSwaps: summary.total_swaps,
+			tradesPerActiveDay: activity.tradesPerActiveDay,
+			medianHoldHours: holdTime.medianHoldHours,
+			avgHoldHours: holdTime.avgHoldHours,
+			tokensInteracted: summary.tokens_interacted,
+			blueChipTradeRatio: tokenCategories.blueChipTradePercent / 100,
+			memecoinTradeRatio: tokenCategories.memecoinTradePercent / 100,
+			concentrationRisk: risk.concentrationRisk / 100,
+			burstinessScore: activity.burstinessScore,
+			tradingSpanRatio: activity.tradingSpanRatio,
+			sellRatio,
+			buySellRatio,
+			repeatedEntryExitRatio: this.computeRepeatedEntryExitRatio(trades),
+			capitalBaseUsd: Math.max(totalPortfolioUsd, Math.abs(summary.totalRealizedPnL)),
 		};
-
-		const scoreEntries: Array<[TraderType, number]> = [
-			['Diamond Hand', this.scoreDiamondHand(input)],
-			['Swing Trader', this.scoreSwingTrader(input)],
-			['Day Trader', this.scoreDayTrader(input)],
-			['Sniper', this.scoreSniper(input)],
-			['Degen / Ape', this.scoreDegenApe(input)],
-			['Bot / Automated', this.scoreBotAutomated(input)],
-			['Whale', this.scoreWhale(input)],
-			['Paper Hand', this.scorePaperHand(input)],
-			['Accumulator', this.scoreAccumulator(input)],
-			['DeFi Strategist', this.scoreDefiStrategist(input)],
-		];
-		const rankedScores = [...scoreEntries].sort((left, right) => {
-			if (right[1] === left[1]) {
-				return left[0].localeCompare(right[0]);
-			}
-
-			return right[1] - left[1];
-		});
-		const [primaryType, primaryScore] = rankedScores[0] ?? ['Diamond Hand', 0];
-		const primaryThreshold = primaryScore * 0.6;
-		const allScores = Object.fromEntries(scoreEntries);
+		const archetypeScores = scoreTraderArchetypes(traderInputs);
+		const allScores = archetypeScores.scoreBreakdown;
 
 		this.logger.debug({
 			address,
 			classificationScores: allScores,
-			selectedPrimary: primaryType,
+			selectedPrimary: archetypeScores.primaryType,
 			confidence: confidenceProfile.confidence,
 			confidenceScore: confidenceProfile.confidenceScore,
 		});
-
-		const narrative = this.buildTraderNarrative(primaryType, input);
+		const narrative = this.buildTraderNarrative(archetypeScores.primaryType, {
+			summary,
+			holdTime,
+			activity,
+			tokenCategories,
+			risk,
+			buySellRatio,
+			sellRatio,
+			capitalBaseUsd: traderInputs.capitalBaseUsd,
+		});
 
 		return this.buildClassificationResponse({
 			address,
-			type: primaryType,
-			primaryScore,
+			type: archetypeScores.primaryType,
+			primaryScore: archetypeScores.primaryScore,
 			confidenceProfile,
 			description: narrative.description,
 			traits: narrative.traits,
 			riskProfile: narrative.riskProfile,
-			secondaryTypes:
-				primaryScore > 0
-					? rankedScores
-							.slice(1)
-							.filter(([, score]) => score >= primaryThreshold)
-							.slice(0, 2)
-							.map(([type]) => type)
-					: [],
+			secondaryTypes: archetypeScores.secondaryTypes,
 			allScores,
 		});
 	}
@@ -401,6 +380,7 @@ export class ClassificationService {
 			traits: traits.slice(0, 5),
 			riskProfile: input.riskProfile,
 			secondaryTypes: input.secondaryTypes,
+			scoreBreakdown: input.allScores,
 			allScores: input.allScores,
 			classifiedAt: new Date().toISOString(),
 		};
@@ -418,14 +398,15 @@ export class ClassificationService {
 
 	private buildTraderNarrative(
 		type: TraderType,
-		input: ClassificationInputs,
+		input: TraderNarrativeInputs,
 	): ClassificationNarrative {
 		switch (type) {
 			case 'Diamond Hand':
 				return {
-					description: `Long-horizon trader with a median hold time of ${this.formatDays(input.holdTime.medianHoldHours / 24)} and ${this.formatPercent(input.tokenCategories.blueChipTradePercent)} blue-chip trading exposure.`,
+					description: `Long-horizon trader with ${this.formatDays(input.holdTime.medianHoldHours / 24)} median holds, low turnover cadence, and strong blue-chip preference (${this.formatPercent(input.tokenCategories.blueChipTradePercent)}).`,
 					traits: [
 						`Median hold ${this.formatDays(input.holdTime.medianHoldHours / 24)}`,
+						`${this.formatNumber(input.activity.tradesPerActiveDay)} trades/day`,
 						`${this.formatPercent(input.tokenCategories.blueChipTradePercent)} blue-chip trades`,
 						`${this.formatNumber(input.summary.tokens_interacted)} tokens interacted`,
 					],
@@ -433,7 +414,7 @@ export class ClassificationService {
 				};
 			case 'Swing Trader':
 				return {
-					description: `Medium-term trader balancing multi-day holds with ${this.formatNumber(input.activity.tradesPerActiveDay)} trades per active day and a ${this.formatPercent(input.summary.avgWinRate)} win rate.`,
+					description: `Medium-term trader balancing 1-30 day hold windows with moderate activity (${this.formatNumber(input.activity.tradesPerActiveDay)} trades/day) and repeated position recycling.`,
 					traits: [
 						`Median hold ${this.formatDays(input.holdTime.medianHoldHours / 24)}`,
 						`${this.formatNumber(input.activity.tradesPerActiveDay)} trades/day`,
@@ -443,7 +424,7 @@ export class ClassificationService {
 				};
 			case 'Day Trader':
 				return {
-					description: `High-frequency trader with short holding periods, ${this.formatNumber(input.activity.tradesPerActiveDay)} trades per active day, and ${this.formatNumber(input.summary.total_swaps)} total swaps.`,
+					description: `Short-horizon trader with sub-24h median holds and high execution frequency across ${this.formatNumber(input.summary.total_swaps)} swaps.`,
 					traits: [
 						`Median hold ${this.formatHours(input.holdTime.medianHoldHours)}`,
 						`${this.formatNumber(input.activity.tradesPerActiveDay)} trades/day`,
@@ -451,74 +432,63 @@ export class ClassificationService {
 					],
 					riskProfile: 'aggressive',
 				};
-			case 'Sniper':
+			case 'Rotation Trader':
 				return {
-					description: `Ultra-fast trader specializing in rapid entries and exits, with ${this.formatPercent(input.under1hRatio * 100)} of holds closing inside one hour.`,
+					description: `High-churn rotation profile moving capital across many assets, with broad token coverage (${this.formatNumber(input.summary.tokens_interacted)} tokens) and sustained swap flow.`,
 					traits: [
-						`${this.formatHours(input.holdTime.medianHoldHours)} median hold`,
-						`${this.formatPercent(input.under1hRatio * 100)} sub-1h holds`,
-						`${this.formatPercent(input.summary.avgROI)} average ROI`,
+						`${this.formatNumber(input.summary.tokens_interacted)} tokens interacted`,
+						`${this.formatNumber(input.summary.total_swaps)} swaps`,
+						`${this.formatDays(input.holdTime.avgHoldHours / 24)} avg hold`,
 					],
-					riskProfile: 'aggressive',
+					riskProfile: 'moderate',
 				};
-			case 'Degen / Ape':
+			case 'Meme Hunter':
 				return {
-					description: `Speculative trader with heavy memecoin exposure (${this.formatPercent(input.tokenCategories.memecoinTradePercent)}) and bursty activity patterns.`,
+					description: `Speculative narrative-driven trader with heavy memecoin flow (${this.formatPercent(input.tokenCategories.memecoinTradePercent)}) and bursty execution behavior.`,
 					traits: [
 						`${this.formatPercent(input.tokenCategories.memecoinTradePercent)} memecoin trades`,
 						`${this.formatNumber(input.activity.burstinessScore)} burstiness`,
-						`${this.formatPercent(input.summary.avgWinRate)} win rate`,
+						`${this.formatNumber(input.summary.tokens_interacted)} tokens interacted`,
 					],
 					riskProfile: 'aggressive',
 				};
 			case 'Bot / Automated':
 				return {
-					description: `Mechanically patterned trader with tight execution timing, ${this.formatNumber(input.activity.tradesPerActiveDay)} trades per active day, and low return volatility.`,
+					description: `Systematic execution pattern with very high trade cadence, low timing variance, and repeatable behavior signatures.`,
 					traits: [
-						`${this.formatNumber(input.activity.avgTradeGapHours)}h avg trade gap`,
 						`${this.formatNumber(input.activity.tradesPerActiveDay)} trades/day`,
-						`${this.formatNumber(input.risk.returnStdDev)} return std dev`,
+						`${this.formatNumber(input.activity.burstinessScore)} burstiness score`,
+						`${this.formatPercent(input.activity.tradingSpanRatio * 100)} trading span ratio`,
 					],
 					riskProfile: 'moderate',
 				};
 			case 'Whale':
 				return {
-					description: `Large-size trader with ${this.formatUsd(input.summary.totalRealizedPnL)} realized PnL and average trade size near ${this.formatUsd(input.avgTradeSize)}.`,
+					description: `Capital-heavy profile with estimated capital base around ${this.formatUsd(input.capitalBaseUsd)} and concentrated risk posture (${this.formatPercent(input.risk.concentrationRisk)}).`,
 					traits: [
-						`${this.formatUsd(input.summary.totalRealizedPnL)} realized PnL`,
-						`${this.formatUsd(input.avgTradeSize)} avg trade size`,
+						`${this.formatUsd(input.capitalBaseUsd)} estimated capital base`,
 						`${this.formatPercent(input.risk.concentrationRisk)} concentration risk`,
+						`${this.formatNumber(input.summary.total_swaps)} swaps`,
 					],
 					riskProfile: 'moderate',
-				};
-			case 'Paper Hand':
-				return {
-					description: `Reactive trader with short holds, weak win rate, and unstable outcomes that point to panic exits rather than patient conviction.`,
-					traits: [
-						`${this.formatHours(input.holdTime.medianHoldHours)} median hold`,
-						`${this.formatPercent(input.summary.avgWinRate)} win rate`,
-						`${this.formatNumber(input.risk.profitFactor)} profit factor`,
-					],
-					riskProfile: 'aggressive',
 				};
 			case 'Accumulator':
 				return {
-					description: `Net buyer with a buy/sell ratio of ${this.formatNumber(input.buySellRatio)} and long holding behavior that suggests ongoing accumulation.`,
+					description: `Net-buyer profile showing recurring buys, low sell pressure, and long-hold behavior consistent with staged accumulation.`,
 					traits: [
 						`${this.formatNumber(input.buySellRatio)} buy/sell ratio`,
 						`${this.formatPercent((1 - input.sellRatio) * 100)} non-sell activity`,
-						`${this.formatDays(input.holdTime.medianHoldHours / 24)} median hold`,
+						`${this.formatDays(input.holdTime.avgHoldHours / 24)} avg hold`,
 					],
 					riskProfile: 'moderate',
 				};
-			case 'DeFi Strategist':
 			default:
 				return {
-					description: `Protocol-oriented trader active across ${this.formatNumber(input.dexMetrics.dexDiversity)} DEX venues with strong exposure to DeFi and blue-chip assets.`,
+					description: `Balanced active trader profile inferred from mixed holding windows and diversified execution patterns.`,
 					traits: [
-						`${this.formatNumber(input.dexMetrics.dexDiversity)} DEXs used`,
+						`${this.formatNumber(input.summary.total_swaps)} swaps`,
+						`${this.formatDays(input.holdTime.medianHoldHours / 24)} median hold`,
 						`${this.formatPercent(input.tokenCategories.blueChipTradePercent)} blue-chip trades`,
-						`${this.formatPercent(input.summary.avgWinRate)} win rate`,
 					],
 					riskProfile: 'moderate',
 				};
@@ -885,6 +855,31 @@ export class ClassificationService {
 		const sellCount = trades.filter((trade) => trade.type === 'SELL').length;
 
 		return this.roundDecimal(buyCount / Math.max(sellCount, 1));
+	}
+
+	private computeRepeatedEntryExitRatio(trades: Trade[]): number {
+		if (trades.length === 0) {
+			return 0;
+		}
+
+		const sideByToken = new Map<string, Set<Trade['type']>>();
+
+		for (const trade of trades) {
+			const tokenKey = trade.contractAddress?.toLowerCase() ?? trade.token.toLowerCase();
+			const sides = sideByToken.get(tokenKey) ?? new Set<Trade['type']>();
+			sides.add(trade.type);
+			sideByToken.set(tokenKey, sides);
+		}
+
+		if (sideByToken.size === 0) {
+			return 0;
+		}
+
+		const repeatedTokens = Array.from(sideByToken.values()).filter(
+			(sides) => sides.has('BUY') && sides.has('SELL'),
+		).length;
+
+		return this.roundDecimal(repeatedTokens / sideByToken.size);
 	}
 
 	private computeTotalHolds(holdBuckets: WalletHoldTimeBuckets): number {
