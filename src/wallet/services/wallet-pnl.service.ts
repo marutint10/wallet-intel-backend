@@ -229,6 +229,28 @@ export class WalletPnlService {
     return this.analyzePricedTrades(pricedTrades).realizedTradeMetrics;
   }
 
+  computeMedianRealizedTradeRoi(pricedTrades: PricedTrade[]): number {
+    const realizedRois = this.analyzePricedTrades(pricedTrades)
+      .realizedTradeMetrics.map((metric) => metric.roi)
+      .filter((roi) => Number.isFinite(roi))
+      .sort((left, right) => left - right);
+
+    if (realizedRois.length === 0) {
+      return 0;
+    }
+
+    const middleIndex = Math.floor(realizedRois.length / 2);
+
+    if (realizedRois.length % 2 === 0) {
+      return this.roundDecimal(
+        (realizedRois[middleIndex - 1] + realizedRois[middleIndex]) / 2,
+        4,
+      );
+    }
+
+    return this.roundDecimal(realizedRois[middleIndex], 4);
+  }
+
   async getCompletedTradeLots(address: string): Promise<CompletedTradeLot[]> {
     const pricedTrades = await this.getPricedTrades(address);
 
