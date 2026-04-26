@@ -151,6 +151,7 @@ export class WalletPricingService {
     'reward',
     'promo',
   ];
+  private static readonly DEFAULT_TRUST_CHAIN = 'ethereum';
   private static readonly KNOWN_INFERENCE_SYMBOLS = new Set([
     'ETH',
     'WETH',
@@ -167,14 +168,35 @@ export class WalletPricingService {
     'UNI',
     'AAVE',
     'MKR',
-    'SOL',
-    'MATIC',
-    'ARB',
-    'OP',
-    'PEPE',
-    'DOGE',
-    'SHIB',
   ]);
+  private static readonly TRUSTED_MAJOR_NATIVE_SYMBOLS: Record<
+    string,
+    Set<string>
+  > = {
+    ethereum: new Set(['ETH']),
+  };
+  private static readonly TRUSTED_MAJOR_ERC20_CONTRACTS: Record<
+    string,
+    Record<string, string[]>
+  > = {
+    ethereum: {
+      ETH: ['0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'],
+      WETH: ['0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'],
+      BTC: ['0x2260fac5e5542a773aa44fbcfedf7c193bc2c599'],
+      WBTC: ['0x2260fac5e5542a773aa44fbcfedf7c193bc2c599'],
+      USDT: ['0xdac17f958d2ee523a2206206994597c13d831ec7'],
+      USDC: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+      DAI: ['0x6b175474e89094c44da98b954eedeac495271d0f'],
+      STETH: ['0xae7ab96520de3a18e5e111b5eaab095312d7fe84'],
+      WSTETH: ['0x7f39c581f595b53c5cb5affaecbd4e2f9b6e2ca0'],
+      CBETH: ['0xbe9895146f7af43049ca1c1ae358b0541ea49704'],
+      RETH: ['0xae78736cd615f374d3085123a210448e74fc6393'],
+      LINK: ['0x514910771af9ca656af840dff83e8264ecf986ca'],
+      UNI: ['0x1f9840a85d5af5bf1d1762f925bdaddc4201f984'],
+      AAVE: ['0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9'],
+      MKR: ['0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2'],
+    },
+  };
   private static readonly LIVE_PRICE_CACHE_TTL_MS = 5 * 60 * 1000;
   private readonly logger = new Logger(WalletPricingService.name);
   private readonly coinGeckoApiKey: string;
@@ -306,7 +328,9 @@ export class WalletPricingService {
       }
 
       if (defiLlamaResult.status === 'cached-no-data') {
-        if (!this.hasCoinGeckoHistoricalMapping(token)) {
+        if (
+          !this.hasCoinGeckoHistoricalMapping(token, normalizedContractAddress)
+        ) {
           this.logger.debug(
             `Price cache hit (null): no CoinGecko mapping for ${token}, skipping fallback at ${timestamp}`,
           );
@@ -320,6 +344,7 @@ export class WalletPricingService {
 
       const coinGeckoPrice = await this.fetchCoinGeckoFallbackPrice(
         token,
+        normalizedContractAddress,
         timestamp,
       );
 
@@ -771,10 +796,56 @@ export class WalletPricingService {
     return pricedTrades;
   }
 
-  isKnownInferenceAsset(token: string, contractAddress?: string): boolean {
-    const tokenUpper = token.toUpperCase();
+  isTrustedMajorToken(
+    token: string,
+    contractAddress?: string,
+    chain = WalletPricingService.DEFAULT_TRUST_CHAIN,
+  ): boolean {
+    const normalizedToken = token.trim().toUpperCase();
 
-    if (WalletPricingService.KNOWN_INFERENCE_SYMBOLS.has(tokenUpper)) {
+    if (!normalizedToken) {
+      return false;
+    }
+
+    const normalizedChain = chain.toLowerCase();
+    const normalizedContract = contractAddress?.toLowerCase();
+
+    if (normalizedContract) {
+      const trustedContracts =
+        WalletPricingService.TRUSTED_MAJOR_ERC20_CONTRACTS[normalizedChain]?.[
+          normalizedToken
+        ] ?? [];
+
+      return trustedContracts.includes(normalizedContract);
+    }
+
+    return (
+      WalletPricingService.TRUSTED_MAJOR_NATIVE_SYMBOLS[normalizedChain]?.has(
+        normalizedToken,
+      ) ?? false
+    );
+  }
+
+  isSpoofedMajorSymbol(
+    token: string,
+    contractAddress?: string,
+    chain = WalletPricingService.DEFAULT_TRUST_CHAIN,
+  ): boolean {
+    if (!contractAddress) {
+      return false;
+    }
+
+    const normalizedToken = token.trim().toUpperCase();
+
+    if (!WalletPricingService.KNOWN_INFERENCE_SYMBOLS.has(normalizedToken)) {
+      return false;
+    }
+
+    return !this.isTrustedMajorToken(normalizedToken, contractAddress, chain);
+  }
+
+  isKnownInferenceAsset(token: string, contractAddress?: string): boolean {
+    if (this.isTrustedMajorToken(token, contractAddress)) {
       return true;
     }
 
@@ -803,6 +874,19 @@ export class WalletPricingService {
     unknownTrade: Pick<Trade, 'token' | 'amount' | 'contractAddress' | 'timestamp'>,
     tradesAtTimestampCount: number,
   ): HistoricalPriceCandidate | null {
+    if (
+      this.isSpoofedMajorSymbol(
+        knownTrade.token,
+        knownTrade.contractAddress,
+      ) ||
+      this.isSpoofedMajorSymbol(
+        unknownTrade.token,
+        unknownTrade.contractAddress,
+      )
+    ) {
+      return null;
+    }
+
     const knownAmount = this.parsePositiveNumber(knownTrade.amount);
     const unknownAmount = this.parsePositiveNumber(unknownTrade.amount);
 
@@ -1051,12 +1135,6 @@ export class WalletPricingService {
 
   private static readonly DEFILLAMA_NATIVE_TOKEN_MAP: Record<string, string> = {
     ETH: 'coingecko:ethereum',
-    WETH: 'coingecko:weth',
-    BTC: 'coingecko:bitcoin',
-    WBTC: 'coingecko:wrapped-bitcoin',
-    USDT: 'coingecko:tether',
-    USDC: 'coingecko:usd-coin',
-    DAI: 'coingecko:dai',
   };
 
   private async fetchDefiLlamaPrice(
@@ -1108,6 +1186,14 @@ export class WalletPricingService {
     token: string,
     contractAddress: string | undefined,
   ): string | null {
+    if (contractAddress) {
+      return `ethereum:${contractAddress.toLowerCase()}`;
+    }
+
+    if (!this.isTrustedMajorToken(token, undefined)) {
+      return null;
+    }
+
     const nativeKey =
       WalletPricingService.DEFILLAMA_NATIVE_TOKEN_MAP[token.toUpperCase()];
 
@@ -1115,17 +1201,24 @@ export class WalletPricingService {
       return nativeKey;
     }
 
-    if (contractAddress) {
-      return `ethereum:${contractAddress.toLowerCase()}`;
-    }
-
     return null;
   }
 
   private async fetchCoinGeckoFallbackPrice(
     token: string,
+    contractAddress: string | undefined,
     timestamp: number,
   ): Promise<number> {
+    if (!this.hasCoinGeckoHistoricalMapping(token, contractAddress)) {
+      if (this.isSpoofedMajorSymbol(token, contractAddress)) {
+        this.logger.warn(
+          `[CoinGecko fallback] Skipping symbol-only major fallback for ${token} (${contractAddress})`,
+        );
+      }
+
+      return 0;
+    }
+
     const coinId =
       WalletPricingService.COINGECKO_COIN_ID_MAP[token.toUpperCase()];
 
@@ -1399,7 +1492,14 @@ export class WalletPricingService {
     return `${tokenIdentifier}:${roundedTs}`;
   }
 
-  private hasCoinGeckoHistoricalMapping(token: string): boolean {
+  private hasCoinGeckoHistoricalMapping(
+    token: string,
+    contractAddress?: string,
+  ): boolean {
+    if (!this.isTrustedMajorToken(token, contractAddress)) {
+      return false;
+    }
+
     return Boolean(
       WalletPricingService.COINGECKO_COIN_ID_MAP[token.toUpperCase()],
     );
@@ -1586,8 +1686,12 @@ export class WalletPricingService {
       return { skip: false, reason: 'known_category_map' };
     }
 
-    if (this.isKnownInferenceAsset(token, normalizedContract)) {
-      return { skip: false, reason: 'trusted_token_list' };
+    if (this.isTrustedMajorToken(token, normalizedContract)) {
+      return { skip: false, reason: 'trusted_major_contract' };
+    }
+
+    if (this.isSpoofedMajorSymbol(token, normalizedContract)) {
+      return { skip: false, reason: 'major_symbol_contract_mismatch' };
     }
 
     const tokenLower = token.toLowerCase();
