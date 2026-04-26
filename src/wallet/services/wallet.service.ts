@@ -2,9 +2,8 @@ import { Injectable } from '@nestjs/common';
 import {
   Trade,
   WalletActivityMetricsResponse,
-  WalletClassification,
+  WalletClassificationResult,
   WalletContextResponse,
-  WalletDexMetricsResponse,
   WalletDexMetricsResult,
   WalletFeaturesResponse,
   WalletHoldingsResponse,
@@ -14,8 +13,7 @@ import {
   WalletPnLResponse,
   WalletPortfolioResponse,
   WalletRiskMetricsResult,
-  WalletRiskMetricsResponse,
-  WalletScoreResult,
+  WalletScoreOrTriageResult,
   StoredWalletTransactionsResponse,
   WalletSummaryResponse,
   WalletTokenCategoryMetricsResponse,
@@ -29,6 +27,7 @@ import { WalletCoreService } from './wallet-core.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
 import { WalletScoringService } from './scoring.service';
+import { WalletTriageService } from './wallet-triage.service';
 
 @Injectable()
 export class WalletService {
@@ -40,6 +39,7 @@ export class WalletService {
     private readonly walletContextService: WalletContextService,
     private readonly walletScoringService: WalletScoringService,
     private readonly classificationService: ClassificationService,
+    private readonly walletTriageService: WalletTriageService,
   ) {}
 
   async getWalletData(address: string): Promise<WalletTransactionsResponse> {
@@ -93,11 +93,26 @@ export class WalletService {
     return this.walletContextService.getWalletContext(address);
   }
 
-  async getWalletScore(address: string, debug = false): Promise<WalletScoreResult> {
+  async getWalletScore(
+    address: string,
+    debug = false,
+  ): Promise<WalletScoreOrTriageResult> {
+    const triage = await this.walletTriageService.getWalletTriage(address);
+
+    if (triage && !triage.traderEligible) {
+      return triage;
+    }
+
     return this.walletScoringService.getWalletScore(address, debug);
   }
 
-  async getClassification(address: string): Promise<WalletClassification> {
+  async getClassification(address: string): Promise<WalletClassificationResult> {
+    const triage = await this.walletTriageService.getWalletTriage(address);
+
+    if (triage && !triage.traderEligible) {
+      return triage;
+    }
+
     return this.classificationService.getClassification(address);
   }
 
