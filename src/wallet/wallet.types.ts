@@ -706,7 +706,7 @@ export interface WalletIntelligenceLiteResponse {
   classification: WalletIntelligenceClassification;
 }
 
-export interface WalletIntelligenceResponse
+export interface WalletIntelligence
   extends WalletIntelligenceLiteResponse {
   context: WalletIntelligenceContext;
   portfolio: WalletPortfolioResponse;
@@ -715,7 +715,10 @@ export interface WalletIntelligenceResponse
   hiddenPortfolio?: WalletPortfolioResponse;
   fullPortfolio?: WalletPortfolioResponse;
   features: WalletIntelligenceFeatures;
+  aiSummary: string | null;
 }
+
+export type WalletIntelligenceResponse = WalletIntelligence;
 
 export type WalletIntelligenceResult =
   | WalletIntelligenceLiteResponse
