@@ -300,14 +300,16 @@ export class WalletService {
         : {}),
       features,
       aiSummary: null,
+      deepAnalysis: null,
     };
-    const aiSummary = await this.walletAiService.generateSummary(
-      normalizedAddress,
-      intelligencePayload,
-    );
+    const [aiSummary, deepAnalysis] = await Promise.all([
+      this.walletAiService.generateSummary(address, intelligencePayload),
+      this.walletAiService.generateDeepAnalysis(address, intelligencePayload),
+    ]);
     const response: WalletIntelligenceResponse = {
       ...intelligencePayload,
       aiSummary,
+      deepAnalysis,
     };
 
     this.setCachedIntelligence(cacheKey, response);
