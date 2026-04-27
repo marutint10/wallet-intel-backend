@@ -607,6 +607,7 @@ Current base response fields:
 - `score`
 - `classification`
 - `aiSummary`
+- `deepAnalysis`
 - `portfolio`
 - `visiblePortfolio`
 - `portfolioSummary`
@@ -630,20 +631,39 @@ Current behavior notes:
 - smart-contract triage is evaluated once; when triage applies, both score and classification preserve the existing triage payload behavior
 - `portfolio` in intelligence is a curated default list (`visiblePortfolio` plus top speculative additions)
 - `metrics` includes ROI/PnL metrics, capital base, portfolio scale, lifetime trade-volume metrics, pricing coverage, and trust signals
-- `aiSummary` is only returned by the intelligence endpoint surface; score and classification endpoints do not include it
+- `aiSummary` and `deepAnalysis` are only returned by the intelligence endpoint surface; score and classification endpoints do not include them
 - responses are cached in-memory by `address + lite + verbose` key with `90s` TTL to reduce repeated heavy computations
 
-AI summary layer details:
+Dual AI layer details:
 
 - service: `WalletAiService`
-- cache key: `ai_summary:{address}` (lowercased address)
-- cache TTL: `86400` seconds (24 hours)
-- model: `claude-sonnet-4-6`
-- prompt paths:
+- summary model provider: Gemini
+	- primary model: `gemini-2.5-flash`
+	- automatic fallback model: `gemini-2.5-flash-lite`
+	- cache key: `ai_summary:{address}` (lowercased address)
+	- cache TTL: `86400` seconds (24 hours)
+	- fallback cache TTL: `1800` seconds (30 minutes)
+	- usage tier: free tier
+	- output role: short data narration (2-3 sentence summary)
+	- response quality gate: rejects empty/truncated outputs (for example `MAX_TOKENS` partial completions) before accepting/caching
+- deep analysis model provider: Claude (`claude-sonnet-4-6`)
+	- cache key: `ai_analysis:{address}` (lowercased address)
+	- cache TTL: `86400` seconds (24 hours)
+	- fallback cache TTL: `1800` seconds (30 minutes)
+	- usage tier: paid
+	- output role: structured analytical JSON
+	- parse hardening: supports direct JSON, fenced JSON, and first-object extraction before fallback
+- prompt paths for both summary and deep analysis:
 	- path 1 for trader/holder intelligence payloads
 	- path 2 for triage payloads (`triage_contract` / `triage_operational` or `traderEligible = false`)
 - holdings context uses top 3 entries from `visiblePortfolio` sorted by `usdValue` descending; if fewer than 3 holdings exist, all available entries are used
-- on Claude API failure or empty output, `aiSummary` is set to `null` and the intelligence response still returns successfully
+- deep analysis JSON output shapes:
+	- `WalletDeepAnalysis` (trader/holder wallets): `strategyDiagnosis`, `skillVsLuck`, `hiddenRisks`, `copyTradeVerdict`, `behavioralEdge`, `oneSentenceTruth`
+	- `WalletTriageDeepAnalysis` (triage wallets): `entityDiagnosis`, `holdingAssessment`, `notablePattern`, `oneSentenceTruth`
+- AI failure isolation and resilience:
+	- `aiSummary` and `deepAnalysis` are computed independently and cached independently
+	- provider errors in one field do not block the other or the main intelligence payload
+	- when external AI providers fail, deterministic local fallback content is returned and short-TTL cached to avoid repeated transient failures
 
 ROI field naming transition (intelligence payload):
 
