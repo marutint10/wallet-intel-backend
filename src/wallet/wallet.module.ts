@@ -1,3 +1,4 @@
+import { CacheModule } from '@nestjs/cache-manager';
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JsonRpcProvider } from 'ethers';
@@ -14,6 +15,7 @@ import {
   WalletPnlService,
   WalletPortfolioService,
   WalletPricingService,
+  WalletAiService,
   WalletScoringService,
   WalletService,
   HybridHoldingsService,
@@ -24,6 +26,7 @@ import { TransactionEntity } from './transaction.entity';
 
 @Module({
   imports: [
+    CacheModule.register(),
     TypeOrmModule.forFeature([TransactionEntity, WalletKnownTokenEntity]),
   ],
   controllers: [WalletController],
@@ -33,6 +36,7 @@ import { TransactionEntity } from './transaction.entity';
     WalletContextService,
     WalletCoreService,
     WalletPricingService,
+    WalletAiService,
     WalletPnlService,
     WalletPortfolioService,
     WalletService,
