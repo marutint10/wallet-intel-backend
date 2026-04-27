@@ -17,6 +17,9 @@ export default () => ({
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY ?? '',
   },
+  gemini: {
+    apiKey: process.env.GEMINI_API_KEY ?? '',
+  },
   moralis: {
     apiKey: process.env.MORALIS_API_KEY ?? process.env.MORALIS_API_KEY_1 ?? '',
     apiKey1: process.env.MORALIS_API_KEY_1 ?? process.env.MORALIS_API_KEY ?? '',
