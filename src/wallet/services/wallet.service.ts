@@ -6,6 +6,7 @@ import {
   WalletIntelligenceClassification,
   WalletIntelligenceContext,
   WalletIntelligenceFeatures,
+  WalletIntelligence,
   WalletIntelligenceLiteResponse,
   WalletIntelligenceMetrics,
   WalletIntelligenceOptions,
@@ -39,6 +40,7 @@ import { WalletCoreService } from './wallet-core.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
 import { PricedTrade, WalletPricingService } from './wallet-pricing.service';
+import { WalletAiService } from './wallet-ai.service';
 import { WalletScoringService } from './scoring.service';
 import { WalletTriageService } from './wallet-triage.service';
 
@@ -92,6 +94,7 @@ export class WalletService {
     private readonly walletScoringService: WalletScoringService,
     private readonly classificationService: ClassificationService,
     private readonly walletTriageService: WalletTriageService,
+    private readonly walletAiService: WalletAiService,
   ) {}
 
   async getWalletData(address: string): Promise<WalletTransactionsResponse> {
@@ -278,7 +281,7 @@ export class WalletService {
       activity,
       verbose,
     );
-    const response: WalletIntelligenceResponse = {
+    const intelligencePayload: WalletIntelligence = {
       address: summary.address,
       analyzedAt,
       context: this.shapeContextByVerbosity(context, verbose),
@@ -296,6 +299,15 @@ export class WalletService {
           }
         : {}),
       features,
+      aiSummary: null,
+    };
+    const aiSummary = await this.walletAiService.generateSummary(
+      normalizedAddress,
+      intelligencePayload,
+    );
+    const response: WalletIntelligenceResponse = {
+      ...intelligencePayload,
+      aiSummary,
     };
 
     this.setCachedIntelligence(cacheKey, response);
