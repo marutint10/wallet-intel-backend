@@ -706,6 +706,29 @@ export interface WalletIntelligenceLiteResponse {
   classification: WalletIntelligenceClassification;
 }
 
+export interface WalletDeepAnalysis {
+  strategyDiagnosis: string;
+  skillVsLuck: {
+    verdict: 'skilled' | 'lucky' | 'mixed' | 'unskilled';
+    confidence: 'high' | 'medium' | 'low';
+    reasoning: string;
+  };
+  hiddenRisks: string[];
+  copyTradeVerdict: {
+    recommendation: 'follow' | 'watch' | 'avoid';
+    reasoning: string;
+  };
+  behavioralEdge: string;
+  oneSentenceTruth: string;
+}
+
+export interface WalletTriageDeepAnalysis {
+  entityDiagnosis: string;
+  holdingAssessment: string;
+  notablePattern: string;
+  oneSentenceTruth: string;
+}
+
 export interface WalletIntelligence
   extends WalletIntelligenceLiteResponse {
   context: WalletIntelligenceContext;
@@ -716,6 +739,7 @@ export interface WalletIntelligence
   fullPortfolio?: WalletPortfolioResponse;
   features: WalletIntelligenceFeatures;
   aiSummary: string | null;
+  deepAnalysis: WalletDeepAnalysis | WalletTriageDeepAnalysis | null;
 }
 
 export type WalletIntelligenceResponse = WalletIntelligence;
