@@ -38,6 +38,7 @@ Current capabilities:
 - return token category analytics from priced trades and current portfolio holdings
 - return aggregated wallet features combining summary and analytics views
 - return a V1 smart-money score using fixed bracket scoring on existing analytics outputs
+- return unified intelligence responses with trust signals, pricing coverage, lifetime trade-volume metrics, and curated/visible portfolio slices
 
 ## 2. Current architecture
 
@@ -65,15 +66,15 @@ Responsibilities:
 - delegate ingestion calls to `WalletCoreService`
 - delegate PnL calls to `WalletPnlService`
 - delegate holdings, ledger, and portfolio calls to `WalletPortfolioService`
-- delegate live holdings to `HybridHoldingsService`
 - delegate risk, hold-time, and activity analytics to `WalletAnalyticsService`
 - delegate wallet archetype/context detection to `WalletContextService`
 - run contract and operational triage through `WalletTriageService` before score and behavior classification endpoints
 - delegate wallet behavior classification to `ClassificationService`
 - delegate V1 smart-money scoring to `WalletScoringService`
 - compose the unified wallet features response from existing service methods
-- compose unified wallet intelligence responses across context, summary, score, classification, portfolio, and features
-- cache `/wallet/:address/intelligence` responses in-memory (wallet+query keyed) with short TTL to reduce repeated recomputation
+- compose unified wallet intelligence responses across context, summary, metrics, score, classification, and portfolio surfaces
+- shape intelligence payload verbosity by stripping or retaining reasoning fields depending on `verbose`
+- cache `/wallet/:address/intelligence` responses in-memory (wallet+query keyed) with `90s` TTL to reduce repeated recomputation
 
 ### WalletAnalyticsService
 
@@ -133,10 +134,14 @@ Responsibilities:
 
 - reuse existing context, summary, activity, risk, DEX, and token-category service methods
 - apply score gate rules before scoring ineligible trader wallets
-- score trader wallets across profitability, consistency, risk management, portfolio quality, and experience
+- score trader wallets across `traderWeightedROI`, `realizedPnLQuality`, `consistency`, `riskManagement`, `portfolioQuality`, `experience`, and `marketAdaptability`
+- include legacy `profitability` in the score breakdown as `traderWeightedROI + realizedPnLQuality`
 - score holder wallets across portfolio quality, conviction, portfolio size, and asset selection
+- apply holder score scaling by portfolio size and liquidity-confidence filtering
+- apply trader guardrails including gambler penalty plus weighted-ROI score/band hard caps
+- return narrative `scoreExplanation` with positives, negatives, and summary
 - return `balancesAvailable` so downstream consumers can distinguish empty holdings from unavailable live balances
-- assign confidence from swap count and trading-span coverage for traders, and from portfolio breadth, size, and holding duration for holders
+- delegate confidence estimation to `WalletConfidenceService`
 - return a structured score response with dimension breakdowns and explicit `scorePath` (`trader` or `holder`)
 
 ### WalletConfidenceService
@@ -160,8 +165,8 @@ This is the higher-level behavior-classification layer.
 
 Responsibilities:
 
-- classify trader wallets into narrative archetypes such as `Diamond Hand`, `Swing Trader`, `Sniper`, or `DeFi Strategist`
-- classify holder wallets into archetypes such as `Blue Chip Maximalist`, `Diversified Holder`, or `Dust Wallet`
+- classify trader wallets into archetypes such as `Diamond Hand`, `Swing Trader`, `Day Trader`, `Rotation Trader`, `Meme Hunter`, `Bot / Automated`, `Accumulator`, and `Whale`
+- classify holder wallets into archetypes such as `Diamond Hands`, `Blue Chip Maximalist`, `Diversified Holder`, `Stablecoin Parker`, `DeFi Strategist`, `Whale Holder`, and `Dust Wallet`
 - fall back to `Empty Wallet` when live balances are unavailable or no positive-value holdings exist for non-trader wallets
 - return a structured classification response with confidence, traits, risk profile, secondary types, and score breakdowns per archetype
 
@@ -194,6 +199,7 @@ Responsibilities:
 
 - fetch current ERC-20 prices from CoinGecko
 - fetch current ETH/USD price from CoinGecko
+- fetch current token market signals by combining DefiLlama, DexScreener, and CoinGecko
 - fetch historical trade prices from DefiLlama with CoinGecko fallback
 - fetch historical transfer-in market prices from DefiLlama only
 - infer one missing swap-leg price when the opposite side is priced
@@ -202,7 +208,7 @@ Responsibilities:
 - store negative-cache entries for confirmed no-data misses to avoid repeated failed lookups
 - limit DefiLlama concurrency to 5 simultaneous requests with 100 ms inter-request spacing
 - retry DefiLlama 429 responses with exponential backoff (2 s first retry, 4 s second retry, 2 retries maximum)
-- engage a global 15-second DefiLlama cooldown when 5 or more 429s are received within a 10-second window
+- apply provider-level circuit breakers (`defillama`, `coingecko`, `dexscreener`) with 30-second cooldown when 6 rate-limit hits occur within a 30-second window
 
 ### WalletPnlService
 
@@ -239,8 +245,8 @@ This is a pure stateless classification module (`portfolio-tier.classifier.ts`).
 
 Responsibilities:
 
-- classify each portfolio item into one of three display tiers: `core`, `secondary`, or `hidden`
-- use token pricing, allocation, symbol allowlist, spam keyword detection, symbol length, trade history, and known-protocol contract lookup as classification signals
+- classify each portfolio item into one of four display tiers: `core`, `active`, `secondary`, or `hidden`
+- compute a token quality score (`0-100`) and quality label (`visible`, `speculative`, `hidden`, or `spoofed_major_symbol`) from pricing, liquidity, trade history, spam signals, and trusted-token signals
 - attach an optional `hiddenReason` string to items classified as `hidden`
 - operate without side effects; accepts portfolio item fields and a set of traded token symbols as inputs
 
@@ -281,11 +287,11 @@ Current config values:
 
 - `PORT`
 - `MORALIS_API_KEY` or `MORALIS_API_KEY_1` — first Moralis API key (interchangeable; `MORALIS_API_KEY_1` takes precedence when both are set)
-- `MORALIS_API_KEY_2` — optional second Moralis API key for key rotation
+- `MORALIS_API_KEY_2` (or legacy fallback `MORALIS_API_URL_2`) — optional second Moralis API key for key rotation
 - `COINGECKO_API_KEY`
 - `ETH_RPC_URL`
 - `DATABASE_URL`
-- `DATABASE_SSL`
+- `DATABASE_SSL` (`1|true|yes|on` => enabled)
 - `DATABASE_CONNECTION_TIMEOUT_MS`
 - `TX_FETCH_LIMIT` (code constant in `src/config/constants.ts`, default `1000`)
 
@@ -315,7 +321,7 @@ Current usage:
 
 - native ETH balance via `provider.getBalance()`
 - ERC-20 balances batched through Multicall3 `aggregate3()` in groups of 150
-- wallet bytecode lookup for `WalletContextService` address-type detection
+- wallet bytecode lookup for `WalletTriageService` contract/EOA triage
 
 ### DefiLlama
 
@@ -325,6 +331,16 @@ Current usage:
 
 - historical trade pricing
 - historical market pricing for transfer-in lots
+- live token price inputs for portfolio quality/pricing signal composition
+
+### DexScreener
+
+DexScreener is used as a market-signal source.
+
+Current usage:
+
+- live token price fallback signals for portfolio valuation when available
+- per-token liquidity (`liquidityUsd`) used in portfolio quality and holder-score scaling filters
 
 ### CoinGecko
 
@@ -332,7 +348,8 @@ CoinGecko is used for:
 
 - current ERC-20 USD prices
 - current ETH/USD price
-- fallback historical trade pricing for supported tokens when DefiLlama has no answer
+- fallback historical trade pricing for supported trusted-major tokens when DefiLlama has no answer
+- live token pricing fallback input for token market signals
 
 ## 6. Database model
 
@@ -456,7 +473,7 @@ This is the main presentation endpoint for current holdings analytics.
 It is built from:
 
 - live balances from `HybridHoldingsService` (direct RPC + Multicall3), with Moralis fallback when needed
-- current prices from CoinGecko
+- current token market signals from `WalletPricingService` (DefiLlama + DexScreener + CoinGecko), plus ETH/USD from CoinGecko
 - normalized stored history for holding analytics and cost basis
 
 Current response fields:
@@ -473,6 +490,10 @@ Current response fields:
 - `roi`
 - `priceUnavailable`
 - `displayTier`
+- `tokenQualityScore?`
+- `tokenQualityLabel?`
+- `priceSources?`
+- `liquidityUsd?`
 - `hiddenReason?`
 - `decimals?`
 - `contractAddress?`
@@ -481,7 +502,7 @@ Important note:
 
 - `pnl` and `roi` on this endpoint are unrealized metrics for the current remaining position
 - when live pricing is unavailable, `currentPrice`, `usdValue`, `pnl`, and `roi` return `null`, and `priceUnavailable` returns `true`
-- `displayTier` classifies each asset for UI rendering: `core` (show prominently), `secondary` (show in expanded section), `hidden` (collapse or omit)
+- `displayTier` classifies each asset for UI rendering: `core` (primary), `active` (speculative but currently relevant), `secondary` (lower-priority visible), `hidden` (suppressed)
 - `hiddenReason` is only present when `displayTier = hidden` and explains why the asset was suppressed
 
 ### GET /wallet/:address/ledger
@@ -582,26 +603,33 @@ Current base response fields:
 - `analyzedAt`
 - `context`
 - `summary`
+- `metrics`
 - `score`
 - `classification`
 - `portfolio`
+- `visiblePortfolio`
+- `portfolioSummary`
 - `features`
 
 Supported query params:
 
-- `lite=true`
-	- returns only `summary`, `score`, and `classification` (plus `address` and `analyzedAt`)
-- `verbose=true`
+
+- `lite=true` (or `lite=1`)
+	- returns the lite payload: `address`, `analyzedAt`, `summary`, `metrics`, `score`, and `classification`
+- `verbose=true` (or `verbose=1`)
 	- includes reasoning fields in `context` and triage responses
 	- includes `confidenceReasoning` in score/classification responses
 	- includes `features.rawFeatureMetrics` (risk, hold-time, and activity raw metrics)
+	- on full (non-lite) responses, includes `hiddenPortfolio` and `fullPortfolio`
 
 Current behavior notes:
 
 - this endpoint reuses existing wallet services instead of introducing new scoring or classification engines
 - it avoids duplicate response assembly work by reusing one fetched summary/activity snapshot for context+features composition
 - smart-contract triage is evaluated once; when triage applies, both score and classification preserve the existing triage payload behavior
-- responses are cached in-memory by `address + lite + verbose` key with short TTL to reduce repeated heavy computations
+- `portfolio` in intelligence is a curated default list (`visiblePortfolio` plus top speculative additions)
+- `metrics` includes ROI/PnL metrics, capital base, portfolio scale, lifetime trade-volume metrics, pricing coverage, and trust signals
+- responses are cached in-memory by `address + lite + verbose` key with `90s` TTL to reduce repeated heavy computations
 
 ROI field naming transition (intelligence payload):
 
@@ -641,26 +669,27 @@ Current fields:
 
 Current behavior notes:
 
-- `walletType` is derived from `eth_getCode`: bytecode present => `Contract`, otherwise `EOA`
-- Gnosis Safe detection uses a heuristic bytecode pattern check for the Safe proxy `masterCopy()` selector
+- triage is evaluated first; when triage applies, context returns triage wallet type/subtype and forces `isTraderWallet = false`
+- when triage does not apply, context defaults to `walletType = EOA`
 - `isTraderWallet = true` when `total_swaps >= 3`
-- `walletSubtype = Operational/Treasury` when `txCount > 50`, `transferRatio > 80%`, and `swaps <= 2`
-- `walletSubtype = Automated/Bot-like` when `tradesPerActiveDay > 20` and `avgTradeGapHours < 1`
-- Gnosis Safe subtype takes precedence over the treasury and bot-like heuristic labels because it is a stronger structural signal
+- `walletSubtype = Automated/Bot-like` when `tradesPerActiveDay > 20` and `avgTradeGapHours < 1`; otherwise subtype is `null`
+- `classificationConfidence` is derived from triage confidence (`confidenceScore / 100`) on triage paths, or from context heuristics on non-triage EOAs
 
 ### GET /wallet/:address/score
 
-Returns either contract triage output or the V1 smart-money score derived from existing analytics endpoints and context classification.
+Returns either triage output (contract or operational EOA) or the V1 smart-money score derived from existing analytics endpoints and context classification.
 
 Current fields:
 
-- contract triage response for smart contracts:
+- triage response (contract or operational EOA):
 	- `walletType`
 	- `walletSubtype`
 	- `traderEligible` (`false`)
+	- `scorePath`
 	- `confidence`
 	- `confidenceLabel`
 	- `confidenceScore`
+	- `confidenceReason`
 	- `confidenceReasoning`
 	- `score` (`null`)
 	- `scoreBand` (`null`)
@@ -668,12 +697,15 @@ Current fields:
 - score response for EOAs:
 	- `address`
 	- `score`
+	- `scorePath`
 	- `confidence`
 	- `confidenceLabel`
 	- `confidenceScore`
+	- `confidenceReason`
 	- `confidenceReasoning`
 	- `band`
 	- `breakdown`
+	- `scoreExplanation`
 	- `gateStatus`
 	- `balancesAvailable`
 	- `scoredAt`
@@ -687,7 +719,8 @@ Current behavior notes:
 - trader wallets that pass gating return `gateStatus = Eligible`
 - non-trader wallets with positive-value holdings are scored on a holder path and return `gateStatus = Eligible (Holder)`
 - non-trader wallets with no positive-value holdings return `gateStatus = Empty Wallet`, `score = 0`, `band = Unscored`, and zeroed holder breakdowns
-- trader scoring uses five weighted dimensions: profitability `30`, consistency `20`, risk management `20`, portfolio quality `15`, experience `15`
+- trader scoring uses seven primary weighted dimensions: `traderWeightedROI 25`, `realizedPnLQuality 15`, `consistency 15`, `riskManagement 20`, `portfolioQuality 10`, `experience 10`, `marketAdaptability 5`
+- `profitability` is retained in the breakdown/debug surface as a legacy aggregate (`traderWeightedROI + realizedPnLQuality`)
 - holder scoring uses four weighted dimensions: portfolio quality `35`, conviction `30`, portfolio size `20`, asset selection `15`
 - holder scores are scaled by a portfolio-size multiplier before band assignment
 - holder portfolio-size scaling excludes low-confidence holdings from scale inputs only (`totalPortfolioUsd`, `largestPositionUsd`, multiplier input):
@@ -696,23 +729,26 @@ Current behavior notes:
 - trader realized PnL quality applies tiny-sample dampening (scoring path only, based on realized trade count):
 	- `profitFactor`: `< 5 trades => 1.0`, `5-9 trades => min(actual, 2.5)`, `>= 10 trades => actual`
 	- `bestWorstRatio`: `< 5 trades => 1.0`, `5-9 trades => min(actual, 2.0)`, `>= 10 trades => actual`
+- trader guardrails include gambler penalty (`profitFactor < 0.5` and swaps > 50) and weighted-ROI hard caps (`traderWeightedROI < -20` band cap, `< -40` score cap)
 - raw analytics endpoints remain unchanged; dampening is applied only inside `/wallet/:address/score` scoring calculations
 - `balancesAvailable` is `false` when live balances could not be loaded, which lets score consumers distinguish provider availability problems from a true empty wallet
 - `GET /wallet/:address/score?debug=true` returns the base response plus per-dimension debug metrics for the active scoring path
 
 ### GET /wallet/:address/classification
 
-Returns either contract triage output or a higher-level wallet behavior classification built on top of context, analytics, and holdings data.
+Returns either triage output (contract or operational EOA) or a higher-level wallet behavior classification built on top of context, analytics, and holdings data.
 
 Current fields:
 
-- contract triage response for smart contracts:
+- triage response (contract or operational EOA):
 	- `walletType`
 	- `walletSubtype`
 	- `traderEligible` (`false`)
+	- `scorePath`
 	- `confidence`
 	- `confidenceLabel`
 	- `confidenceScore`
+	- `confidenceReason`
 	- `confidenceReasoning`
 	- `score` (`null`)
 	- `scoreBand` (`null`)
@@ -725,11 +761,13 @@ Current fields:
 	- `confidence`
 	- `confidenceLabel`
 	- `confidenceScore`
+	- `confidenceReason`
 	- `confidenceReasoning`
 	- `description`
 	- `traits`
 	- `riskProfile`
 	- `secondaryTypes`
+	- `scoreBreakdown`
 	- `allScores`
 	- `classifiedAt`
 
@@ -738,7 +776,7 @@ Current behavior notes:
 - contract wallets are triaged first and return the short-circuit triage payload
 - EOAs continue through the existing classification pipeline unchanged
 - low-confidence classifications are softened and explicitly marked as directional
-- trader wallets are classified with a weighted-archetype system over summary, hold-time, activity, DEX, risk, and token-category signals
+- trader wallets are classified with a weighted-archetype system into `Diamond Hand`, `Swing Trader`, `Day Trader`, `Rotation Trader`, `Meme Hunter`, `Bot / Automated`, `Accumulator`, and `Whale`
 - holder wallets are classified with a weighted-archetype system over live portfolio composition, holding duration, unrealized posture, and category exposure
 - non-trader wallets with no positive-value holdings, or with unavailable live balances, fall back to `Empty Wallet`
 - the response returns the winning archetype in both `type` and `primaryType`
@@ -1092,7 +1130,7 @@ Completed FIFO lot matches from this same queueing logic are also reused by `Wal
 It combines four inputs:
 
 1. live balances from `HybridHoldingsService`
-2. current market prices from CoinGecko
+2. token market signals from DefiLlama, DexScreener, and CoinGecko (plus ETH/USD from CoinGecko)
 3. normalized stored history for holding analytics and cost basis
 4. stored swap transactions for traded-token signals used in tier classification
 
@@ -1104,8 +1142,8 @@ The service calls `getHoldings()`.
 
 The service fetches:
 
-- current ERC-20 prices by contract address
-- current ETH/USD price
+- token market signals by contract address (price + liquidity + source provenance) from DefiLlama, DexScreener, and CoinGecko
+- current ETH/USD price from CoinGecko
 
 These are used for:
 
@@ -1177,28 +1215,23 @@ Important behavior:
 
 ### Step 6: classify display tier
 
-After all enriched metrics are computed, each portfolio item is passed to `classifyPortfolioTier()` together with the wallet's traded-token symbol set.
+After all enriched metrics are computed, each portfolio item is passed to `classifyPortfolioTier()` together with wallet tier signals and per-token market signals.
 
-Tier rules:
+Classification model:
 
-**core** — assigned when any of the following are true:
-- `usdValue > 0`
-- `allocation > 0`
-- `currentPrice` is present
-- symbol is in the core allowlist: `ETH WETH USDC USDT DAI WBTC AAVE LINK UNI LDO OP ARB`
+- first, hard-hide spoofed major symbols (`tokenQualityLabel = spoofed_major_symbol`)
+- assign guaranteed `core` visibility for material major/stable assets (for example high-value `ETH/WETH/BTC/stable` holdings)
+- compute `tokenQualityScore` (`0-100`) from price availability, liquidity, recency/history of trading activity, trusted-token signals, spam keywords, dust/low-value signals, and airdrop-pattern signals
+- map score to quality label:
+	- `>= 70` => `visible`
+	- `35-69.99` => `speculative`
+	- `< 35` => `hidden`
+- map label to display tier:
+	- `visible` => `core`
+	- `speculative` => `active` when recent/material/liquid, otherwise `secondary`
+	- `hidden` => `hidden` with `hiddenReason`
 
-**hidden** — checked next, assigned when any of the following are true:
-- token symbol contains a spam keyword: `claim`, `reward`, `receive at`, `visit`, `airdrop`, `bonus`, `free`
-- token symbol length exceeds 20 characters
-- token is fully unpriced (`priceUnavailable`, `allocation = 0`, `usdValue = null`) with no swap trade history and no match in the known-protocol contract map
-- token amount is below the dust threshold (0.001) with no swap trade history and no known-protocol contract match
-
-**secondary** — assigned to everything that is not core and not hidden:
-- `priceUnavailable = true` AND (`SY-`/`YT-`/`PT-` prefix OR amount ≥ 0.001)
-
-**fallback hidden** — any item that passes none of the above positive secondary conditions.
-
-All raw fields are preserved on every item. `displayTier` and optionally `hiddenReason` are appended. No items are removed from the response.
+All raw fields are preserved on every item. Tier metadata fields (`displayTier`, `tokenQualityScore`, `tokenQualityLabel`, `priceSources`, `liquidityUsd`, and optional `hiddenReason`) are appended.
 
 ## 17. Average buy price rules
 
@@ -1233,7 +1266,7 @@ Current resilience rules:
 - negative-cache entries for confirmed no-data misses avoid repeated failed DefiLlama lookups
 - DefiLlama concurrency is capped at 5 simultaneous requests with 100 ms spacing to stay within rate limits
 - DefiLlama 429 responses trigger exponential backoff (2 s then 4 s, 2 retries maximum)
-- a global 15-second DefiLlama cooldown is engaged when 5 or more 429 responses are received within a 10-second window
+- pricing providers (`defillama`, `coingecko`, `dexscreener`) use circuit breakers with a 30-second cooldown when 6 rate-limit hits are observed within a 30-second window
 - `HybridHoldingsService` maintains a 5-minute in-memory cache per wallet; a cache miss triggers a full RPC + Multicall3 refresh
 
 ## 19. Current assumptions and limits
