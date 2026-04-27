@@ -230,25 +230,35 @@ export class WalletPnlService {
   }
 
   computeMedianRealizedTradeRoi(pricedTrades: PricedTrade[]): number {
-    const realizedRois = this.analyzePricedTrades(pricedTrades)
-      .realizedTradeMetrics.map((metric) => metric.roi)
+    const pricedLotRois = this.analyzePricedTrades(pricedTrades)
+      .completedTradeLots
+      .filter(
+        (lot) =>
+          Number.isFinite(lot.buyPrice) &&
+          lot.buyPrice > 0 &&
+          Number.isFinite(lot.sellPrice) &&
+          lot.sellPrice > 0 &&
+          Number.isFinite(lot.costBasis) &&
+          lot.costBasis > 0,
+      )
+      .map((lot) => this.roundDecimal((lot.pnl / lot.costBasis) * 100, 4))
       .filter((roi) => Number.isFinite(roi))
       .sort((left, right) => left - right);
 
-    if (realizedRois.length === 0) {
+    if (pricedLotRois.length === 0) {
       return 0;
     }
 
-    const middleIndex = Math.floor(realizedRois.length / 2);
+    const middleIndex = Math.floor(pricedLotRois.length / 2);
 
-    if (realizedRois.length % 2 === 0) {
+    if (pricedLotRois.length % 2 === 0) {
       return this.roundDecimal(
-        (realizedRois[middleIndex - 1] + realizedRois[middleIndex]) / 2,
+        (pricedLotRois[middleIndex - 1] + pricedLotRois[middleIndex]) / 2,
         4,
       );
     }
 
-    return this.roundDecimal(realizedRois[middleIndex], 4);
+    return this.roundDecimal(pricedLotRois[middleIndex], 4);
   }
 
   async getCompletedTradeLots(address: string): Promise<CompletedTradeLot[]> {
