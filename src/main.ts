@@ -12,7 +12,7 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
 
   const configService = app.get(ConfigService);
-  const port = configService.get<number>('port') ?? 3000;
+  const port = configService.get<number>('PORT') ?? 3001;
 
   await app.listen(port);
   Logger.log(`Server listening on http://localhost:${port}`, 'Bootstrap');
