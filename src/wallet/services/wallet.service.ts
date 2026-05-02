@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import {
   Trade,
   WalletActivityMetricsResponse,
+  WalletCumulativePnLEntry,
   WalletClassificationResult,
   WalletIntelligenceClassification,
   WalletIntelligenceContext,
@@ -37,7 +38,10 @@ import { WalletAnalyticsService } from './wallet-analytics.service';
 import { ClassificationService } from './classification.service';
 import { WalletContextService } from './wallet-context.service';
 import { WalletCoreService } from './wallet-core.service';
-import { WalletPnlService } from './wallet-pnl.service';
+import {
+  RealizedTradeMetrics,
+  WalletPnlService,
+} from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
 import { PricedTrade, WalletPricingService } from './wallet-pricing.service';
 import { WalletAiService } from './wallet-ai.service';
@@ -215,14 +219,22 @@ export class WalletService {
         this.walletAnalyticsService.getRiskMetrics(normalizedAddress),
         this.walletPortfolioService.getPortfolio(normalizedAddress),
       ]);
-    const metrics = await this.buildRoiMetrics(
-      normalizedAddress,
-      summary,
-      fullPortfolio,
-      riskMetrics,
-    );
-    const portfolioSummary = this.buildPortfolioSummary(fullPortfolio, metrics);
     const visiblePortfolio = this.buildVisiblePortfolio(fullPortfolio);
+    const [metrics, realizedTrades] = await Promise.all([
+      this.buildRoiMetrics(
+        normalizedAddress,
+        summary,
+        fullPortfolio,
+        riskMetrics,
+      ),
+      this.walletPnlService.getRealizedTradeMetrics(normalizedAddress),
+    ]);
+    const cumulativePnL = this.buildCumulativePnL(realizedTrades);
+    const portfolioSummary = this.buildPortfolioSummary(
+      fullPortfolio,
+      visiblePortfolio,
+      metrics,
+    );
     const visiblePortfolioKeys = new Set(
       visiblePortfolio.map((item) => this.getPortfolioItemIdentity(item)),
     );
@@ -292,6 +304,7 @@ export class WalletService {
       portfolio: defaultPortfolio,
       visiblePortfolio,
       portfolioSummary,
+      cumulativePnL,
       ...(verbose
         ? {
             hiddenPortfolio,
@@ -1384,6 +1397,7 @@ export class WalletService {
 
   private buildPortfolioSummary(
     portfolio: WalletPortfolioResponse,
+    visiblePortfolio: WalletPortfolioResponse,
     metrics?: Pick<
       WalletIntelligenceMetrics,
       'portfolioTotalValueUsd' | 'lifetimeTradeVolumeUsd'
@@ -1413,7 +1427,38 @@ export class WalletService {
       hiddenUsdValue: this.roundDecimal(hiddenUsdValue).toString(),
       spamCount,
       uiSummary: `+${hiddenItems.length} hidden inactive / spam assets${scaleSummary}`,
+      totalPortfolioValueUsd: this.computeVisiblePortfolioTotalUsd(
+        visiblePortfolio,
+      ),
     };
+  }
+
+  private buildCumulativePnL(
+    realizedTrades: RealizedTradeMetrics[],
+  ): WalletCumulativePnLEntry[] {
+    let cumulativePnl = 0;
+
+    return [...realizedTrades]
+      .sort((left, right) => left.timestamp - right.timestamp)
+      .map((trade) => {
+        cumulativePnl = this.roundDecimal(cumulativePnl + trade.pnl, 4);
+
+        return {
+          date: new Date(trade.timestamp * 1000).toISOString(),
+          pnl: cumulativePnl,
+        };
+      });
+  }
+
+  private computeVisiblePortfolioTotalUsd(
+    visiblePortfolio: WalletPortfolioResponse,
+  ): number {
+    const totalUsd = visiblePortfolio.reduce(
+      (total, item) => total + this.parsePositiveUsdValue(item.usdValue),
+      0,
+    );
+
+    return this.roundDecimal(totalUsd, 2);
   }
 
   private formatUsdCompact(value: number): string {

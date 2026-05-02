@@ -548,6 +548,12 @@ export interface WalletPortfolioSummary {
   hiddenUsdValue: string;
   spamCount: number;
   uiSummary: string;
+  totalPortfolioValueUsd: number;
+}
+
+export interface WalletCumulativePnLEntry {
+  date: string;
+  pnl: number;
 }
 
 type OptionalReasoningFields<T> = T extends unknown
@@ -735,6 +741,7 @@ export interface WalletIntelligence
   portfolio: WalletPortfolioResponse;
   visiblePortfolio: WalletPortfolioResponse;
   portfolioSummary: WalletPortfolioSummary;
+  cumulativePnL: WalletCumulativePnLEntry[];
   hiddenPortfolio?: WalletPortfolioResponse;
   fullPortfolio?: WalletPortfolioResponse;
   features: WalletIntelligenceFeatures;
