@@ -50,7 +50,7 @@ import { WalletTriageService } from './wallet-triage.service';
 
 @Injectable()
 export class WalletService {
-  private static readonly INTELLIGENCE_CACHE_TTL_MS = 90_000;
+  private static readonly INTELLIGENCE_CACHE_TTL_MS = 300_000;
   private static readonly LIFETIME_VOLUME_MIN_RECEIVE_AMOUNT = 1e-9;
   private static readonly LIFETIME_VOLUME_ABSURD_UNIT_PRICE_USD = 1_000_000_000;
   private static readonly LIFETIME_VOLUME_SUPPLY_DISTORTION_AMOUNT =
