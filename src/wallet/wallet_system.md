@@ -74,7 +74,7 @@ Responsibilities:
 - compose the unified wallet features response from existing service methods
 - compose unified wallet intelligence responses across context, summary, metrics, score, classification, and portfolio surfaces
 - shape intelligence payload verbosity by stripping or retaining reasoning fields depending on `verbose`
-- cache `/wallet/:address/intelligence` responses in-memory (wallet+query keyed) with `90s` TTL to reduce repeated recomputation
+- cache `/wallet/:address/intelligence` responses in-memory (wallet+query keyed) with `5-minute` TTL to reduce repeated recomputation
 
 ### WalletAnalyticsService
 
@@ -632,7 +632,7 @@ Current behavior notes:
 - `portfolio` in intelligence is a curated default list (`visiblePortfolio` plus top speculative additions)
 - `metrics` includes ROI/PnL metrics, capital base, portfolio scale, lifetime trade-volume metrics, pricing coverage, and trust signals
 - `aiSummary` and `deepAnalysis` are only returned by the intelligence endpoint surface; score and classification endpoints do not include them
-- responses are cached in-memory by `address + lite + verbose` key with `90s` TTL to reduce repeated heavy computations
+- responses are cached in-memory by `address + lite + verbose` key with `5-minute` TTL to reduce repeated heavy computations
 
 Dual AI layer details:
 
