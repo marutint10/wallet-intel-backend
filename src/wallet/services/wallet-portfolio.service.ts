@@ -49,6 +49,9 @@ export interface PortfolioLoadResult {
 @Injectable()
 export class WalletPortfolioService {
   private readonly logger = new Logger(WalletPortfolioService.name);
+  private readonly refreshCooldowns = new Map<string, number>();
+  private readonly inFlightRefreshes = new Map<string, Promise<void>>();
+  private readonly REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 
   constructor(
     private readonly walletCoreService: WalletCoreService,
@@ -601,7 +604,7 @@ export class WalletPortfolioService {
     address: string,
     holdings: WalletHoldingsResponse,
   ): Promise<Map<string, HoldingAnalyticsInfo>> {
-    await this.refreshTransactionHistory(address);
+    await this.refreshTransactionHistoryIfNeeded(address);
 
     const transactions = await this.walletCoreService.getTransactionEntities(address);
     if (transactions.length === 0) {
@@ -666,6 +669,39 @@ export class WalletPortfolioService {
     }
 
     return analyticsMap;
+  }
+
+  private async refreshTransactionHistoryIfNeeded(
+    address: string,
+  ): Promise<void> {
+    const key = address.toLowerCase();
+    const now = Date.now();
+    const lastRefresh = this.refreshCooldowns.get(key);
+
+    if (
+      lastRefresh !== undefined &&
+      now - lastRefresh < this.REFRESH_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    const existingRefresh = this.inFlightRefreshes.get(key);
+
+    if (existingRefresh) {
+      await existingRefresh;
+      return;
+    }
+
+    const refreshPromise = this.refreshTransactionHistory(address)
+      .then(() => {
+        this.refreshCooldowns.set(key, Date.now());
+      })
+      .finally(() => {
+        this.inFlightRefreshes.delete(key);
+      });
+
+    this.inFlightRefreshes.set(key, refreshPromise);
+    await refreshPromise;
   }
 
   private async refreshTransactionHistory(address: string): Promise<void> {
