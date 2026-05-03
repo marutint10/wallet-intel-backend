@@ -74,9 +74,24 @@ Responsibilities:
 - delegate wallet behavior classification to `ClassificationService`
 - delegate V1 smart-money scoring to `WalletScoringService`
 - compose the unified wallet features response from existing service methods
-- compose unified wallet intelligence responses across context, summary, metrics, score, classification, and portfolio surfaces
+- compose single-chain wallet intelligence responses across context, summary, metrics, score, classification, and portfolio surfaces
 - shape intelligence payload verbosity by stripping or retaining reasoning fields depending on `verbose`
-- cache `/wallet/:address/intelligence` responses in-memory (chain+wallet+query keyed) with `5-minute` TTL to reduce repeated recomputation
+- cache explicit-chain `/wallet/:address/intelligence?chain=...` responses in-memory (chain+wallet+query keyed) with `5-minute` TTL to reduce repeated recomputation
+
+### UnifiedIntelligenceService
+
+This is the cross-chain composition layer for the flagship intelligence endpoint when no `chain` query parameter is supplied.
+
+Responsibilities:
+
+- fetch Ethereum, Base, BSC, and Polygon single-chain intelligence in parallel through `WalletService.getWalletIntelligence()`
+- enforce a 45-second timeout per chain and return partial unified results when at least one chain succeeds
+- merge visible holdings while preserving chain identity on each holding row
+- aggregate summary, PnL, risk, hold-time, activity, portfolio, and cumulative PnL data across successful chains
+- compute a unified score weighted by trading activity and portfolio value
+- compute unified classification from the dominant trader chain, or by portfolio value for holder-only wallets
+- generate a cross-chain AI narrative through `WalletAiService.generateUnifiedAnalysis()`
+- cache unified results under `unified:{address}` for 24 hours
 
 ### WalletAnalyticsService
 
@@ -456,7 +471,8 @@ Supported values and aliases are normalized by `normalizeSupportedChain()`:
 - `bsc`, `bnb`, `binance`
 - `polygon`, `matic`, `pol`
 
-If `chain` is omitted, the endpoint uses `ethereum`.
+For all endpoints except `/wallet/:address/intelligence`, omitting `chain` uses `ethereum`.
+For `/wallet/:address/intelligence`, omitting `chain` returns the unified multi-chain report.
 
 ### GET /wallet/:address
 
@@ -622,7 +638,14 @@ Important notes:
 
 ### GET /wallet/:address/intelligence
 
-Returns a unified wallet intelligence payload combining the main analysis surfaces.
+Returns either a unified multi-chain intelligence payload or an explicit single-chain intelligence payload.
+
+Behavior:
+
+- `GET /wallet/:address/intelligence` returns unified mode across Ethereum, Base, BSC, and Polygon
+- `GET /wallet/:address/intelligence?chain=ethereum|base|bsc|polygon` returns the existing single-chain response shape
+- single-chain behavior is unchanged for explicit `chain` requests
+- unified mode includes `mode: "unified"`, `chainsAnalyzed`, `chainsWithActivity`, `chainErrors`, `partialResult`, and `perChain`
 
 Current base response fields:
 
@@ -642,10 +665,13 @@ Current base response fields:
 
 Supported query params:
 
-
+- `chain=ethereum|base|bsc|polygon`
+	- returns the existing single-chain intelligence response
+	- if omitted, the endpoint returns unified multi-chain mode instead
 - `lite=true` (or `lite=1`)
-	- returns the lite payload: `address`, `analyzedAt`, `summary`, `metrics`, `score`, and `classification`
+	- applies to explicit single-chain requests
 - `verbose=true` (or `verbose=1`)
+	- applies to explicit single-chain requests
 	- includes reasoning fields in `context` and triage responses
 	- includes `confidenceReasoning` in score/classification responses
 	- includes `features.rawFeatureMetrics` (risk, hold-time, and activity raw metrics)
@@ -659,7 +685,8 @@ Current behavior notes:
 - `portfolio` in intelligence is a curated default list (`visiblePortfolio` plus top speculative additions)
 - `metrics` includes ROI/PnL metrics, capital base, portfolio scale, lifetime trade-volume metrics, pricing coverage, and trust signals
 - `aiSummary` and `deepAnalysis` are only returned by the intelligence endpoint surface; score and classification endpoints do not include them
-- responses are cached in-memory by `address + lite + verbose` key with `5-minute` TTL to reduce repeated heavy computations
+- explicit-chain responses are cached in-memory by `chain + address + lite + verbose` key with `5-minute` TTL to reduce repeated heavy computations
+- unified responses are cached through `UnifiedIntelligenceService` by `unified:{address}` with 24-hour TTL
 
 Dual AI layer details:
 
@@ -680,6 +707,11 @@ Dual AI layer details:
 	- usage tier: paid
 	- output role: structured analytical JSON
 	- parse hardening: supports direct JSON, fenced JSON, and first-object extraction before fallback
+- unified AI analysis model provider: Claude (`claude-sonnet-4-6`)
+	- cache key: `unified_ai:{address}` (lowercased address)
+	- cache TTL: `86400` seconds (24 hours)
+	- output role: cross-chain summary plus structured `UnifiedDeepAnalysis`
+	- failure behavior: returns `aiSummary = null` and `deepAnalysis = null` while preserving the unified metrics response
 - prompt paths for both summary and deep analysis:
 	- path 1 for trader/holder intelligence payloads
 	- path 2 for triage payloads (`triage_contract` / `triage_operational` or `traderEligible = false`)
