@@ -423,7 +423,15 @@ export class WalletTriageService {
   }
 
   private hasBytecode(bytecode: string): boolean {
-    return typeof bytecode === 'string' && bytecode.length > 0 && bytecode !== '0x';
+    if (typeof bytecode !== 'string' || bytecode.length === 0 || bytecode === '0x') {
+      return false;
+    }
+
+    return !this.isEip7702DelegationBytecode(bytecode);
+  }
+
+  private isEip7702DelegationBytecode(bytecode: string): boolean {
+    return bytecode.toLowerCase().startsWith('0xef0100');
   }
 
   private detectSafeProxy(bytecode: string): boolean {
