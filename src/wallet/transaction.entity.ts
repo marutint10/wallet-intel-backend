@@ -2,9 +2,10 @@ import { Column, Entity, Index, PrimaryGeneratedColumn, Unique } from 'typeorm';
 import type { NormalizedTokenAmount } from './wallet.types';
 
 @Entity({ name: 'transactions' })
-@Index('IDX_transactions_wallet_address', ['wallet_address'])
+@Index('IDX_transactions_chain_wallet_address', ['chain_id', 'wallet_address'])
 @Index('IDX_transactions_transaction_hash', ['transaction_hash'])
-@Unique('UQ_transactions_wallet_address_transaction_hash', [
+@Unique('UQ_transactions_chain_wallet_hash', [
+  'chain_id',
   'wallet_address',
   'transaction_hash',
 ])
@@ -14,6 +15,9 @@ export class TransactionEntity {
 
   @Column({ type: 'varchar', length: 42 })
   wallet_address!: string;
+
+  @Column({ type: 'varchar', length: 16, default: 'ethereum' })
+  chain_id!: string;
 
   @Column({ type: 'varchar', length: 66 })
   transaction_hash!: string;

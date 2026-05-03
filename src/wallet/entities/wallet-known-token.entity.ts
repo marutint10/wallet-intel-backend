@@ -9,8 +9,12 @@ import {
 } from 'typeorm';
 
 @Entity({ name: 'wallet_known_tokens' })
-@Index('IDX_wallet_known_tokens_wallet_address', ['wallet_address'])
-@Unique('UQ_wallet_known_tokens_wallet_address_contract_address', [
+@Index('IDX_wallet_known_tokens_chain_wallet_address', [
+  'chain_id',
+  'wallet_address',
+])
+@Unique('UQ_wallet_known_tokens_chain_wallet_contract', [
+  'chain_id',
   'wallet_address',
   'contract_address',
 ])
@@ -20,6 +24,9 @@ export class WalletKnownTokenEntity {
 
   @Column({ type: 'varchar', length: 42 })
   wallet_address!: string;
+
+  @Column({ type: 'varchar', length: 16, default: 'ethereum' })
+  chain_id!: string;
 
   @Column({ type: 'varchar', length: 42 })
   contract_address!: string;
