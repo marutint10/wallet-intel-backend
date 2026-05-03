@@ -11,6 +11,7 @@ import {
   SUPPORTED_CHAINS,
   SupportedChain,
 } from '../../shared/constants/chains';
+import { UNKNOWN_DEX_LABEL } from '../constants/dex-routers';
 import {
   UnifiedClassificationResponse,
   UnifiedFeaturesResponse,
@@ -756,16 +757,19 @@ export class UnifiedIntelligenceService {
     );
 
     return {
-      primaryDex: sortedDexes[0]?.[0] ?? 'Unknown',
+      primaryDex: sortedDexes[0]?.[0] ?? UNKNOWN_DEX_LABEL,
       primaryDexShare:
         totalDexTrades > 0
           ? this.round(((sortedDexes[0]?.[1] ?? 0) / totalDexTrades) * 100, 2)
           : 0,
-      dexDiversity: sortedDexes.filter(([dex]) => dex !== 'Unknown').length,
+      dexDiversity: sortedDexes.filter(([dex]) => dex !== UNKNOWN_DEX_LABEL).length,
       tradesPerDex,
       unknownDexPercent:
         totalDexTrades > 0
-          ? this.round(((tradesPerDex.Unknown ?? 0) / totalDexTrades) * 100, 2)
+          ? this.round(
+              ((tradesPerDex[UNKNOWN_DEX_LABEL] ?? 0) / totalDexTrades) * 100,
+              2,
+            )
           : 0,
     };
   }

@@ -53,6 +53,7 @@ import {
   DEFAULT_SUPPORTED_CHAIN,
   SupportedChain,
 } from '../../shared/constants/chains';
+import { UNKNOWN_DEX_LABEL } from '../constants/dex-routers';
 
 @Injectable()
 export class WalletService {
@@ -620,7 +621,7 @@ export class WalletService {
     metrics: WalletDexMetricsResult | null,
   ): WalletIntelligenceDexMetrics {
     return {
-      primaryDex: metrics?.primaryDex ?? 'Unknown',
+      primaryDex: metrics?.primaryDex ?? UNKNOWN_DEX_LABEL,
       primaryDexShare: metrics?.primaryDexShare ?? 0,
       dexDiversity: metrics?.dexDiversity ?? 0,
       tradesPerDex: metrics?.tradesPerDex ?? {},
