@@ -13,7 +13,13 @@ import {
   WalletRiskMetricsResponse,
   WalletTokenCategoryMetricsResponse,
 } from '../wallet.types';
-import { DEX_ROUTERS, UNKNOWN_DEX_LABEL } from '../constants/dex-routers';
+import {
+  AGGREGATOR_ROUTERS,
+  CUSTOM_HIGH_FREQUENCY_ROUTER_LABEL,
+  CUSTOM_HIGH_FREQUENCY_ROUTER_THRESHOLD,
+  DEX_ROUTERS,
+  UNKNOWN_DEX_LABEL,
+} from '../constants/dex-routers';
 import {
   MAJOR_SYMBOL_CATEGORY_FALLBACKS,
   NATIVE_TOKEN_CATEGORIES,
@@ -259,21 +265,36 @@ export class WalletAnalyticsService {
       };
     }
 
-    const tradesPerDex = new Map<string, number>();
+    const normalizedAddress = address.toLowerCase();
+    const routerCandidates = swapTransactions.map((transaction) =>
+      this.resolveDexCandidate(
+        transaction,
+        normalizedAddress,
+        chain,
+      ),
+    );
     const unknownRouterCounts = new Map<string, number>();
 
-    for (const transaction of swapTransactions) {
-      const routerAddress = transaction.to_address?.toLowerCase() ?? '';
-      const dexName = DEX_ROUTERS[chain][routerAddress] ?? UNKNOWN_DEX_LABEL;
-
-      tradesPerDex.set(dexName, (tradesPerDex.get(dexName) ?? 0) + 1);
-
-      if (dexName === UNKNOWN_DEX_LABEL) {
+    for (const candidate of routerCandidates) {
+      if (!candidate.knownDexName) {
         unknownRouterCounts.set(
-          routerAddress || '(empty)',
-          (unknownRouterCounts.get(routerAddress || '(empty)') ?? 0) + 1,
+          candidate.unknownRouterAddress,
+          (unknownRouterCounts.get(candidate.unknownRouterAddress) ?? 0) + 1,
         );
       }
+    }
+
+    const tradesPerDex = new Map<string, number>();
+
+    for (const candidate of routerCandidates) {
+      const dexName = candidate.knownDexName
+        ? candidate.knownDexName
+        : this.resolveUnknownDexName(
+            candidate.unknownRouterAddress,
+            unknownRouterCounts,
+          );
+
+      tradesPerDex.set(dexName, (tradesPerDex.get(dexName) ?? 0) + 1);
     }
 
     const tradesPerDexObject = Object.fromEntries(tradesPerDex.entries());
@@ -307,6 +328,85 @@ export class WalletAnalyticsService {
         .map(([address, count]) => ({ address, count }))
         .sort((left, right) => right.count - left.count),
     };
+  }
+
+  private resolveUnknownDexName(
+    unknownRouterAddress: string,
+    unknownRouterCounts: Map<string, number>,
+  ): string {
+    if (
+      (unknownRouterCounts.get(unknownRouterAddress) ?? 0) >
+      CUSTOM_HIGH_FREQUENCY_ROUTER_THRESHOLD
+    ) {
+      return CUSTOM_HIGH_FREQUENCY_ROUTER_LABEL;
+    }
+
+    return UNKNOWN_DEX_LABEL;
+  }
+
+  private resolveDexCandidate(
+    transaction: {
+      to_address?: string | null;
+      from_address?: string | null;
+    },
+    walletAddress: string,
+    chain: SupportedChain,
+  ): { knownDexName: string | null; unknownRouterAddress: string } {
+    const toAddress = transaction.to_address?.toLowerCase() ?? '';
+    const fromAddress = transaction.from_address?.toLowerCase() ?? '';
+    const toDexName = this.resolveKnownDexName(toAddress, chain);
+
+    if (toDexName) {
+      return {
+        knownDexName: toDexName,
+        unknownRouterAddress: toAddress || '(empty)',
+      };
+    }
+
+    const fromDexName = this.resolveKnownDexName(fromAddress, chain);
+
+    if (fromDexName) {
+      return {
+        knownDexName: fromDexName,
+        unknownRouterAddress: fromAddress || toAddress || '(empty)',
+      };
+    }
+
+    return {
+      knownDexName: null,
+      unknownRouterAddress: this.selectUnknownRouterAddress(
+        toAddress,
+        fromAddress,
+        walletAddress,
+      ),
+    };
+  }
+
+  private selectUnknownRouterAddress(
+    toAddress: string,
+    fromAddress: string,
+    walletAddress: string,
+  ): string {
+    const nonWalletCandidates = [toAddress, fromAddress].filter(
+      (address) => address && address !== walletAddress,
+    );
+
+    return nonWalletCandidates[0] ?? (toAddress || fromAddress || '(empty)');
+  }
+
+  private resolveKnownDexName(
+    routerAddress: string,
+    chain: SupportedChain,
+  ): string | null {
+    if (!routerAddress) {
+      return null;
+    }
+
+    return (
+      DEX_ROUTERS[chain][routerAddress] ??
+      AGGREGATOR_ROUTERS[chain][routerAddress] ??
+      null
+    );
   }
 
   async getTokenCategoryMetrics(
