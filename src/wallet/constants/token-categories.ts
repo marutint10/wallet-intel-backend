@@ -20,6 +20,11 @@
  * Last updated: 2026-04-15
  */
 
+import {
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+} from '../../shared/constants/chains';
+
 // ─── Category Enum ───────────────────────────────────────────────
 export enum TokenCategory {
   BLUE_CHIP = 'Blue Chip / L1',
@@ -687,17 +692,101 @@ export const TOKEN_CATEGORY_MAP: Record<string, TokenMeta> = {
   },
 };
 
+export const TOKEN_CATEGORY_MAPS: Record<SupportedChain, Record<string, TokenMeta>> = {
+  ethereum: TOKEN_CATEGORY_MAP,
+  base: {
+    ...TOKEN_CATEGORY_MAP,
+    '0x4200000000000000000000000000000000000006': {
+      symbol: 'WETH',
+      name: 'Wrapped Ether',
+      category: TokenCategory.BLUE_CHIP,
+    },
+    '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': {
+      symbol: 'USDC',
+      name: 'USD Coin',
+      category: TokenCategory.STABLECOIN,
+    },
+    '0x50c5725949a6f0c72e6c4a641f24049a917db0cb': {
+      symbol: 'DAI',
+      name: 'Dai Stablecoin',
+      category: TokenCategory.STABLECOIN,
+    },
+    '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22': {
+      symbol: 'cbETH',
+      name: 'Coinbase Staked ETH',
+      category: TokenCategory.LST_LRT,
+    },
+  },
+  bsc: {
+    ...TOKEN_CATEGORY_MAP,
+    '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c': {
+      symbol: 'WBNB',
+      name: 'Wrapped BNB',
+      category: TokenCategory.BLUE_CHIP,
+    },
+    '0x55d398326f99059ff775485246999027b3197955': {
+      symbol: 'USDT',
+      name: 'Tether USD',
+      category: TokenCategory.STABLECOIN,
+    },
+    '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d': {
+      symbol: 'USDC',
+      name: 'USD Coin',
+      category: TokenCategory.STABLECOIN,
+    },
+    '0x1af3f329e8be154074d8769d1ffa4ee058b1dbc3': {
+      symbol: 'DAI',
+      name: 'Dai Stablecoin',
+      category: TokenCategory.STABLECOIN,
+    },
+  },
+  polygon: {
+    ...TOKEN_CATEGORY_MAP,
+    '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270': {
+      symbol: 'WPOL',
+      name: 'Wrapped POL',
+      category: TokenCategory.BLUE_CHIP,
+    },
+    '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': {
+      symbol: 'USDC',
+      name: 'USD Coin',
+      category: TokenCategory.STABLECOIN,
+    },
+    '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': {
+      symbol: 'USDC.e',
+      name: 'Bridged USD Coin',
+      category: TokenCategory.STABLECOIN,
+    },
+    '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': {
+      symbol: 'USDT',
+      name: 'Tether USD',
+      category: TokenCategory.STABLECOIN,
+    },
+    '0x8f3cf7ad23cd3cadbd9735aff958023239c6a063': {
+      symbol: 'DAI',
+      name: 'Dai Stablecoin',
+      category: TokenCategory.STABLECOIN,
+    },
+  },
+};
+
 // ─── Native ETH special handling ─────────────────────────────────
 // ETH is not an ERC-20, so it won't have a contract address in your trades.
 // Handle it by symbol matching in the lookup function.
 export const NATIVE_TOKEN_CATEGORIES: Record<string, TokenCategory> = {
   ETH: TokenCategory.BLUE_CHIP,
+  BNB: TokenCategory.BLUE_CHIP,
+  POL: TokenCategory.BLUE_CHIP,
+  MATIC: TokenCategory.BLUE_CHIP,
   BTC: TokenCategory.BLUE_CHIP,
   SOL: TokenCategory.BLUE_CHIP,
 };
 
 export const MAJOR_SYMBOL_CATEGORY_FALLBACKS: Record<string, TokenCategory> = {
   WETH: TokenCategory.BLUE_CHIP,
+  WBNB: TokenCategory.BLUE_CHIP,
+  WPOL: TokenCategory.BLUE_CHIP,
+  WMATIC: TokenCategory.BLUE_CHIP,
   WBTC: TokenCategory.BLUE_CHIP,
   UNI: TokenCategory.DEFI,
   AAVE: TokenCategory.DEFI,
@@ -721,11 +810,12 @@ export const MAJOR_SYMBOL_CATEGORY_FALLBACKS: Record<string, TokenCategory> = {
 export function classifyToken(
   contractAddress?: string | null,
   symbol?: string | null,
+  chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
 ): TokenMeta {
   // 1. Try contract address lookup (primary, most accurate)
   if (contractAddress) {
     const normalized = contractAddress.toLowerCase();
-    const found = TOKEN_CATEGORY_MAP[normalized];
+    const found = TOKEN_CATEGORY_MAPS[chain][normalized];
     if (found) return found;
   }
 
@@ -765,13 +855,14 @@ export function classifyToken(
  */
 export function classifyTokenBatch(
   tokens: Array<{ contractAddress?: string | null; symbol?: string | null }>,
+  chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
 ): Map<string, TokenMeta> {
   const result = new Map<string, TokenMeta>();
 
   for (const token of tokens) {
     const key = token.contractAddress?.toLowerCase() || token.symbol || 'unknown';
     if (!result.has(key)) {
-      result.set(key, classifyToken(token.contractAddress, token.symbol));
+      result.set(key, classifyToken(token.contractAddress, token.symbol, chain));
     }
   }
 
@@ -789,6 +880,7 @@ export function getCategoryBreakdown(
     tradeCount?: number;
     usdVolume?: number;
   }>,
+  chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
 ): {
   byCount: Record<string, { count: number; percent: number }>;
   byVolume: Record<string, { volume: number; percent: number }>;
@@ -804,7 +896,7 @@ export function getCategoryBreakdown(
   let totalVolume = 0;
 
   for (const token of tokens) {
-    const meta = classifyToken(token.contractAddress, token.symbol);
+    const meta = classifyToken(token.contractAddress, token.symbol, chain);
     const cat = meta.category;
     const count = token.tradeCount || 1;
     const volume = token.usdVolume || 0;
