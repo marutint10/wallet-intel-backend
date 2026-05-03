@@ -148,12 +148,42 @@ export interface WalletTokenCategoryMetricsResponse {
   categoryDiversity: number;
   memecoinTradePercent: number;
   blueChipTradePercent: number;
+  defiTradePercent: number;
   stablecoinTradePercent: number;
+  aiNarrativeTradePercent: number;
+  gamingTradePercent: number;
+  otherTradePercent: number;
   currentHoldingsByCategory: Record<string, number>;
   dominantHoldingCategory: string | null;
   memecoinHoldingPercent: number;
   blueChipHoldingPercent: number;
+  defiHoldingPercent: number;
   stablecoinHoldingPercent: number;
+  aiNarrativeHoldingPercent: number;
+  gamingHoldingPercent: number;
+  otherHoldingPercent: number;
+}
+
+export interface WalletIntelligenceTokenCategories {
+  memecoinPercent: number;
+  blueChipPercent: number;
+  defiPercent: number;
+  stablecoinPercent: number;
+  l2Percent: number;
+  aiNarrativePercent: number;
+  gamingPercent: number;
+  otherPercent: number;
+  dominantCategory: string;
+  categoryDiversity: number;
+  tradesByCategory: Record<string, number>;
+}
+
+export interface WalletIntelligenceDexMetrics {
+  primaryDex: string;
+  primaryDexShare: number;
+  dexDiversity: number;
+  tradesPerDex: Record<string, number>;
+  unknownDexPercent: number;
 }
 
 export interface UnknownRouterAddressCount {
@@ -586,6 +616,8 @@ export interface WalletIntelligenceFeatures {
   risk: WalletRiskMetricsResponse;
   holdTime: WalletHoldTimeMetricsResponse;
   activity: WalletActivityMetricsResponse;
+  tokenCategories: WalletIntelligenceTokenCategories;
+  dexMetrics: WalletIntelligenceDexMetrics;
   rawFeatureMetrics?: {
     risk: WalletRiskMetricsResponse;
     holdTime: WalletHoldTimeMetricsResponse;
@@ -844,6 +876,8 @@ export interface UnifiedFeaturesResponse {
     medianHoldHours: number | null;
   };
   activity: WalletActivityMetricsResponse;
+  tokenCategories: WalletIntelligenceTokenCategories;
+  dexMetrics: WalletIntelligenceDexMetrics;
 }
 
 export interface UnifiedDeepAnalysis {
