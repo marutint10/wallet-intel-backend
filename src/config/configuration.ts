@@ -31,6 +31,13 @@ export default () => ({
   },
   rpc: {
     url: process.env.ETH_RPC_URL ?? 'https://ethereum-rpc.publicnode.com',
+    urls: {
+      ethereum: process.env.ETH_RPC_URL ?? 'https://ethereum-rpc.publicnode.com',
+      base: process.env.BASE_RPC_URL ?? 'https://base-rpc.publicnode.com',
+      bsc: process.env.BSC_RPC_URL ?? 'https://bsc-dataseed.binance.org',
+      polygon:
+        process.env.POLYGON_RPC_URL ?? 'https://polygon-bor-rpc.publicnode.com',
+    },
   },
   database: {
     url: process.env.DATABASE_URL ?? '',

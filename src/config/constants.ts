@@ -3,4 +3,4 @@
  * Applies during both initial full-history ingestion and incremental refresh.
  * Keeps memory and latency predictable during build and testing.
  */
-export const TX_FETCH_LIMIT = 1000;
+export const TX_FETCH_LIMIT = 200;
