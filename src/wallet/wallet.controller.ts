@@ -7,6 +7,7 @@ import {
 import {
   StoredWalletTransactionsResponse,
   Trade,
+  UnifiedIntelligenceResponse,
   WalletActivityMetricsResponse,
   WalletClassificationResult,
   WalletContextResponse,
@@ -26,11 +27,15 @@ import {
   WalletTokenFlowResponse,
   WalletTransactionsResponse,
 } from './wallet.types';
+import { UnifiedIntelligenceService } from './services/unified-intelligence.service';
 import { WalletService } from './services/wallet.service';
 
 @Controller('wallet')
 export class WalletController {
-  constructor(private readonly walletService: WalletService) {}
+  constructor(
+    private readonly walletService: WalletService,
+    private readonly unifiedIntelligenceService: UnifiedIntelligenceService,
+  ) {}
 
   @Get(':address/holdings')
   async getHoldings(
@@ -118,7 +123,15 @@ export class WalletController {
     @Query('lite') lite?: string,
     @Query('verbose') verbose?: string,
     @Query('chain') chain?: string,
-  ): Promise<WalletIntelligenceResult> {
+  ): Promise<WalletIntelligenceResult | UnifiedIntelligenceResponse> {
+    if (!isEvmAddress(address)) {
+      throw new BadRequestException('Invalid EVM wallet address');
+    }
+
+    if (!chain || chain.trim().length === 0) {
+      return this.unifiedIntelligenceService.getUnifiedIntelligence(address);
+    }
+
     const resolvedChain = this.validateRequest(address, chain);
 
     return this.walletService.getWalletIntelligence(

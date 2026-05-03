@@ -18,6 +18,7 @@ import {
   WalletService,
   HybridHoldingsService,
   WalletTriageService,
+  UnifiedIntelligenceService,
 } from './services';
 import { WalletKnownTokenEntity } from './entities/wallet-known-token.entity';
 import { TransactionEntity } from './transaction.entity';
@@ -44,6 +45,7 @@ import { TransactionEntity } from './transaction.entity';
     ClassificationService,
     WalletTriageService,
     HybridHoldingsService,
+    UnifiedIntelligenceService,
   ],
 })
 export class WalletModule {}
