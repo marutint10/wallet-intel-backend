@@ -61,7 +61,7 @@ const shouldUseSsl = (
           type: 'postgres' as const,
           url: databaseUrl,
           autoLoadEntities: true,
-          synchronize: true,
+          synchronize: false,
           logging: false,
           ssl: useSsl ? { rejectUnauthorized: false } : false,
           extra: {

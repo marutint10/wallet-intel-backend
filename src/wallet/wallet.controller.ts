@@ -1,5 +1,9 @@
 import { BadRequestException, Controller, Get, Param, Query } from '@nestjs/common';
-import { isEthereumAddress } from '../shared/validators/address.validator';
+import { isEvmAddress } from '../shared/validators/address.validator';
+import {
+  SupportedChain,
+  normalizeSupportedChain,
+} from '../shared/constants/chains';
 import {
   StoredWalletTransactionsResponse,
   Trade,
@@ -31,89 +35,81 @@ export class WalletController {
   @Get(':address/holdings')
   async getHoldings(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletHoldingsResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getHoldings(address);
+    return this.walletService.getHoldings(address, resolvedChain);
   }
 
   @Get(':address/portfolio')
   async getPortfolio(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletPortfolioResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getPortfolio(address);
+    return this.walletService.getPortfolio(address, resolvedChain);
   }
 
   @Get(':address/ledger')
   async getLedger(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletLedgerResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getLedger(address);
+    return this.walletService.getLedger(address, resolvedChain);
   }
 
   @Get(':address/net-flow')
   async getNetFlow(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletNetFlowResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getNetFlow(address);
+    return this.walletService.getNetFlow(address, resolvedChain);
   }
 
   @Get(':address/token-flow')
   async getTokenFlow(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletTokenFlowResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getTokenFlow(address);
+    return this.walletService.getTokenFlow(address, resolvedChain);
   }
 
   @Get(':address/summary')
   async getWalletSummary(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletSummaryResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getWalletSummary(address);
+    return this.walletService.getWalletSummary(address, resolvedChain);
   }
 
   @Get(':address/features')
   async getWalletFeatures(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletFeaturesResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getWalletFeatures(address);
+    return this.walletService.getWalletFeatures(address, resolvedChain);
   }
 
   @Get(':address/context')
   async getWalletContext(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletContextResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getWalletContext(address);
+    return this.walletService.getWalletContext(address, resolvedChain);
   }
 
   @Get(':address/intelligence')
@@ -121,148 +117,169 @@ export class WalletController {
     @Param('address') address: string,
     @Query('lite') lite?: string,
     @Query('verbose') verbose?: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletIntelligenceResult> {
-    this.validateAddress(address);
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getWalletIntelligence(address, {
-      lite: this.parseBooleanQueryFlag(lite),
-      verbose: this.parseBooleanQueryFlag(verbose),
-    });
+    return this.walletService.getWalletIntelligence(
+      address,
+      {
+        lite: this.parseBooleanQueryFlag(lite),
+        verbose: this.parseBooleanQueryFlag(verbose),
+      },
+      resolvedChain,
+    );
   }
 
   @Get(':address/score')
   async getWalletScore(
     @Param('address') address: string,
     @Query('debug') debug?: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletScoreOrTriageResult> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getWalletScore(address, debug === 'true');
+    return this.walletService.getWalletScore(
+      address,
+      debug === 'true',
+      resolvedChain,
+    );
   }
 
   @Get(':address/classification')
   async getClassification(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletClassificationResult> {
-    this.validateAddress(address);
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getClassification(address);
+    return this.walletService.getClassification(address, resolvedChain);
   }
 
   @Get(':address/dex-metrics')
   async getDexMetrics(
     @Param('address') address: string,
     @Query('debug') debug?: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletDexMetricsResult> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getDexMetrics(address, debug === 'true');
+    return this.walletService.getDexMetrics(
+      address,
+      debug === 'true',
+      resolvedChain,
+    );
   }
 
   @Get(':address/token-categories')
   async getTokenCategoryMetrics(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletTokenCategoryMetricsResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getTokenCategoryMetrics(address);
+    return this.walletService.getTokenCategoryMetrics(address, resolvedChain);
   }
 
   @Get(':address/transactions')
   async getStoredTransactions(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<StoredWalletTransactionsResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getStoredTransactions(address);
+    return this.walletService.getStoredTransactions(address, resolvedChain);
   }
 
   @Get(':address/trades')
-  async getTrades(@Param('address') address: string): Promise<Trade[]> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+  async getTrades(
+    @Param('address') address: string,
+    @Query('chain') chain?: string,
+  ): Promise<Trade[]> {
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getTrades(address);
+    return this.walletService.getTrades(address, resolvedChain);
   }
 
   @Get(':address/priced-trades')
-  async getPricedTrades(@Param('address') address: string) {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+  async getPricedTrades(
+    @Param('address') address: string,
+    @Query('chain') chain?: string,
+  ) {
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getPricedTrades(address);
+    return this.walletService.getPricedTrades(address, resolvedChain);
   }
 
   @Get(':address/pnl')
   async getPnL(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletPnLResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getPnL(address);
+    return this.walletService.getPnL(address, resolvedChain);
   }
 
   @Get(':address/risk-metrics')
   async getRiskMetrics(
     @Param('address') address: string,
     @Query('debug') debug?: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletRiskMetricsResult> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getRiskMetrics(address, debug === 'true');
+    return this.walletService.getRiskMetrics(
+      address,
+      debug === 'true',
+      resolvedChain,
+    );
   }
 
   @Get(':address/hold-time-metrics')
   async getHoldTimeMetrics(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletHoldTimeMetricsResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getHoldTimeMetrics(address);
+    return this.walletService.getHoldTimeMetrics(address, resolvedChain);
   }
 
   @Get(':address/activity-metrics')
   async getActivityMetrics(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletActivityMetricsResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getActivityMetrics(address);
+    return this.walletService.getActivityMetrics(address, resolvedChain);
   }
 
   @Get(':address')
   async getWalletData(
     @Param('address') address: string,
+    @Query('chain') chain?: string,
   ): Promise<WalletTransactionsResponse> {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
-    }
+    const resolvedChain = this.validateRequest(address, chain);
 
-    return this.walletService.getWalletData(address);
+    return this.walletService.getWalletData(address, resolvedChain);
   }
 
-  private validateAddress(address: string): void {
-    if (!isEthereumAddress(address)) {
-      throw new BadRequestException('Invalid Ethereum wallet address');
+  private validateRequest(address: string, chain?: string): SupportedChain {
+    if (!isEvmAddress(address)) {
+      throw new BadRequestException('Invalid EVM wallet address');
     }
+
+    const resolvedChain = normalizeSupportedChain(chain);
+
+    if (!resolvedChain) {
+      throw new BadRequestException(
+        'Unsupported chain. Use ethereum, base, bsc, or polygon.',
+      );
+    }
+
+    return resolvedChain;
   }
 
   private parseBooleanQueryFlag(value?: string): boolean {

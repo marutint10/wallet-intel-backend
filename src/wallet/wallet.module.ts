@@ -1,7 +1,5 @@
 import { CacheModule } from '@nestjs/cache-manager';
 import { Module } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JsonRpcProvider } from 'ethers';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { WalletController } from './wallet.controller';
 import {
@@ -45,19 +43,6 @@ import { TransactionEntity } from './transaction.entity';
     WalletScoringService,
     ClassificationService,
     WalletTriageService,
-    {
-      provide: JsonRpcProvider,
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => {
-        const rpcUrl =
-          configService.get<string>('rpc.url') ??
-          'https://ethereum-rpc.publicnode.com';
-
-        return new JsonRpcProvider(rpcUrl, undefined, {
-          staticNetwork: true,
-        });
-      },
-    },
     HybridHoldingsService,
   ],
 })
