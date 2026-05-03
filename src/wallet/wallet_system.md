@@ -15,8 +15,9 @@ The wallet module has three jobs:
 
 Current capabilities:
 
+- support Ethereum, Base, BSC, and Polygon through a `chain` query parameter that defaults to `ethereum`
 - fetch wallet transaction history from Moralis
-- normalize ERC-20 and native ETH activity into one internal format
+- normalize ERC-20 and native chain activity into one internal format
 - persist normalized transactions in Postgres
 - serve stored normalized transactions
 - classify normalized transactions as `transfer`, `swap`, `wrap`, `unwrap`, `liquidity_add`, `liquidity_remove`, `stake`, `unstake`, `staking_wrap`, `staking_unwrap`, `yield_split`, `yield_merge`, `receipt_mint`, `receipt_burn`, `protocol_transform`, `bridge_out`, `bridge_in`, `lending_deposit`, `lending_withdraw`, `borrow`, `repay`, `vault_deposit`, `vault_withdraw`, or `reward_claim`
@@ -50,7 +51,8 @@ Owns the HTTP API under `/wallet`.
 
 Responsibilities:
 
-- validate Ethereum addresses
+- validate EVM addresses
+- validate and normalize supported chain aliases (`ethereum`, `base`, `bsc`, `polygon`)
 - call the correct facade method
 - return the response
 
@@ -74,7 +76,7 @@ Responsibilities:
 - compose the unified wallet features response from existing service methods
 - compose unified wallet intelligence responses across context, summary, metrics, score, classification, and portfolio surfaces
 - shape intelligence payload verbosity by stripping or retaining reasoning fields depending on `verbose`
-- cache `/wallet/:address/intelligence` responses in-memory (wallet+query keyed) with `5-minute` TTL to reduce repeated recomputation
+- cache `/wallet/:address/intelligence` responses in-memory (chain+wallet+query keyed) with `5-minute` TTL to reduce repeated recomputation
 
 ### WalletAnalyticsService
 
@@ -95,11 +97,12 @@ This is the live on-chain holdings layer.
 
 Responsibilities:
 
-- read live native ETH balance from an ethers.js `JsonRpcProvider`
+- maintain per-chain ethers.js `JsonRpcProvider` instances from chain config/profile defaults
+- read live native balance for the selected chain
 - read live ERC-20 balances in batches of 150 via the Multicall3 contract at `0xcA11bde05977b3631167028862bE2a173976CA11`
-- discover which ERC-20 tokens a wallet holds by consulting the `wallet_known_tokens` table
+- discover which ERC-20 tokens a wallet holds by consulting chain-scoped `wallet_known_tokens` rows
 - fall back to a transaction scan when no `wallet_known_tokens` rows exist for the wallet, and backfill the table asynchronously
-- maintain a 5-minute in-memory holdings cache per wallet address
+- maintain a 5-minute in-memory holdings cache per chain+wallet address
 - sync `wallet_known_tokens` after ingestion when new transactions arrive via `syncKnownTokens()`
 - expose `clearCache()` and `clearAllCache()` for targeted or global cache invalidation
 
@@ -125,6 +128,7 @@ Responsibilities:
 - classify transfer-heavy EOAs with zero swaps as `Operational/Treasury` non-trader wallets
 - return a triage payload: `walletType`, `walletSubtype`, `traderEligible`, `scorePath`, confidence fields, `score`, `scoreBand`, and `reasoning`
 - short-circuit triaged wallets so trader scoring and trader archetype classification are skipped
+- use a per-chain RPC provider pool for bytecode checks
 
 ### WalletScoringService
 
@@ -177,10 +181,12 @@ This is the ingestion and normalization layer.
 Responsibilities:
 
 - configure the Moralis client
+- resolve Moralis chain ids from `src/shared/constants/chains.ts`
 - rotate between up to two Moralis API keys on HTTP 401; mark exhausted keys for 1 hour before retrying
 - log configured key count at startup
 - fetch ERC-20 transfers and wallet history
 - refresh only new blocks when DB data already exists
+- scope all reads, inserts, and latest-block checks by `chain_id`
 - normalize raw provider payloads into `NormalizedTransaction`
 - classify each normalized transaction with a priority-ordered semantic rule set covering wraps, liquidity events, staking, yield split/merge, receipt mint/burn, protocol transforms, bridge flows, lending/vault flows, reward claims, transfer, and swap
 - emit `debug`-level logs for key semantic detections keyed by transaction hash
@@ -198,7 +204,7 @@ This is the pricing layer.
 Responsibilities:
 
 - fetch current ERC-20 prices from CoinGecko
-- fetch current ETH/USD price from CoinGecko
+- fetch current native-token USD price from CoinGecko
 - fetch current token market signals by combining DefiLlama, DexScreener, and CoinGecko
 - fetch historical trade prices from DefiLlama with CoinGecko fallback
 - fetch historical transfer-in market prices from DefiLlama only
@@ -209,6 +215,8 @@ Responsibilities:
 - limit DefiLlama concurrency to 5 simultaneous requests with 100 ms inter-request spacing
 - retry DefiLlama 429 responses with exponential backoff (2 s first retry, 4 s second retry, 2 retries maximum)
 - apply provider-level circuit breakers (`defillama`, `coingecko`, `dexscreener`) with 30-second cooldown when 6 rate-limit hits occur within a 30-second window
+- build CoinGecko, DefiLlama, and DexScreener requests from the selected chain profile
+- scope live, historical, inferred-price, unsupported-token, and liquidity caches by chain where they can collide
 
 ### WalletPnlService
 
@@ -279,7 +287,8 @@ They are registered in the module but are not the main runtime path for current 
 - the placeholder services listed above
 - the TypeORM repository for `TransactionEntity`
 - the TypeORM repository for `WalletKnownTokenEntity`
-- a `JsonRpcProvider` factory bound to the configured `ETH_RPC_URL`
+
+RPC providers are created inside `HybridHoldingsService` and `WalletTriageService` per supported chain.
 
 ## 4. Configuration
 
@@ -290,13 +299,17 @@ Current config values:
 - `MORALIS_API_KEY_2` (or legacy fallback `MORALIS_API_URL_2`) — optional second Moralis API key for key rotation
 - `COINGECKO_API_KEY`
 - `ETH_RPC_URL`
+- `BASE_RPC_URL`
+- `BSC_RPC_URL`
+- `POLYGON_RPC_URL`
 - `DATABASE_URL`
 - `DATABASE_SSL` (`1|true|yes|on` => enabled)
 - `DATABASE_CONNECTION_TIMEOUT_MS`
 - `TX_FETCH_LIMIT` (code constant in `src/config/constants.ts`, default `1000`)
 
-The app is currently Ethereum-focused.
-Moralis calls use `chain: 'eth'`.
+Supported chain metadata is centralized in `src/shared/constants/chains.ts`.
+The default chain is `ethereum`.
+Moralis calls use the selected profile's Moralis chain id (`0x1`, `0x2105`, `0x38`, or `0x89`).
 
 ## 5. External providers and how we use them
 
@@ -307,7 +320,7 @@ Moralis is used for history ingestion and as a secondary live-balance fallback.
 Current usage:
 
 - ERC-20 transfers
-- wallet history for native ETH transfers
+- wallet history for native chain transfers
 - fallback native and ERC-20 balances when `HybridHoldingsService` fails in portfolio/holdings loading
 
 WalletCoreService rotates between two configured API keys.
@@ -315,11 +328,11 @@ When a key returns HTTP 401, it is marked exhausted for 1 hour before being retr
 
 ### Direct RPC and Multicall3
 
-Live on-chain balances are now fetched via a direct `JsonRpcProvider` connection and the Multicall3 contract.
+Live on-chain balances are now fetched via direct per-chain `JsonRpcProvider` connections and the Multicall3 contract.
 
 Current usage:
 
-- native ETH balance via `provider.getBalance()`
+- native balance via `provider.getBalance()`
 - ERC-20 balances batched through Multicall3 `aggregate3()` in groups of 150
 - wallet bytecode lookup for `WalletTriageService` contract/EOA triage
 
@@ -347,7 +360,7 @@ Current usage:
 CoinGecko is used for:
 
 - current ERC-20 USD prices
-- current ETH/USD price
+- current native-token USD price
 - fallback historical trade pricing for supported trusted-major tokens when DefiLlama has no answer
 - live token pricing fallback input for token market signals
 
@@ -357,6 +370,7 @@ The `transactions` table stores normalized wallet transactions.
 
 Important stored fields:
 
+- chain id (`ethereum`, `base`, `bsc`, or `polygon`)
 - wallet address
 - transaction hash
 - block number
@@ -369,7 +383,7 @@ Important stored fields:
 
 Important rules:
 
-- one row per `wallet_address + transaction_hash`
+- one row per `chain_id + wallet_address + transaction_hash`
 - duplicate inserts are ignored safely
 - `inputs` and `outputs` are stored as JSONB arrays
 
@@ -384,6 +398,7 @@ The `wallet_known_tokens` table stores the set of ERC-20 tokens a wallet has int
 
 Important stored fields:
 
+- chain_id
 - wallet_address
 - contract_address
 - symbol
@@ -394,10 +409,12 @@ Important stored fields:
 
 Important rules:
 
-- one row per `wallet_address + contract_address`
+- one row per `chain_id + wallet_address + contract_address`
 - upserted from `syncKnownTokens()` after each ingestion pass
 - `HybridHoldingsService` reads this table to know which ERC-20s to query balances for
 - falls back to a transaction scan when no rows exist for the wallet, then backfills asynchronously
+
+Schema changes are applied by `npm run db:migrate:chains`, which executes `migrations/202605030001_add_chain_id_to_wallet_tables.sql` against `DATABASE_URL`.
 
 ## 7. Core data model
 
@@ -430,6 +447,16 @@ Each trade includes:
 `PricedTrade` is a `Trade` plus a historical `price`.
 
 ## 8. Current endpoint map
+
+All wallet endpoints accept an optional `chain` query parameter.
+Supported values and aliases are normalized by `normalizeSupportedChain()`:
+
+- `ethereum`, `eth`, `mainnet`
+- `base`
+- `bsc`, `bnb`, `binance`
+- `polygon`, `matic`, `pol`
+
+If `chain` is omitted, the endpoint uses `ethereum`.
 
 ### GET /wallet/:address
 
@@ -891,7 +918,7 @@ Current fields:
 Current behavior notes:
 
 - the service inspects `to_address` on each stored swap transaction as the router target
-- known Ethereum DEX router addresses are matched from a lowercase lookup table
+- known router addresses are matched from the selected chain's lowercase lookup table
 - unmatched swap recipients are counted under `Unknown`
 - `dexDiversity` excludes `Unknown`
 - `GET /wallet/:address/dex-metrics?debug=true` also returns `unknownRouterAddresses`, grouped by unmatched `to_address` frequency descending
@@ -917,7 +944,7 @@ Current fields:
 
 Current behavior notes:
 
-- each priced trade is classified with `classifyToken(contractAddress, token)`
+- each priced trade is classified with `classifyToken(contractAddress, token, chain)`
 - category volume uses `price * amount` and ignores trades without usable price
 - current holdings allocation aggregates `usdValue` by category and ignores `null` holdings values
 - stablecoin trade share is volume-based, while memecoin and blue chip trade shares are trade-count-based
@@ -927,10 +954,10 @@ Current behavior notes:
 
 This is the flow behind `GET /wallet/:address`.
 
-### Step 1: validate address
+### Step 1: validate address and chain
 
-The controller validates the Ethereum address.
-Invalid input throws `BadRequestException`.
+The controller validates the EVM address and normalizes the requested chain.
+Invalid input or unsupported chains throw `BadRequestException`.
 
 ### Step 2: check cached state
 
@@ -1002,9 +1029,9 @@ Rules are applied in priority order. The first match wins.
 
 ### Two-sided flow rules
 
-**wrap** — single-token `ETH` input and single-token `WETH` output.
+**wrap** — single-token native asset input and single-token wrapped-native output.
 
-**unwrap** — single-token `WETH` input and single-token `ETH` output.
+**unwrap** — single-token wrapped-native input and single-token native asset output.
 
 **liquidity_add** — two or more distinct input tokens and exactly one LP-like output (`LP`, `UNI-V2`, `PAIR`, `POOL`, `BPT`, `SLP`, `Cake-LP`, case-insensitive).
 
@@ -1050,7 +1077,7 @@ Trade conversion rule: only `swap` transactions are converted into trades by `Wa
 
 It fetches:
 
-- native ETH balance via `provider.getBalance()` using the configured `ETH_RPC_URL`
+- native chain balance via `provider.getBalance()` using the selected chain RPC URL
 - ERC-20 balances via batched Multicall3 `aggregate3()` calls in groups of 150
 
 Token discovery:
@@ -1062,10 +1089,10 @@ Token discovery:
 Current behavior:
 
 - convert raw balances using token decimals
-- include native ETH as `ETH`
+- include the selected chain's native asset symbol (`ETH`, `BNB`, or `POL`)
 - exclude zero balances
 - trim trailing zeros
-- cache results in memory for 5 minutes per wallet address
+- cache results in memory for 5 minutes per chain+wallet address
 - if hybrid loading fails, `WalletPortfolioService` falls back to Moralis native/ERC-20 balances
 - if Moralis keys are exhausted during fallback, holdings return empty and `balancesAvailable = false` for score/classification gating
 
@@ -1164,7 +1191,7 @@ Completed FIFO lot matches from this same queueing logic are also reused by `Wal
 It combines four inputs:
 
 1. live balances from `HybridHoldingsService`
-2. token market signals from DefiLlama, DexScreener, and CoinGecko (plus ETH/USD from CoinGecko)
+2. token market signals from DefiLlama, DexScreener, and CoinGecko plus native-token USD pricing from CoinGecko
 3. normalized stored history for holding analytics and cost basis
 4. stored swap transactions for traded-token signals used in tier classification
 
@@ -1177,7 +1204,7 @@ The service calls `getHoldings()`.
 The service fetches:
 
 - token market signals by contract address (price + liquidity + source provenance) from DefiLlama, DexScreener, and CoinGecko
-- current ETH/USD price from CoinGecko
+- current native-token/USD price from CoinGecko
 
 These are used for:
 
@@ -1305,9 +1332,10 @@ Current resilience rules:
 
 ## 19. Current assumptions and limits
 
-### Ethereum only
+### Multi-chain protocol heuristics
 
-The module currently assumes Ethereum mainnet behavior.
+Storage, provider calls, pricing, native assets, DEX router lookup, token categories, and caches are chain-aware for Ethereum, Base, BSC, and Polygon.
+Some deeper semantic protocol address sets for bridge/lending/vault/reward classification are still Ethereum-first; non-Ethereum chains fall back to token-flow heuristics where protocol address lists have not been curated yet.
 
 ### Classification is heuristic
 
@@ -1326,8 +1354,8 @@ This improves intelligence, but it is still an estimate rather than true execute
 
 ### TypeORM sync mode
 
-TypeORM is still running with development-friendly sync behavior.
-Production should move to migrations.
+TypeORM `synchronize` is disabled.
+Apply schema changes with explicit migrations, currently `npm run db:migrate:chains` for the `chain_id` migration.
 
 ## 20. Suggested mental model
 
