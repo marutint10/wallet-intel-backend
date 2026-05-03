@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "build": "nest build",
+    "db:migrate:chains": "node scripts/run-sql-migration.js migrations/202605030001_add_chain_id_to_wallet_tables.sql",
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main"
