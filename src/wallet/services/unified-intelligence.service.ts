@@ -89,6 +89,7 @@ export class UnifiedIntelligenceService {
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly CHAIN_TIMEOUT_MS = 60_000;
   private static readonly CHAIN_TIMEOUT_GRACE_MS = 15_000;
+  private static readonly CHAIN_FETCH_STAGGER_MS = 500;
   private readonly logger = new Logger(UnifiedIntelligenceService.name);
 
   constructor(
@@ -110,8 +111,13 @@ export class UnifiedIntelligenceService {
 
     const fetchState: UnifiedFetchState = { hasSuccessfulChain: false };
     const chainFetches = await Promise.allSettled(
-      SUPPORTED_CHAINS.map((chain) =>
-        this.fetchChainIntelligence(normalizedAddress, chain, fetchState),
+      SUPPORTED_CHAINS.map(async (chain, index) =>
+        this.fetchChainIntelligenceWithStagger(
+          normalizedAddress,
+          chain,
+          fetchState,
+          index,
+        ),
       ),
     );
     const successfulChains: ChainIntelligenceResult[] = [];
@@ -255,6 +261,22 @@ export class UnifiedIntelligenceService {
     fetchState.hasSuccessfulChain = true;
 
     return result;
+  }
+
+  private async fetchChainIntelligenceWithStagger(
+    address: string,
+    chain: SupportedChain,
+    fetchState: UnifiedFetchState,
+    chainIndex: number,
+  ): Promise<WalletIntelligenceResponse> {
+    const staggerDelayMs =
+      chainIndex * UnifiedIntelligenceService.CHAIN_FETCH_STAGGER_MS;
+
+    if (staggerDelayMs > 0) {
+      await this.delay(staggerDelayMs);
+    }
+
+    return this.fetchChainIntelligence(address, chain, fetchState);
   }
 
   private async withTimeout<T>(
@@ -1655,6 +1677,10 @@ export class UnifiedIntelligenceService {
         `Failed to cache unified intelligence for ${address}: ${this.getErrorMessage(error)}`,
       );
     }
+  }
+
+  private async delay(milliseconds: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 
   private isTimeoutError(error: unknown): boolean {
