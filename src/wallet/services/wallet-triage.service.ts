@@ -10,6 +10,12 @@ import {
 } from '../wallet.types';
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPnlService } from './wallet-pnl.service';
+import {
+  CHAIN_PROFILES,
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+  getChainProfile,
+} from '../../shared/constants/chains';
 
 interface ContractActivitySnapshot {
   totalTransactions: number;
@@ -27,28 +33,34 @@ interface ContractActivitySnapshot {
 @Injectable()
 export class WalletTriageService {
   private readonly logger = new Logger(WalletTriageService.name);
-  private readonly rpcProviders: JsonRpcProvider[];
+  private readonly rpcProviders = new Map<SupportedChain, JsonRpcProvider[]>();
 
   constructor(
     private readonly configService: ConfigService,
     private readonly walletCoreService: WalletCoreService,
     private readonly walletPnlService: WalletPnlService,
   ) {
-    const configuredRpcUrl =
-      this.configService.get<string>('rpc.url') ??
-      'https://ethereum-rpc.publicnode.com';
-    const fallbackRpcUrls = [
-      configuredRpcUrl,
-      'https://ethereum-rpc.publicnode.com',
-      'https://cloudflare-eth.com',
-    ];
-    const uniqueRpcUrls = Array.from(
-      new Set(fallbackRpcUrls.filter((url) => Boolean(url?.trim()))),
-    );
+    for (const chain of Object.keys(CHAIN_PROFILES) as SupportedChain[]) {
+      const profile = getChainProfile(chain);
+      const configuredRpcUrl =
+        this.configService.get<string>(`rpc.urls.${chain}`) ??
+        process.env[profile.rpcEnvKey] ??
+        profile.defaultRpcUrl;
+      const uniqueRpcUrls = Array.from(
+        new Set(
+          [configuredRpcUrl, ...profile.fallbackRpcUrls].filter((url) =>
+            Boolean(url?.trim()),
+          ),
+        ),
+      );
 
-    this.rpcProviders = uniqueRpcUrls.map(
-      (url) => new JsonRpcProvider(url, undefined, { staticNetwork: true }),
-    );
+      this.rpcProviders.set(
+        chain,
+        uniqueRpcUrls.map(
+          (url) => new JsonRpcProvider(url, undefined, { staticNetwork: true }),
+        ),
+      );
+    }
   }
 
   async getWalletTriage(
@@ -57,14 +69,16 @@ export class WalletTriageService {
       summary?: WalletSummaryResponse;
       bytecode?: string;
     } = {},
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletTriageResponse | null> {
     const bytecode = input.bytecode
       ? input.bytecode
-      : await this.fetchBytecode(address);
+      : await this.fetchBytecode(address, chain);
 
     if (this.hasBytecode(bytecode)) {
       const storedTransactions = await this.walletCoreService.getStoredTransactions(
         address,
+        chain,
       );
       const activity = this.buildActivitySnapshot(
         address,
@@ -97,7 +111,7 @@ export class WalletTriageService {
 
     const summary = input.summary
       ? input.summary
-      : await this.walletPnlService.getWalletSummary(address);
+      : await this.walletPnlService.getWalletSummary(address, chain);
 
     if (this.isOperationalEoa(summary)) {
       const transferRatio = this.computeTransferRatio(summary);
@@ -389,13 +403,18 @@ export class WalletTriageService {
     return summary.total_transfers / summary.total_transactions;
   }
 
-  private async fetchBytecode(address: string): Promise<string> {
-    for (const provider of this.rpcProviders) {
+  private async fetchBytecode(
+    address: string,
+    chain: SupportedChain,
+  ): Promise<string> {
+    const providers = this.rpcProviders.get(chain) ?? [];
+
+    for (const provider of providers) {
       try {
         return await provider.getCode(address);
       } catch {
         this.logger.warn(
-          `provider.getCode failed for ${address} via ${provider._getConnection().url}`,
+          `provider.getCode failed for ${chain}:${address} via ${provider._getConnection().url}`,
         );
       }
     }

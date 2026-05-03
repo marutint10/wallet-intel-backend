@@ -4,6 +4,11 @@ import axios from 'axios';
 import pLimit = require('p-limit');
 import { TOKEN_CATEGORY_MAP } from '../constants/token-categories';
 import { Trade, WalletPricingCoverage } from '../wallet.types';
+import {
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+  getChainProfile,
+} from '../../shared/constants/chains';
 
 class ProviderCooldownError extends Error {
   constructor(public readonly provider: string) {
@@ -17,8 +22,8 @@ interface CoinGeckoTokenPriceResponse {
   };
 }
 
-interface CoinGeckoEthPriceResponse {
-  ethereum?: {
+interface CoinGeckoNativePriceResponse {
+  [coinId: string]: {
     usd?: number;
   };
 }
@@ -151,10 +156,15 @@ export class WalletPricingService {
     'reward',
     'promo',
   ];
-  private static readonly DEFAULT_TRUST_CHAIN = 'ethereum';
   private static readonly KNOWN_INFERENCE_SYMBOLS = new Set([
     'ETH',
     'WETH',
+    'BNB',
+    'WBNB',
+    'POL',
+    'WPOL',
+    'MATIC',
+    'WMATIC',
     'USDT',
     'USDC',
     'DAI',
@@ -174,6 +184,9 @@ export class WalletPricingService {
     Set<string>
   > = {
     ethereum: new Set(['ETH']),
+    base: new Set(['ETH']),
+    bsc: new Set(['BNB']),
+    polygon: new Set(['POL', 'MATIC']),
   };
   private static readonly TRUSTED_MAJOR_ERC20_CONTRACTS: Record<
     string,
@@ -195,6 +208,33 @@ export class WalletPricingService {
       UNI: ['0x1f9840a85d5af5bf1d1762f925bdaddc4201f984'],
       AAVE: ['0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9'],
       MKR: ['0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2'],
+    },
+    base: {
+      ETH: ['0x4200000000000000000000000000000000000006'],
+      WETH: ['0x4200000000000000000000000000000000000006'],
+      USDC: ['0x833589fcd6edb6e08f4c7c32d4f71b54bdA02913'.toLowerCase()],
+      DAI: ['0x50c5725949a6f0c72e6c4a641f24049a917db0cb'],
+      CBETH: ['0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22'],
+    },
+    bsc: {
+      BNB: ['0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c'],
+      WBNB: ['0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c'],
+      USDT: ['0x55d398326f99059ff775485246999027b3197955'],
+      USDC: ['0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d'],
+      DAI: ['0x1af3f329e8be154074d8769d1ffa4ee058b1dbc3'],
+      BTC: ['0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c'],
+      WBTC: ['0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c'],
+    },
+    polygon: {
+      POL: ['0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270'],
+      WPOL: ['0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270'],
+      MATIC: ['0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270'],
+      WMATIC: ['0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270'],
+      USDC: ['0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', '0x2791bca1f2de4661ed88a30c99a7a9449aa84174'],
+      USDT: ['0xc2132d05d31c914a87c6611c10748aeb04b58e8f'],
+      DAI: ['0x8f3cf7ad23cd3cadbd9735aff958023239c6a063'],
+      WETH: ['0x7ceb23fd6bc0add59e62ac25578270cff1b9f619'],
+      WBTC: ['0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6'],
     },
   };
   private static readonly LIVE_PRICE_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -255,12 +295,14 @@ export class WalletPricingService {
     token: string,
     contractAddress: string | undefined,
     timestamp: number,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<number> {
     return this.trackHistoricalPriceFetch(async () => {
       const normalizedContractAddress = contractAddress?.toLowerCase();
       const historicalSuccessCacheKey = this.buildHistoricalSuccessCacheKey(
         normalizedContractAddress,
         timestamp,
+        chain,
       );
       const cachedSuccessPrice = this.getHistoricalSuccessCachePrice(
         historicalSuccessCacheKey,
@@ -274,6 +316,7 @@ export class WalletPricingService {
         token,
         normalizedContractAddress,
         timestamp,
+        chain,
       );
 
       if (inferredPrice) {
@@ -288,6 +331,7 @@ export class WalletPricingService {
 
       const unsupportedContractKey = this.buildUnsupportedContractKey(
         normalizedContractAddress,
+        chain,
       );
 
       if (this.isContractMarkedUnsupported(unsupportedContractKey)) {
@@ -300,6 +344,7 @@ export class WalletPricingService {
       const shouldSkipByPrefilter = await this.shouldSkipHistoricalPricingToken(
         token,
         normalizedContractAddress,
+        chain,
       );
 
       if (shouldSkipByPrefilter.skip && unsupportedContractKey) {
@@ -314,6 +359,7 @@ export class WalletPricingService {
         token,
         contractAddress,
         timestamp,
+        chain,
       );
 
       if ((defiLlamaResult.value ?? 0) > 0) {
@@ -323,13 +369,13 @@ export class WalletPricingService {
           historicalPrice,
           'defillama',
         );
-        this.markContractAsHistoricallyPriced(normalizedContractAddress);
+        this.markContractAsHistoricallyPriced(normalizedContractAddress, chain);
         return historicalPrice;
       }
 
       if (defiLlamaResult.status === 'cached-no-data') {
         if (
-          !this.hasCoinGeckoHistoricalMapping(token, normalizedContractAddress)
+          !this.hasCoinGeckoHistoricalMapping(token, normalizedContractAddress, chain)
         ) {
           this.logger.debug(
             `Price cache hit (null): no CoinGecko mapping for ${token}, skipping fallback at ${timestamp}`,
@@ -346,6 +392,7 @@ export class WalletPricingService {
         token,
         normalizedContractAddress,
         timestamp,
+        chain,
       );
 
       if (coinGeckoPrice > 0) {
@@ -354,7 +401,7 @@ export class WalletPricingService {
           coinGeckoPrice,
           'coingecko',
         );
-        this.markContractAsHistoricallyPriced(normalizedContractAddress);
+        this.markContractAsHistoricallyPriced(normalizedContractAddress, chain);
         return coinGeckoPrice;
       }
 
@@ -370,12 +417,14 @@ export class WalletPricingService {
     token: string,
     contractAddress: string | undefined,
     timestamp: number,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<number> {
     return this.trackHistoricalPriceFetch(async () => {
       const normalizedContractAddress = contractAddress?.toLowerCase();
       const historicalSuccessCacheKey = this.buildHistoricalSuccessCacheKey(
         normalizedContractAddress,
         timestamp,
+        chain,
       );
       const cachedSuccessPrice = this.getHistoricalSuccessCachePrice(
         historicalSuccessCacheKey,
@@ -389,6 +438,7 @@ export class WalletPricingService {
         token,
         normalizedContractAddress,
         timestamp,
+        chain,
       );
 
       if (inferredPrice) {
@@ -402,6 +452,7 @@ export class WalletPricingService {
 
       const unsupportedContractKey = this.buildUnsupportedContractKey(
         normalizedContractAddress,
+        chain,
       );
 
       if (this.isContractMarkedUnsupported(unsupportedContractKey)) {
@@ -411,6 +462,7 @@ export class WalletPricingService {
       const shouldSkipByPrefilter = await this.shouldSkipHistoricalPricingToken(
         token,
         normalizedContractAddress,
+        chain,
       );
 
       if (shouldSkipByPrefilter.skip && unsupportedContractKey) {
@@ -425,6 +477,7 @@ export class WalletPricingService {
         token,
         contractAddress,
         timestamp,
+        chain,
       );
 
       if ((defiLlamaResult.value ?? 0) > 0) {
@@ -434,7 +487,7 @@ export class WalletPricingService {
           historicalPrice,
           'defillama',
         );
-        this.markContractAsHistoricallyPriced(normalizedContractAddress);
+        this.markContractAsHistoricallyPriced(normalizedContractAddress, chain);
         return historicalPrice;
       }
 
@@ -454,6 +507,7 @@ export class WalletPricingService {
 
   async fetchCoinGeckoTokenPrices(
     contractAddresses: string[],
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<Record<string, number>> {
     if (contractAddresses.length === 0) {
       return {};
@@ -464,13 +518,14 @@ export class WalletPricingService {
       return {};
     }
 
+    const chainProfile = getChainProfile(chain);
     const result: Record<string, number> = {};
     const uncachedAddresses: string[] = [];
     const now = Date.now();
 
     for (const address of contractAddresses) {
       const normalizedAddress = address.toLowerCase();
-      const cacheKey = `live:ethereum:${normalizedAddress}`;
+      const cacheKey = `live:${chain}:${normalizedAddress}`;
       const cached = this.priceCache.get(cacheKey);
 
       if (cached && cached.expiresAt > now) {
@@ -501,7 +556,7 @@ export class WalletPricingService {
 
     try {
       response = await axios.get<CoinGeckoTokenPriceResponse>(
-        `${COINGECKO_API_BASE_URL}/simple/token_price/ethereum`,
+        `${COINGECKO_API_BASE_URL}/simple/token_price/${chainProfile.coingeckoId}`,
         {
           params: {
             contract_addresses: uncachedAddresses.join(','),
@@ -530,7 +585,7 @@ export class WalletPricingService {
       const price = typeof value.usd === 'number' ? value.usd : 0;
       result[normalizedAddress] = price;
 
-      const cacheKey = `live:ethereum:${normalizedAddress}`;
+      const cacheKey = `live:${chain}:${normalizedAddress}`;
       this.priceCache.set(cacheKey, {
         price: price > 0 ? price : null,
         source: 'coingecko',
@@ -543,7 +598,7 @@ export class WalletPricingService {
       const normalizedAddress = address.toLowerCase();
 
       if (!(normalizedAddress in result)) {
-        const cacheKey = `live:ethereum:${normalizedAddress}`;
+        const cacheKey = `live:${chain}:${normalizedAddress}`;
         this.priceCache.set(cacheKey, {
           price: null,
           source: 'coingecko',
@@ -557,6 +612,7 @@ export class WalletPricingService {
 
   async fetchTokenMarketSignals(
     contractAddresses: string[],
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<Record<string, TokenMarketSignal>> {
     const normalizedAddresses = Array.from(
       new Set(
@@ -572,9 +628,9 @@ export class WalletPricingService {
 
     const [defiLlamaResult, dexScreenerResult, coinGeckoResult] =
       await Promise.allSettled([
-        this.fetchDefiLlamaCurrentTokenPrices(normalizedAddresses),
-        this.fetchDexScreenerTokenSignals(normalizedAddresses),
-        this.fetchCoinGeckoTokenPrices(normalizedAddresses),
+        this.fetchDefiLlamaCurrentTokenPrices(normalizedAddresses, chain),
+        this.fetchDexScreenerTokenSignals(normalizedAddresses, chain),
+        this.fetchCoinGeckoTokenPrices(normalizedAddresses, chain),
       ]);
 
     if (defiLlamaResult.status === 'rejected') {
@@ -659,13 +715,16 @@ export class WalletPricingService {
     return marketSignals;
   }
 
-  async fetchEthereumUsdPrice(): Promise<number> {
+  async fetchNativeUsdPrice(
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<number> {
     if (!this.coinGeckoApiKey) {
       this.logger.warn('COINGECKO_API_KEY is not configured');
       return 0;
     }
 
-    const cacheKey = 'live:ethereum:eth';
+    const chainProfile = getChainProfile(chain);
+    const cacheKey = `live:${chain}:native:${chainProfile.nativeSymbol.toLowerCase()}`;
     const cached = this.priceCache.get(cacheKey);
 
     if (cached && cached.expiresAt > Date.now()) {
@@ -690,14 +749,14 @@ export class WalletPricingService {
         return 0;
       }
 
-      let response: { data: CoinGeckoEthPriceResponse };
+      let response: { data: CoinGeckoNativePriceResponse };
 
       try {
-        response = await axios.get<CoinGeckoEthPriceResponse>(
+        response = await axios.get<CoinGeckoNativePriceResponse>(
           `${COINGECKO_API_BASE_URL}/simple/price`,
           {
             params: {
-              ids: 'ethereum',
+              ids: chainProfile.nativeCoinGeckoId,
               vs_currencies: 'usd',
               x_cg_demo_api_key: this.coinGeckoApiKey,
             },
@@ -716,8 +775,8 @@ export class WalletPricingService {
       }
 
       const price =
-        typeof response.data.ethereum?.usd === 'number'
-          ? response.data.ethereum.usd
+        typeof response.data[chainProfile.nativeCoinGeckoId]?.usd === 'number'
+          ? response.data[chainProfile.nativeCoinGeckoId]?.usd ?? 0
           : 0;
 
       this.priceCache.set(cacheKey, {
@@ -739,7 +798,10 @@ export class WalletPricingService {
     }
   }
 
-  inferMissingSwapPrices(pricedTrades: PricedTrade[]): PricedTrade[] {
+  inferMissingSwapPrices(
+    pricedTrades: PricedTrade[],
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): PricedTrade[] {
     const tradesByTimestamp = new Map<number, PricedTrade[]>();
 
     for (const trade of pricedTrades) {
@@ -777,6 +839,7 @@ export class WalletPricingService {
         knownTrade.price,
         missingTrade,
         tradesAtTimestamp.length,
+        chain,
       );
 
       if (!inferenceDecision) {
@@ -790,6 +853,7 @@ export class WalletPricingService {
         missingTrade.timestamp,
         inferenceDecision.price,
         inferenceDecision.confidenceScore,
+        chain,
       );
     }
 
@@ -799,7 +863,7 @@ export class WalletPricingService {
   isTrustedMajorToken(
     token: string,
     contractAddress?: string,
-    chain = WalletPricingService.DEFAULT_TRUST_CHAIN,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): boolean {
     const normalizedToken = token.trim().toUpperCase();
 
@@ -829,7 +893,7 @@ export class WalletPricingService {
   isSpoofedMajorSymbol(
     token: string,
     contractAddress?: string,
-    chain = WalletPricingService.DEFAULT_TRUST_CHAIN,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): boolean {
     if (!contractAddress) {
       return false;
@@ -844,8 +908,12 @@ export class WalletPricingService {
     return !this.isTrustedMajorToken(normalizedToken, contractAddress, chain);
   }
 
-  isKnownInferenceAsset(token: string, contractAddress?: string): boolean {
-    if (this.isTrustedMajorToken(token, contractAddress)) {
+  isKnownInferenceAsset(
+    token: string,
+    contractAddress?: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): boolean {
+    if (this.isTrustedMajorToken(token, contractAddress, chain)) {
       return true;
     }
 
@@ -860,11 +928,13 @@ export class WalletPricingService {
     token: string,
     contractAddress: string | undefined,
     timestamp: number,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): HistoricalPriceCandidate | null {
     return this.getInferredHistoricalPriceCandidate(
       token,
       contractAddress?.toLowerCase(),
       timestamp,
+      chain,
     );
   }
 
@@ -873,15 +943,18 @@ export class WalletPricingService {
     knownUsdPrice: number,
     unknownTrade: Pick<Trade, 'token' | 'amount' | 'contractAddress' | 'timestamp'>,
     tradesAtTimestampCount: number,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): HistoricalPriceCandidate | null {
     if (
       this.isSpoofedMajorSymbol(
         knownTrade.token,
         knownTrade.contractAddress,
+        chain,
       ) ||
       this.isSpoofedMajorSymbol(
         unknownTrade.token,
         unknownTrade.contractAddress,
+        chain,
       )
     ) {
       return null;
@@ -941,6 +1014,7 @@ export class WalletPricingService {
       unknownTrade.token,
       unknownTrade.contractAddress?.toLowerCase(),
       unknownTrade.timestamp,
+      chain,
       0.2,
     );
 
@@ -978,6 +1052,7 @@ export class WalletPricingService {
     timestamp: number,
     inferredPrice: number,
     confidenceScore: number,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): void {
     if (!Number.isFinite(inferredPrice) || inferredPrice <= 0) {
       return;
@@ -987,7 +1062,10 @@ export class WalletPricingService {
       token,
       contractAddress?.toLowerCase(),
     );
-    const cacheKey = this.buildPriceCacheKey(tokenIdentifier, timestamp);
+    const cacheKey = this.buildPriceCacheKey(
+      `${chain}:${tokenIdentifier}`,
+      timestamp,
+    );
     const now = Date.now();
     const existing = this.inferredHistoricalPriceCache.get(cacheKey);
 
@@ -1019,7 +1097,7 @@ export class WalletPricingService {
       });
     }
 
-    this.markContractAsHistoricallyPriced(contractAddress?.toLowerCase());
+    this.markContractAsHistoricallyPriced(contractAddress?.toLowerCase(), chain);
   }
 
   buildPricingCoverage(pricedTrades: PricedTrade[]): WalletPricingCoverage {
@@ -1038,6 +1116,7 @@ export class WalletPricingService {
           .map((trade) => {
             const unsupportedKey = this.buildUnsupportedContractKey(
               trade.contractAddress?.toLowerCase(),
+              DEFAULT_SUPPORTED_CHAIN,
             );
 
             if (
@@ -1116,6 +1195,10 @@ export class WalletPricingService {
   private static readonly COINGECKO_COIN_ID_MAP: Record<string, string> = {
     ETH: 'ethereum',
     WETH: 'weth',
+    BNB: 'binancecoin',
+    WBNB: 'wbnb',
+    POL: 'polygon-ecosystem-token',
+    WPOL: 'polygon-ecosystem-token',
     BTC: 'bitcoin',
     WBTC: 'wrapped-bitcoin',
     USDT: 'tether',
@@ -1135,14 +1218,18 @@ export class WalletPricingService {
 
   private static readonly DEFILLAMA_NATIVE_TOKEN_MAP: Record<string, string> = {
     ETH: 'coingecko:ethereum',
+    BNB: 'coingecko:binancecoin',
+    POL: 'coingecko:polygon-ecosystem-token',
+    MATIC: 'coingecko:matic-network',
   };
 
   private async fetchDefiLlamaPrice(
     token: string,
     contractAddress: string | undefined,
     timestamp: number,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<HistoricalPriceFetchResult> {
-    const coinKey = this.buildDefiLlamaCoinKey(token, contractAddress);
+    const coinKey = this.buildDefiLlamaCoinKey(token, contractAddress, chain);
 
     if (!coinKey) {
       this.logger.debug(`Cannot build DeFi Llama key for ${token}`);
@@ -1163,10 +1250,11 @@ export class WalletPricingService {
     );
     const unsupportedContractKey = this.buildUnsupportedContractKey(
       contractAddress?.toLowerCase(),
+      chain,
     );
 
     if ((result.value ?? 0) > 0) {
-      this.markContractAsHistoricallyPriced(contractAddress?.toLowerCase());
+      this.markContractAsHistoricallyPriced(contractAddress?.toLowerCase(), chain);
 
       if (unsupportedContractKey) {
         this.unsupportedContractCache.delete(unsupportedContractKey);
@@ -1185,12 +1273,15 @@ export class WalletPricingService {
   private buildDefiLlamaCoinKey(
     token: string,
     contractAddress: string | undefined,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): string | null {
+    const chainProfile = getChainProfile(chain);
+
     if (contractAddress) {
-      return `ethereum:${contractAddress.toLowerCase()}`;
+      return `${chainProfile.defillamaId}:${contractAddress.toLowerCase()}`;
     }
 
-    if (!this.isTrustedMajorToken(token, undefined)) {
+    if (!this.isTrustedMajorToken(token, undefined, chain)) {
       return null;
     }
 
@@ -1208,9 +1299,10 @@ export class WalletPricingService {
     token: string,
     contractAddress: string | undefined,
     timestamp: number,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<number> {
-    if (!this.hasCoinGeckoHistoricalMapping(token, contractAddress)) {
-      if (this.isSpoofedMajorSymbol(token, contractAddress)) {
+    if (!this.hasCoinGeckoHistoricalMapping(token, contractAddress, chain)) {
+      if (this.isSpoofedMajorSymbol(token, contractAddress, chain)) {
         this.logger.warn(
           `[CoinGecko fallback] Skipping symbol-only major fallback for ${token} (${contractAddress})`,
         );
@@ -1219,8 +1311,7 @@ export class WalletPricingService {
       return 0;
     }
 
-    const coinId =
-      WalletPricingService.COINGECKO_COIN_ID_MAP[token.toUpperCase()];
+    const coinId = this.getCoinGeckoHistoricalCoinId(token, chain);
 
     if (!coinId || !this.coinGeckoApiKey) {
       if (!coinId) {
@@ -1238,7 +1329,10 @@ export class WalletPricingService {
       return 0;
     }
 
-    const cacheKey = this.buildPriceCacheKey(`coingecko:${coinId}`, timestamp);
+    const cacheKey = this.buildPriceCacheKey(
+      `${chain}:coingecko:${coinId}`,
+      timestamp,
+    );
 
     return this.fetchHistoricalPriceWithCache(cacheKey, 'coingecko', async () => {
       if (this.isProviderRateLimited('coingecko')) {
@@ -1300,9 +1394,11 @@ export class WalletPricingService {
 
   private async fetchDefiLlamaCurrentTokenPrices(
     contractAddresses: string[],
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<Record<string, number>> {
     const results: Record<string, number> = {};
     const addressBatches = this.chunkArray(contractAddresses, 80);
+    const chainProfile = getChainProfile(chain);
 
     if (this.isProviderRateLimited('defillama')) {
       this.recordHistoricalRequestBlocked('defillama');
@@ -1313,7 +1409,9 @@ export class WalletPricingService {
     }
 
     for (const addressBatch of addressBatches) {
-      const coinKeys = addressBatch.map((address) => `ethereum:${address}`);
+      const coinKeys = addressBatch.map(
+        (address) => `${chainProfile.defillamaId}:${address}`,
+      );
       const url = `${DEFILLAMA_API_BASE_URL}/prices/current/${coinKeys.join(',')}`;
 
       try {
@@ -1363,10 +1461,12 @@ export class WalletPricingService {
 
   private async fetchDexScreenerTokenSignals(
     contractAddresses: string[],
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<Record<string, { price: number | null; liquidityUsd: number | null }>> {
     const results: Record<string, { price: number | null; liquidityUsd: number | null }> = {};
     const requestedAddressSet = new Set(contractAddresses.map((address) => address.toLowerCase()));
     const addressBatches = this.chunkArray(contractAddresses, 30);
+    const chainProfile = getChainProfile(chain);
 
     if (this.isProviderRateLimited('dexscreener')) {
       this.recordHistoricalRequestBlocked('dexscreener');
@@ -1386,7 +1486,7 @@ export class WalletPricingService {
         const pairs = response.data?.pairs ?? [];
 
         for (const pair of pairs) {
-          if ((pair.chainId ?? '').toLowerCase() !== 'ethereum') {
+          if ((pair.chainId ?? '').toLowerCase() !== chainProfile.dexScreenerId) {
             continue;
           }
 
@@ -1439,7 +1539,7 @@ export class WalletPricingService {
   ): string | null {
     const [chain, contractAddress] = coinKey.split(':');
 
-    if (chain !== 'ethereum' || !contractAddress) {
+    if (!chain || !contractAddress) {
       return null;
     }
 
@@ -1495,14 +1595,27 @@ export class WalletPricingService {
   private hasCoinGeckoHistoricalMapping(
     token: string,
     contractAddress?: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): boolean {
-    if (!this.isTrustedMajorToken(token, contractAddress)) {
+    if (!this.isTrustedMajorToken(token, contractAddress, chain)) {
       return false;
     }
 
-    return Boolean(
-      WalletPricingService.COINGECKO_COIN_ID_MAP[token.toUpperCase()],
-    );
+    return Boolean(this.getCoinGeckoHistoricalCoinId(token, chain));
+  }
+
+  private getCoinGeckoHistoricalCoinId(
+    token: string,
+    chain: SupportedChain,
+  ): string | undefined {
+    const symbol = token.toUpperCase();
+    const chainProfile = getChainProfile(chain);
+
+    if (chainProfile.nativeAliases.some((alias) => alias.toUpperCase() === symbol)) {
+      return chainProfile.nativeCoinGeckoId;
+    }
+
+    return WalletPricingService.COINGECKO_COIN_ID_MAP[symbol];
   }
 
   private getPriceFetchBatchSummarySnapshot(): PriceFetchBatchSummary {
@@ -1545,12 +1658,13 @@ export class WalletPricingService {
   private buildHistoricalSuccessCacheKey(
     contractAddress: string | undefined,
     timestamp: number,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): string | null {
     if (!contractAddress) {
       return null;
     }
 
-    return `ethereum:${contractAddress.toLowerCase()}:${Math.floor(timestamp)}`;
+    return `${chain}:${contractAddress.toLowerCase()}:${Math.floor(timestamp)}`;
   }
 
   private getHistoricalSuccessCachePrice(cacheKey: string | null): number {
@@ -1589,12 +1703,13 @@ export class WalletPricingService {
 
   private buildUnsupportedContractKey(
     contractAddress: string | null | undefined,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): string | null {
     if (!contractAddress) {
       return null;
     }
 
-    return `ethereum:${contractAddress.toLowerCase()}`;
+    return `${chain}:${contractAddress.toLowerCase()}`;
   }
 
   private isContractMarkedUnsupported(
@@ -1660,17 +1775,19 @@ export class WalletPricingService {
 
   private markContractAsHistoricallyPriced(
     contractAddress: string | undefined,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): void {
     if (!contractAddress) {
       return;
     }
 
-    this.historicallyPricedContracts.add(contractAddress.toLowerCase());
+    this.historicallyPricedContracts.add(`${chain}:${contractAddress.toLowerCase()}`);
   }
 
   private async shouldSkipHistoricalPricingToken(
     token: string,
     contractAddress: string | undefined,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<{ skip: boolean; reason: string }> {
     if (!contractAddress) {
       return { skip: false, reason: 'non_contract_token' };
@@ -1678,7 +1795,7 @@ export class WalletPricingService {
 
     const normalizedContract = contractAddress.toLowerCase();
 
-    if (this.historicallyPricedContracts.has(normalizedContract)) {
+    if (this.historicallyPricedContracts.has(`${chain}:${normalizedContract}`)) {
       return { skip: false, reason: 'previously_priced_successfully' };
     }
 
@@ -1686,11 +1803,11 @@ export class WalletPricingService {
       return { skip: false, reason: 'known_category_map' };
     }
 
-    if (this.isTrustedMajorToken(token, normalizedContract)) {
+    if (this.isTrustedMajorToken(token, normalizedContract, chain)) {
       return { skip: false, reason: 'trusted_major_contract' };
     }
 
-    if (this.isSpoofedMajorSymbol(token, normalizedContract)) {
+    if (this.isSpoofedMajorSymbol(token, normalizedContract, chain)) {
       return { skip: false, reason: 'major_symbol_contract_mismatch' };
     }
 
@@ -1705,7 +1822,7 @@ export class WalletPricingService {
       return { skip: false, reason: 'no_spam_signal' };
     }
 
-    const liquidityUsd = await this.getContractLiquidityUsd(normalizedContract);
+    const liquidityUsd = await this.getContractLiquidityUsd(normalizedContract, chain);
 
     if (
       liquidityUsd !== null &&
@@ -1719,18 +1836,20 @@ export class WalletPricingService {
 
   private async getContractLiquidityUsd(
     contractAddress: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<number | null> {
     const normalizedContract = contractAddress.toLowerCase();
-    const cached = this.prefilterLiquidityCache.get(normalizedContract);
+    const cacheKey = `${chain}:${normalizedContract}`;
+    const cached = this.prefilterLiquidityCache.get(cacheKey);
 
     if (cached && cached.expiresAt > Date.now()) {
       return cached.liquidityUsd;
     }
 
-    const signal = await this.fetchDexScreenerTokenSignals([normalizedContract]);
+    const signal = await this.fetchDexScreenerTokenSignals([normalizedContract], chain);
     const liquidityUsd = signal[normalizedContract]?.liquidityUsd ?? null;
 
-    this.prefilterLiquidityCache.set(normalizedContract, {
+    this.prefilterLiquidityCache.set(cacheKey, {
       liquidityUsd,
       expiresAt: Date.now() + WalletPricingService.PREFILTER_LIQUIDITY_CACHE_TTL_MS,
     });
@@ -1741,23 +1860,26 @@ export class WalletPricingService {
   private buildInferredTokenIdentifier(
     token: string,
     contractAddress: string | undefined,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): string {
     if (contractAddress) {
-      return `inferred:ethereum:${contractAddress.toLowerCase()}`;
+      return `inferred:${chain}:${contractAddress.toLowerCase()}`;
     }
 
-    return `inferred:symbol:${token.toUpperCase()}`;
+    return `inferred:${chain}:symbol:${token.toUpperCase()}`;
   }
 
   private getInferredHistoricalPriceCandidate(
     token: string,
     contractAddress: string | undefined,
     timestamp: number,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
     minConfidence = WalletPricingService.INFERRED_PRICE_CONFIDENCE_MIN,
   ): HistoricalPriceCandidate | null {
     const tokenIdentifier = this.buildInferredTokenIdentifier(
       token,
       contractAddress,
+      chain,
     );
     const bucketOffsets = [0, -3600, 3600, -7200, 7200];
     let bestCandidate: InferredPriceCacheEntry | null = null;

@@ -23,6 +23,10 @@ import { WalletConfidenceService } from './wallet-confidence.service';
 import { WalletContextService } from './wallet-context.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
+import {
+	DEFAULT_SUPPORTED_CHAIN,
+	SupportedChain,
+} from '../../shared/constants/chains';
 
 type TraderType = TraderArchetype;
 
@@ -110,12 +114,15 @@ export class ClassificationService {
 		private readonly walletConfidenceService: WalletConfidenceService,
 	) {}
 
-	async getClassification(address: string): Promise<WalletClassification> {
+	async getClassification(
+		address: string,
+		chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+	): Promise<WalletClassification> {
 		const [context, summary, tokenCategories, portfolioResult] = await Promise.all([
-			this.walletContextService.getWalletContext(address),
-			this.walletPnlService.getWalletSummary(address),
-			this.walletAnalyticsService.getTokenCategoryMetrics(address),
-			this.walletPortfolioService.getPortfolioWithAvailability(address),
+			this.walletContextService.getWalletContext(address, undefined, chain),
+			this.walletPnlService.getWalletSummary(address, chain),
+			this.walletAnalyticsService.getTokenCategoryMetrics(address, chain),
+			this.walletPortfolioService.getPortfolioWithAvailability(address, chain),
 		]);
 		const normalizedAddress = summary.address ?? address.toLowerCase();
 
@@ -123,6 +130,7 @@ export class ClassificationService {
 			const confidenceProfile = await this.walletConfidenceService.getConfidence(
 				address,
 				{ summary },
+				chain,
 			);
 
 			return this.classifyHolder(
@@ -137,10 +145,10 @@ export class ClassificationService {
 		}
 
 		const [holdTime, activity, risk, trades] = await Promise.all([
-			this.walletAnalyticsService.getHoldTimeMetrics(address),
-			this.walletAnalyticsService.getActivityMetrics(address),
-			this.walletAnalyticsService.getRiskMetrics(address),
-			this.walletPnlService.getTrades(address),
+			this.walletAnalyticsService.getHoldTimeMetrics(address, chain),
+			this.walletAnalyticsService.getActivityMetrics(address, chain),
+			this.walletAnalyticsService.getRiskMetrics(address, false, chain),
+			this.walletPnlService.getTrades(address, chain),
 		]);
 		const confidenceProfile = await this.walletConfidenceService.getConfidence(
 			address,
@@ -150,6 +158,7 @@ export class ClassificationService {
 				holdTime,
 				trades,
 			},
+			chain,
 		);
 
 		return this.classifyTrader(

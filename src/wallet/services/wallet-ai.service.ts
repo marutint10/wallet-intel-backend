@@ -10,6 +10,10 @@ import {
   WalletScorePath,
   WalletTriageDeepAnalysis,
 } from '../wallet.types';
+import {
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+} from '../../shared/constants/chains';
 
 type SummaryPromptPath = 'trader_or_holder' | 'triage';
 type GeminiSummaryResult = {
@@ -41,9 +45,11 @@ export class WalletAiService {
   async generateSummary(
     address: string,
     payload: WalletIntelligence,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<string | null> {
     const normalizedAddress = address.toLowerCase();
-    const cacheKey = WalletAiService.AI_SUMMARY_CACHE_PREFIX + normalizedAddress;
+    const cacheKey =
+      WalletAiService.AI_SUMMARY_CACHE_PREFIX + `${chain}:${normalizedAddress}`;
     const promptPath = this.resolvePromptPath(payload);
     const fallbackSummary = this.buildDeterministicSummary(payload, promptPath);
 
@@ -252,10 +258,11 @@ export class WalletAiService {
   async generateDeepAnalysis(
     address: string,
     payload: any,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletDeepAnalysis | WalletTriageDeepAnalysis | null> {
     const normalizedAddress = address.toLowerCase();
     const cacheKey =
-      WalletAiService.DEEP_ANALYSIS_CACHE_PREFIX + normalizedAddress;
+      WalletAiService.DEEP_ANALYSIS_CACHE_PREFIX + `${chain}:${normalizedAddress}`;
     const isTriage = this.isTriagePayload(payload);
     const fallbackDeepAnalysis = this.buildFallbackDeepAnalysis(payload, isTriage);
 

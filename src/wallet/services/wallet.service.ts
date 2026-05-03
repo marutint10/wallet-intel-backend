@@ -47,6 +47,10 @@ import { PricedTrade, WalletPricingService } from './wallet-pricing.service';
 import { WalletAiService } from './wallet-ai.service';
 import { WalletScoringService } from './scoring.service';
 import { WalletTriageService } from './wallet-triage.service';
+import {
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+} from '../../shared/constants/chains';
 
 @Injectable()
 export class WalletService {
@@ -101,38 +105,57 @@ export class WalletService {
     private readonly walletAiService: WalletAiService,
   ) {}
 
-  async getWalletData(address: string): Promise<WalletTransactionsResponse> {
-    return this.walletCoreService.getWalletData(address);
+  async getWalletData(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletTransactionsResponse> {
+    return this.walletCoreService.getWalletData(address, chain);
   }
 
   async getStoredTransactions(
     address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<StoredWalletTransactionsResponse> {
-    return this.walletCoreService.getStoredTransactions(address);
+    return this.walletCoreService.getStoredTransactions(address, chain);
   }
 
-  async getTrades(address: string): Promise<Trade[]> {
-    return this.walletPnlService.getTrades(address);
+  async getTrades(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<Trade[]> {
+    return this.walletPnlService.getTrades(address, chain);
   }
 
-  async getPricedTrades(address: string) {
-    return this.walletPnlService.getPricedTrades(address);
+  async getPricedTrades(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ) {
+    return this.walletPnlService.getPricedTrades(address, chain);
   }
 
-  async getPnL(address: string): Promise<WalletPnLResponse> {
-    return this.walletPnlService.getPnL(address);
+  async getPnL(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletPnLResponse> {
+    return this.walletPnlService.getPnL(address, chain);
   }
 
-  async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
-    return this.walletPnlService.getWalletSummary(address);
+  async getWalletSummary(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletSummaryResponse> {
+    return this.walletPnlService.getWalletSummary(address, chain);
   }
 
-  async getWalletFeatures(address: string): Promise<WalletFeaturesResponse> {
+  async getWalletFeatures(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletFeaturesResponse> {
     const [summary, riskMetrics, holdTime, activity] = await Promise.all([
-      this.getWalletSummary(address),
-      this.getRiskMetrics(address),
-      this.getHoldTimeMetrics(address),
-      this.getActivityMetrics(address),
+      this.getWalletSummary(address, chain),
+      this.getRiskMetrics(address, false, chain),
+      this.getHoldTimeMetrics(address, chain),
+      this.getActivityMetrics(address, chain),
     ]);
 
     return {
@@ -151,12 +174,14 @@ export class WalletService {
   async getWalletIntelligence(
     address: string,
     options: WalletIntelligenceOptions = {},
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletIntelligenceResult> {
     const normalizedAddress = address.toLowerCase();
     const lite = options.lite === true;
     const verbose = options.verbose === true;
     const cacheKey = this.buildIntelligenceCacheKey({
       address: normalizedAddress,
+      chain,
       lite,
       verbose,
     });
@@ -170,18 +195,21 @@ export class WalletService {
 
     if (lite) {
       const [summary, litePortfolio] = await Promise.all([
-        this.walletPnlService.getWalletSummary(normalizedAddress),
-        this.walletPortfolioService.getPortfolio(normalizedAddress),
+        this.walletPnlService.getWalletSummary(normalizedAddress, chain),
+        this.walletPortfolioService.getPortfolio(normalizedAddress, chain),
       ]);
       const triage = await this.walletTriageService.getWalletTriage(
         normalizedAddress,
         { summary },
+        chain,
       );
       const intelligenceSummary = this.buildIntelligenceSummary(summary);
       const metrics = await this.buildRoiMetrics(
         normalizedAddress,
         summary,
         litePortfolio,
+        undefined,
+        chain,
       );
 
       const [score, classification] =
@@ -191,8 +219,8 @@ export class WalletService {
               WalletClassificationResult,
             ])
           : await Promise.all([
-              this.walletScoringService.getWalletScore(normalizedAddress),
-              this.classificationService.getClassification(normalizedAddress),
+              this.walletScoringService.getWalletScore(normalizedAddress, false, chain),
+              this.classificationService.getClassification(normalizedAddress, chain),
             ]);
 
       const response: WalletIntelligenceLiteResponse = {
@@ -213,11 +241,11 @@ export class WalletService {
 
     const [summary, activity, holdTime, riskMetrics, fullPortfolio] =
       await Promise.all([
-        this.walletPnlService.getWalletSummary(normalizedAddress),
-        this.walletAnalyticsService.getActivityMetrics(normalizedAddress),
-        this.walletAnalyticsService.getHoldTimeMetrics(normalizedAddress),
-        this.walletAnalyticsService.getRiskMetrics(normalizedAddress),
-        this.walletPortfolioService.getPortfolio(normalizedAddress),
+        this.walletPnlService.getWalletSummary(normalizedAddress, chain),
+        this.walletAnalyticsService.getActivityMetrics(normalizedAddress, chain),
+        this.walletAnalyticsService.getHoldTimeMetrics(normalizedAddress, chain),
+        this.walletAnalyticsService.getRiskMetrics(normalizedAddress, false, chain),
+        this.walletPortfolioService.getPortfolio(normalizedAddress, chain),
       ]);
     const visiblePortfolio = this.buildVisiblePortfolio(fullPortfolio);
     const [metrics, realizedTrades] = await Promise.all([
@@ -226,8 +254,9 @@ export class WalletService {
         summary,
         fullPortfolio,
         riskMetrics,
+        chain,
       ),
-      this.walletPnlService.getRealizedTradeMetrics(normalizedAddress),
+      this.walletPnlService.getRealizedTradeMetrics(normalizedAddress, chain),
     ]);
     const cumulativePnL = this.buildCumulativePnL(realizedTrades);
     const portfolioSummary = this.buildPortfolioSummary(
@@ -260,6 +289,7 @@ export class WalletService {
       {
         summary,
       },
+      chain,
     );
     const context = await this.walletContextService.getWalletContext(
       normalizedAddress,
@@ -268,6 +298,7 @@ export class WalletService {
         activity,
         triage,
       },
+      chain,
     );
 
     const [score, classification] =
@@ -277,8 +308,8 @@ export class WalletService {
             WalletClassificationResult,
           ])
         : await Promise.all([
-            this.walletScoringService.getWalletScore(normalizedAddress),
-            this.classificationService.getClassification(normalizedAddress),
+            this.walletScoringService.getWalletScore(normalizedAddress, false, chain),
+            this.classificationService.getClassification(normalizedAddress, chain),
           ]);
 
     const features = this.buildIntelligenceFeatures(
@@ -316,8 +347,8 @@ export class WalletService {
       deepAnalysis: null,
     };
     const [aiSummary, deepAnalysis] = await Promise.all([
-      this.walletAiService.generateSummary(address, intelligencePayload),
-      this.walletAiService.generateDeepAnalysis(address, intelligencePayload),
+      this.walletAiService.generateSummary(address, intelligencePayload, chain),
+      this.walletAiService.generateDeepAnalysis(address, intelligencePayload, chain),
     ]);
     const response: WalletIntelligenceResponse = {
       ...intelligencePayload,
@@ -329,83 +360,118 @@ export class WalletService {
     return response;
   }
 
-  async getWalletContext(address: string): Promise<WalletContextResponse> {
-    return this.walletContextService.getWalletContext(address);
+  async getWalletContext(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletContextResponse> {
+    return this.walletContextService.getWalletContext(address, undefined, chain);
   }
 
   async getWalletScore(
     address: string,
     debug = false,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletScoreOrTriageResult> {
-    const triage = await this.walletTriageService.getWalletTriage(address);
+    const triage = await this.walletTriageService.getWalletTriage(
+      address,
+      undefined,
+      chain,
+    );
 
     if (triage && !triage.traderEligible) {
       return triage;
     }
 
-    return this.walletScoringService.getWalletScore(address, debug);
+    return this.walletScoringService.getWalletScore(address, debug, chain);
   }
 
-  async getClassification(address: string): Promise<WalletClassificationResult> {
-    const triage = await this.walletTriageService.getWalletTriage(address);
+  async getClassification(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletClassificationResult> {
+    const triage = await this.walletTriageService.getWalletTriage(
+      address,
+      undefined,
+      chain,
+    );
 
     if (triage && !triage.traderEligible) {
       return triage;
     }
 
-    return this.classificationService.getClassification(address);
+    return this.classificationService.getClassification(address, chain);
   }
 
   async getDexMetrics(
     address: string,
     debug = false,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletDexMetricsResult> {
-    return this.walletAnalyticsService.getDexMetrics(address, debug);
+    return this.walletAnalyticsService.getDexMetrics(address, debug, chain);
   }
 
   async getTokenCategoryMetrics(
     address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletTokenCategoryMetricsResponse> {
-    return this.walletAnalyticsService.getTokenCategoryMetrics(address);
+    return this.walletAnalyticsService.getTokenCategoryMetrics(address, chain);
   }
 
-  async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {
-    return this.walletPortfolioService.getTokenFlow(address);
+  async getTokenFlow(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletTokenFlowResponse> {
+    return this.walletPortfolioService.getTokenFlow(address, chain);
   }
 
-  async getNetFlow(address: string): Promise<WalletNetFlowResponse> {
-    return this.walletPortfolioService.getNetFlow(address);
+  async getNetFlow(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletNetFlowResponse> {
+    return this.walletPortfolioService.getNetFlow(address, chain);
   }
 
-  async getLedger(address: string): Promise<WalletLedgerResponse> {
-    return this.walletPortfolioService.getLedger(address);
+  async getLedger(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletLedgerResponse> {
+    return this.walletPortfolioService.getLedger(address, chain);
   }
 
-  async getPortfolio(address: string): Promise<WalletPortfolioResponse> {
-    return this.walletPortfolioService.getPortfolio(address);
+  async getPortfolio(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletPortfolioResponse> {
+    return this.walletPortfolioService.getPortfolio(address, chain);
   }
 
-  async getHoldings(address: string): Promise<WalletHoldingsResponse> {
-    return this.walletPortfolioService.getHoldings(address);
+  async getHoldings(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletHoldingsResponse> {
+    return this.walletPortfolioService.getHoldings(address, chain);
   }
 
   async getActivityMetrics(
     address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletActivityMetricsResponse> {
-    return this.walletAnalyticsService.getActivityMetrics(address);
+    return this.walletAnalyticsService.getActivityMetrics(address, chain);
   }
 
   async getHoldTimeMetrics(
     address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletHoldTimeMetricsResponse> {
-    return this.walletAnalyticsService.getHoldTimeMetrics(address);
+    return this.walletAnalyticsService.getHoldTimeMetrics(address, chain);
   }
 
   async getRiskMetrics(
     address: string,
     debug = false,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletRiskMetricsResult> {
-    return this.walletAnalyticsService.getRiskMetrics(address, debug);
+    return this.walletAnalyticsService.getRiskMetrics(address, debug, chain);
   }
 
   private shapeContextByVerbosity(
@@ -502,10 +568,11 @@ export class WalletService {
     summary: WalletSummaryResponse,
     portfolio: WalletPortfolioResponse = [],
     riskMetrics?: WalletRiskMetricsResponse,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletIntelligenceMetrics> {
     const resolvedRiskMetrics =
-      riskMetrics ?? (await this.walletAnalyticsService.getRiskMetrics(address));
-    const pricedTrades = await this.walletPnlService.getPricedTrades(address);
+      riskMetrics ?? (await this.walletAnalyticsService.getRiskMetrics(address, false, chain));
+    const pricedTrades = await this.walletPnlService.getPricedTrades(address, chain);
     const pricingCoverage = this.walletPricingService.buildPricingCoverage(
       pricedTrades,
     );
@@ -1493,10 +1560,11 @@ export class WalletService {
 
   private buildIntelligenceCacheKey(input: {
     address: string;
+    chain: SupportedChain;
     lite: boolean;
     verbose: boolean;
   }): string {
-    return `${input.address}:lite=${input.lite}:verbose=${input.verbose}`;
+    return `${input.chain}:${input.address}:lite=${input.lite}:verbose=${input.verbose}`;
   }
 
   private getCachedIntelligence(

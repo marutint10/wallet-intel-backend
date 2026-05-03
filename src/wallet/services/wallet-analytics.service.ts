@@ -22,6 +22,10 @@ import {
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
 import { WalletPricingService } from './wallet-pricing.service';
+import {
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+} from '../../shared/constants/chains';
 
 interface PortfolioConcentrationSnapshot {
   largestHoldingUsd: string;
@@ -41,13 +45,14 @@ export class WalletAnalyticsService {
   async getRiskMetrics(
     address: string,
     debug = false,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletRiskMetricsResult> {
     const [realizedTrades, portfolio] = await Promise.all([
-      this.walletPnlService.getRealizedTradeMetrics(address),
-      this.walletPortfolioService.getPortfolio(address),
+      this.walletPnlService.getRealizedTradeMetrics(address, chain),
+      this.walletPortfolioService.getPortfolio(address, chain),
     ]);
     const filteredPortfolio = portfolio.filter((holding) =>
-      this.isMetricEligibleHolding(holding),
+      this.isMetricEligibleHolding(holding, chain),
     );
     const positivePnLTrades = realizedTrades
       .filter((trade) => trade.pnl > 0)
@@ -92,9 +97,10 @@ export class WalletAnalyticsService {
 
   async getHoldTimeMetrics(
     address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletHoldTimeMetricsResponse> {
     const completedTradeLots =
-      await this.walletPnlService.getCompletedTradeLots(address);
+      await this.walletPnlService.getCompletedTradeLots(address, chain);
 
     if (completedTradeLots.length === 0) {
       return {
@@ -121,8 +127,9 @@ export class WalletAnalyticsService {
 
   async getActivityMetrics(
     address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletActivityMetricsResponse> {
-    const trades = await this.walletPnlService.getTrades(address);
+    const trades = await this.walletPnlService.getTrades(address, chain);
 
     if (trades.length === 0) {
       return {
@@ -172,8 +179,12 @@ export class WalletAnalyticsService {
   async getDexMetrics(
     address: string,
     debug = false,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletDexMetricsResult> {
-    const transactions = await this.walletCoreService.getTransactionEntities(address);
+    const transactions = await this.walletCoreService.getTransactionEntities(
+      address,
+      chain,
+    );
     const swapTransactions = transactions.filter(
       (transaction) => transaction.type === 'swap',
     );
@@ -202,7 +213,7 @@ export class WalletAnalyticsService {
 
     for (const transaction of swapTransactions) {
       const routerAddress = transaction.to_address?.toLowerCase() ?? '';
-      const dexName = DEX_ROUTERS[routerAddress] ?? UNKNOWN_DEX_LABEL;
+      const dexName = DEX_ROUTERS[chain][routerAddress] ?? UNKNOWN_DEX_LABEL;
 
       tradesPerDex.set(dexName, (tradesPerDex.get(dexName) ?? 0) + 1);
 
@@ -249,16 +260,17 @@ export class WalletAnalyticsService {
 
   async getTokenCategoryMetrics(
     address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletTokenCategoryMetricsResponse> {
     const [pricedTrades, portfolio] = await Promise.all([
-      this.walletPnlService.getPricedTrades(address),
-      this.walletPortfolioService.getPortfolio(address),
+      this.walletPnlService.getPricedTrades(address, chain),
+      this.walletPortfolioService.getPortfolio(address, chain),
     ]);
     const metricEligibleTrades = pricedTrades.filter((trade) =>
-      this.isMetricEligibleTrade(trade),
+      this.isMetricEligibleTrade(trade, chain),
     );
     const metricEligibleHoldings = portfolio.filter((holding) =>
-      this.isMetricEligibleHolding(holding),
+      this.isMetricEligibleHolding(holding, chain),
     );
     const tradesByCategory = new Map<string, number>();
     const volumeByCategory = new Map<string, number>();
@@ -268,6 +280,7 @@ export class WalletAnalyticsService {
       const category = classifyToken(
         trade.contractAddress,
         trade.token,
+        chain,
       ).category;
       const categoryLabel = category.toString();
 
@@ -306,6 +319,7 @@ export class WalletAnalyticsService {
       const category = classifyToken(
         holding.contractAddress,
         holding.token,
+        chain,
       ).category;
       const categoryLabel = category.toString();
 
@@ -378,15 +392,20 @@ export class WalletAnalyticsService {
     };
   }
 
-  private isMetricEligibleTrade(trade: Trade): boolean {
+  private isMetricEligibleTrade(
+    trade: Trade,
+    chain: SupportedChain,
+  ): boolean {
     return !this.walletPricingService.isSpoofedMajorSymbol(
       trade.token,
       trade.contractAddress,
+      chain,
     );
   }
 
   private isMetricEligibleHolding(
     holding: WalletPortfolioResponse[number],
+    chain: SupportedChain,
   ): boolean {
     if (holding.tokenQualityLabel === 'spoofed_major_symbol') {
       return false;
@@ -395,6 +414,7 @@ export class WalletAnalyticsService {
     return !this.walletPricingService.isSpoofedMajorSymbol(
       holding.token,
       holding.contractAddress,
+      chain,
     );
   }
 

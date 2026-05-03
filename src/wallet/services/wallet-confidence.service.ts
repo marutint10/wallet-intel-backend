@@ -13,6 +13,10 @@ import { WalletAnalyticsService } from './wallet-analytics.service';
 import { WalletCoreService } from './wallet-core.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { PricedTrade } from './wallet-pricing.service';
+import {
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+} from '../../shared/constants/chains';
 
 interface WalletConfidenceInput {
   summary?: WalletSummaryResponse;
@@ -34,26 +38,27 @@ export class WalletConfidenceService {
   async getConfidence(
     address: string,
     input: WalletConfidenceInput = {},
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletConfidenceFields> {
     const [summary, activity, holdTime, transactions, pricedTrades] =
       await Promise.all([
         input.summary
           ? Promise.resolve(input.summary)
-          : this.walletPnlService.getWalletSummary(address),
+          : this.walletPnlService.getWalletSummary(address, chain),
         input.activity
           ? Promise.resolve(input.activity)
-          : this.walletAnalyticsService.getActivityMetrics(address),
+          : this.walletAnalyticsService.getActivityMetrics(address, chain),
         input.holdTime
           ? Promise.resolve(input.holdTime)
-          : this.walletAnalyticsService.getHoldTimeMetrics(address),
+          : this.walletAnalyticsService.getHoldTimeMetrics(address, chain),
         input.transactions
           ? Promise.resolve(input.transactions)
           : this.walletCoreService
-              .getStoredTransactions(address)
+              .getStoredTransactions(address, chain)
               .then((result) => result.transactions),
         input.pricedTrades
           ? Promise.resolve(input.pricedTrades)
-          : this.walletPnlService.getPricedTrades(address),
+          : this.walletPnlService.getPricedTrades(address, chain),
       ]);
 
     const trades = input.trades ?? pricedTrades;

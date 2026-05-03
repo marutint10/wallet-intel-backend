@@ -17,6 +17,12 @@ import {
   PortfolioTierSignals,
   classifyPortfolioTier,
 } from './portfolio-tier.classifier';
+import {
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+  buildChainScopedKey,
+  getChainProfile,
+} from '../../shared/constants/chains';
 
 interface HoldingLot {
   amount: bigint;
@@ -60,23 +66,30 @@ export class WalletPortfolioService {
     private readonly walletPnlService: WalletPnlService,
   ) {}
 
-  async getHoldings(address: string): Promise<WalletHoldingsResponse> {
-    const { holdings } = await this.getHoldingsWithAvailability(address);
+  async getHoldings(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletHoldingsResponse> {
+    const { holdings } = await this.getHoldingsWithAvailability(address, chain);
 
     return holdings;
   }
 
-  async getPortfolio(address: string): Promise<WalletPortfolioResponse> {
-    const { portfolio } = await this.getPortfolioWithAvailability(address);
+  async getPortfolio(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletPortfolioResponse> {
+    const { portfolio } = await this.getPortfolioWithAvailability(address, chain);
 
     return portfolio;
   }
 
   async getPortfolioWithAvailability(
     address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<PortfolioLoadResult> {
     const { holdings, balancesAvailable } =
-      await this.getHoldingsWithAvailability(address);
+      await this.getHoldingsWithAvailability(address, chain);
 
     if (!balancesAvailable) {
       return {
@@ -87,15 +100,16 @@ export class WalletPortfolioService {
 
     const [{ ethPrice, marketSignalsByContract }, holdingAnalytics, tierSignals] =
       await Promise.all([
-        this.fetchHoldingPrices(holdings),
-        this.buildHoldingAnalyticsMap(address, holdings),
-        this.buildPortfolioTierSignals(address),
+        this.fetchHoldingPrices(holdings, chain),
+        this.buildHoldingAnalyticsMap(address, holdings, chain),
+        this.buildPortfolioTierSignals(address, chain),
       ]);
     const holdingsWithUsd = holdings
       .map((holding) => ({
         holding,
         currentPrice: this.getCurrentHoldingPrice(
           holding,
+            chain,
           ethPrice,
           marketSignalsByContract,
         ),
@@ -139,6 +153,7 @@ export class WalletPortfolioService {
               this.walletPricingService.isSpoofedMajorSymbol(
                 holding.token,
                 holding.contractAddress,
+                chain,
               ),
           },
           tierSignals,
@@ -181,8 +196,11 @@ export class WalletPortfolioService {
     };
   }
 
-  async getLedger(address: string): Promise<WalletLedgerResponse> {
-    const tokenFlow = await this.getTokenFlow(address);
+  async getLedger(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletLedgerResponse> {
+    const tokenFlow = await this.getTokenFlow(address, chain);
 
     return Object.fromEntries(
       Object.entries(tokenFlow.flow).map(([token, amounts]) => [
@@ -195,10 +213,13 @@ export class WalletPortfolioService {
     );
   }
 
-  async getTokenFlow(address: string): Promise<WalletTokenFlowResponse> {
+  async getTokenFlow(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletTokenFlowResponse> {
     const walletAddress = address.toLowerCase();
     const transactions =
-      await this.walletCoreService.getTransactionEntitiesUnordered(address);
+      await this.walletCoreService.getTransactionEntitiesUnordered(address, chain);
 
     const flow: Record<
       string,
@@ -282,8 +303,11 @@ export class WalletPortfolioService {
     };
   }
 
-  async getNetFlow(address: string): Promise<WalletNetFlowResponse> {
-    const tokenFlow = await this.getTokenFlow(address);
+  async getNetFlow(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletNetFlowResponse> {
+    const tokenFlow = await this.getTokenFlow(address, chain);
 
     return Object.fromEntries(
       Object.entries(tokenFlow.flow).map(([token, amounts]) => [
@@ -295,14 +319,16 @@ export class WalletPortfolioService {
 
   private async getHoldingsWithAvailability(
     address: string,
+    chain: SupportedChain,
   ): Promise<HoldingsLoadResult> {
-    this.logger.log(`Using hybrid holdings source for ${address.toLowerCase()}`);
+    const chainProfile = getChainProfile(chain);
+    this.logger.log(`Using hybrid holdings source for ${chain}:${address.toLowerCase()}`);
 
     try {
-      const holdings = await this.hybridHoldingsService.getHoldings(address);
+      const holdings = await this.hybridHoldingsService.getHoldings(address, chain);
 
       this.logger.log(
-        `Hybrid success for ${address.toLowerCase()} with ${holdings.length} holdings`,
+        `Hybrid success for ${chain}:${address.toLowerCase()} with ${holdings.length} holdings`,
       );
 
       return {
@@ -311,14 +337,14 @@ export class WalletPortfolioService {
       };
     } catch (error) {
       this.logger.warn(
-        `Hybrid fallback to Moralis for ${address.toLowerCase()}: ${error instanceof Error ? error.message : 'unknown error'}`,
+        `Hybrid fallback to Moralis for ${chain}:${address.toLowerCase()}: ${error instanceof Error ? error.message : 'unknown error'}`,
       );
     }
 
     try {
       const [nativeBalance, erc20Balances] = await Promise.all([
-        this.walletCoreService.getNativeBalance(address),
-        this.walletCoreService.getErc20Balances(address),
+        this.walletCoreService.getNativeBalance(address, chain),
+        this.walletCoreService.getErc20Balances(address, chain),
       ]);
 
       const holdings: WalletHoldingsResponse = [];
@@ -326,7 +352,7 @@ export class WalletPortfolioService {
 
       if (nativeRawBalance && nativeRawBalance > 0n) {
         holdings.push({
-          token: 'ETH',
+          token: chainProfile.nativeSymbol,
           amount: this.formatTokenBalance(nativeRawBalance, 18),
           decimals: 18,
         });
@@ -466,10 +492,11 @@ export class WalletPortfolioService {
 
   private async buildPortfolioTierSignals(
     address: string,
+    chain: SupportedChain,
   ): Promise<PortfolioTierSignals> {
     const [transactions, realizedTrades] = await Promise.all([
-      this.walletCoreService.getTransactionEntitiesUnordered(address),
-      this.walletPnlService.getRealizedTradeMetrics(address),
+      this.walletCoreService.getTransactionEntitiesUnordered(address, chain),
+      this.walletPnlService.getRealizedTradeMetrics(address, chain),
     ]);
     const tradedTokens = new Set<string>();
     const recentTradedTokens = new Set<string>();
@@ -558,6 +585,7 @@ export class WalletPortfolioService {
 
   private async fetchHoldingPrices(
     holdings: WalletHoldingsResponse,
+    chain: SupportedChain,
   ): Promise<{
     ethPrice: number;
     marketSignalsByContract: Record<string, TokenMarketSignal>;
@@ -571,8 +599,8 @@ export class WalletPortfolioService {
     );
 
     const [tokenMarketsResult, ethPriceResult] = await Promise.allSettled([
-      this.walletPricingService.fetchTokenMarketSignals(contractAddresses),
-      this.walletPricingService.fetchEthereumUsdPrice(),
+      this.walletPricingService.fetchTokenMarketSignals(contractAddresses, chain),
+      this.walletPricingService.fetchNativeUsdPrice(chain),
     ]);
 
     if (tokenMarketsResult.status === 'rejected') {
@@ -603,10 +631,11 @@ export class WalletPortfolioService {
   private async buildHoldingAnalyticsMap(
     address: string,
     holdings: WalletHoldingsResponse,
+    chain: SupportedChain,
   ): Promise<Map<string, HoldingAnalyticsInfo>> {
-    await this.refreshTransactionHistoryIfNeeded(address);
+    await this.refreshTransactionHistoryIfNeeded(address, chain);
 
-    const transactions = await this.walletCoreService.getTransactionEntities(address);
+    const transactions = await this.walletCoreService.getTransactionEntities(address, chain);
     if (transactions.length === 0) {
       const emptyAnalyticsMap = new Map<string, HoldingAnalyticsInfo>();
 
@@ -624,7 +653,7 @@ export class WalletPortfolioService {
       return emptyAnalyticsMap;
     }
 
-    const lotsByHolding = await this.buildLotsByHoldingKey(transactions);
+    const lotsByHolding = await this.buildLotsByHoldingKey(transactions, chain);
     const analyticsMap = new Map<string, HoldingAnalyticsInfo>();
     const now = new Date();
 
@@ -673,8 +702,9 @@ export class WalletPortfolioService {
 
   private async refreshTransactionHistoryIfNeeded(
     address: string,
+    chain: SupportedChain,
   ): Promise<void> {
-    const key = address.toLowerCase();
+    const key = buildChainScopedKey(chain, address);
     const now = Date.now();
     const lastRefresh = this.refreshCooldowns.get(key);
 
@@ -692,7 +722,7 @@ export class WalletPortfolioService {
       return;
     }
 
-    const refreshPromise = this.refreshTransactionHistory(address)
+    const refreshPromise = this.refreshTransactionHistory(address, chain)
       .then(() => {
         this.refreshCooldowns.set(key, Date.now());
       })
@@ -704,9 +734,12 @@ export class WalletPortfolioService {
     await refreshPromise;
   }
 
-  private async refreshTransactionHistory(address: string): Promise<void> {
+  private async refreshTransactionHistory(
+    address: string,
+    chain: SupportedChain,
+  ): Promise<void> {
     try {
-      await this.walletCoreService.getWalletData(address);
+      await this.walletCoreService.getWalletData(address, chain);
     } catch (error) {
       this.logger.warn(
         'Wallet history refresh failed for holdings duration analytics, using stored history only',
@@ -746,11 +779,12 @@ export class WalletPortfolioService {
       inputs: NormalizedTokenAmount[];
       outputs: NormalizedTokenAmount[];
     }>,
+    chain: SupportedChain,
   ): Promise<Map<string, HoldingLot[]>> {
     const priceCache = new Map<string, string | null>();
     const lotsByHolding = new Map<string, HoldingLot[]>();
 
-    return this.buildHoldingLots(transactions, lotsByHolding, priceCache);
+    return this.buildHoldingLots(transactions, lotsByHolding, priceCache, chain);
   }
 
   private async buildHoldingLots(
@@ -786,6 +820,7 @@ export class WalletPortfolioService {
     }>,
     lotsByHolding: Map<string, HoldingLot[]>,
     priceCache: Map<string, string | null>,
+    chain: SupportedChain,
   ): Promise<Map<string, HoldingLot[]>> {
     for (const transaction of transactions) {
       for (const output of transaction.outputs) {
@@ -795,6 +830,7 @@ export class WalletPortfolioService {
           transaction.timestamp,
           transaction.type,
           priceCache,
+          chain,
         );
       }
 
@@ -836,6 +872,7 @@ export class WalletPortfolioService {
       | 'vault_withdraw'
       | 'reward_claim',
     priceCache: Map<string, string | null>,
+    chain: SupportedChain,
   ): Promise<void> {
     const rawAmount = this.parseRawAmount(entry.amount);
 
@@ -855,6 +892,7 @@ export class WalletPortfolioService {
           timestamp,
           transactionType,
           priceCache,
+          chain,
         ),
       costBasisType: transactionType === 'swap' ? 'actual' : 'estimated',
     });
@@ -1013,8 +1051,9 @@ export class WalletPortfolioService {
       | 'vault_withdraw'
       | 'reward_claim',
     priceCache: Map<string, string | null>,
+    chain: SupportedChain,
   ): Promise<string | null> {
-    const cacheKey = `${transactionType}:${this.getHoldingKey(entry.token, entry.contractAddress)}:${timestamp.toISOString()}`;
+    const cacheKey = `${chain}:${transactionType}:${this.getHoldingKey(entry.token, entry.contractAddress)}:${timestamp.toISOString()}`;
     const cachedPrice = priceCache.get(cacheKey);
 
     if (cachedPrice !== undefined) {
@@ -1028,11 +1067,13 @@ export class WalletPortfolioService {
             entry.token,
             entry.contractAddress,
             unixTimestamp,
+            chain,
           )
         : await this.walletPricingService.fetchHistoricalMarketPrice(
             entry.token,
             entry.contractAddress,
             unixTimestamp,
+            chain,
           );
     const normalizedPrice =
       Number.isFinite(price) && price > 0
@@ -1082,11 +1123,16 @@ export class WalletPortfolioService {
 
   private getCurrentHoldingPrice(
     holding: WalletHoldingItem,
+    chain: SupportedChain,
     ethPrice: number,
     marketSignalsByContract: Record<string, TokenMarketSignal>,
   ): string | null {
+    const chainProfile = getChainProfile(chain);
     const price =
-      holding.token.toUpperCase() === 'ETH'
+      !holding.contractAddress &&
+      chainProfile.nativeAliases.some(
+        (alias) => alias.toUpperCase() === holding.token.toUpperCase(),
+      )
         ? ethPrice
         : holding.contractAddress
           ? marketSignalsByContract[holding.contractAddress.toLowerCase()]?.price ??

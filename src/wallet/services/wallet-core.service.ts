@@ -18,6 +18,11 @@ import {
 import { TransactionEntity } from '../transaction.entity';
 import { HybridHoldingsService } from './hybrid-holdings.service';
 import { TX_FETCH_LIMIT } from '../../config/constants';
+import {
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+  getChainProfile,
+} from '../../shared/constants/chains';
 
 export class MoralisKeysExhaustedError extends Error {
   constructor() {
@@ -33,6 +38,7 @@ interface MoralisPaginatedResponse<T> {
 }
 
 interface MoralisFetchOptions {
+  chain?: SupportedChain;
   stopAtBlock?: number;
   firstPageOnly?: boolean;
 }
@@ -295,8 +301,12 @@ export class WalletCoreService {
     });
   }
 
-  async getNativeBalance(address: string): Promise<MoralisNativeBalanceResponse> {
+  async getNativeBalance(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<MoralisNativeBalanceResponse> {
     this.ensureMoralisApiKey();
+    const chainProfile = getChainProfile(chain);
 
     try {
       const response = await this.callMoralisWithRetry((apiKey) =>
@@ -304,7 +314,7 @@ export class WalletCoreService {
           `/${address}/balance`,
           {
             params: {
-              chain: 'eth',
+              chain: chainProfile.moralisId,
             },
             headers: this.buildMoralisHeaders(apiKey),
           },
@@ -323,14 +333,18 @@ export class WalletCoreService {
     }
   }
 
-  async getErc20Balances(address: string): Promise<MoralisErc20Balance[]> {
+  async getErc20Balances(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<MoralisErc20Balance[]> {
     this.ensureMoralisApiKey();
+    const chainProfile = getChainProfile(chain);
 
     try {
       const response = await this.callMoralisWithRetry((apiKey) =>
         this.moralisClient.get<MoralisErc20Balance[]>(`/${address}/erc20`, {
           params: {
-            chain: 'eth',
+            chain: chainProfile.moralisId,
           },
           headers: this.buildMoralisHeaders(apiKey),
         }),
@@ -348,9 +362,12 @@ export class WalletCoreService {
     }
   }
 
-  async getWalletData(address: string): Promise<WalletTransactionsResponse> {
+  async getWalletData(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletTransactionsResponse> {
     const walletAddress = address.toLowerCase();
-    const latestStoredBlock = await this.getLatestStoredBlock(walletAddress);
+    const latestStoredBlock = await this.getLatestStoredBlock(walletAddress, chain);
 
     this.ensureMoralisApiKey();
 
@@ -361,15 +378,17 @@ export class WalletCoreService {
       try {
         [latestErc20Transfers, latestWalletHistory] = await Promise.all([
           this.fetchErc20Transfers(address, {
+            chain,
             firstPageOnly: true,
           }),
           this.fetchWalletHistory(address, {
+            chain,
             firstPageOnly: true,
           }),
         ]);
       } catch {
         this.logger.warn('Moralis failed, falling back to DB');
-        return this.getStoredWalletData(address, walletAddress);
+        return this.getStoredWalletData(address, walletAddress, chain);
       }
 
       const latestNativeTransactions = latestWalletHistory.filter((transaction) =>
@@ -382,7 +401,7 @@ export class WalletCoreService {
       );
 
       if (apiLatestBlock <= latestStoredBlock) {
-        return this.getStoredWalletData(address, walletAddress);
+        return this.getStoredWalletData(address, walletAddress, chain);
       }
 
       let newErc20Transfers: MoralisErc20Transfer[] = [];
@@ -391,15 +410,17 @@ export class WalletCoreService {
       try {
         [newErc20Transfers, newWalletHistory] = await Promise.all([
           this.fetchErc20Transfers(address, {
+            chain,
             stopAtBlock: latestStoredBlock,
           }),
           this.fetchWalletHistory(address, {
+            chain,
             stopAtBlock: latestStoredBlock,
           }),
         ]);
       } catch {
         this.logger.warn('Moralis failed while refreshing, falling back to DB');
-        return this.getStoredWalletData(address, walletAddress);
+        return this.getStoredWalletData(address, walletAddress, chain);
       }
 
       const newNativeTransactions = this.filterNewTransactions(
@@ -416,22 +437,24 @@ export class WalletCoreService {
         address,
         filteredErc20Transfers,
         newNativeTransactions,
+        chain,
       );
 
       const insertedTransactionCount = await this.saveNormalizedTransactions(
         address,
         normalizedTransactions,
+        chain,
       );
 
       if (insertedTransactionCount > 0) {
-        this.hybridHoldingsService.clearCache(walletAddress);
+        this.hybridHoldingsService.clearCache(walletAddress, chain);
       }
 
       this.logger.log(
         `Wallet sync completed with ${normalizedTransactions.length} records (incremental)`,
       );
 
-      return this.getStoredWalletData(address, walletAddress);
+      return this.getStoredWalletData(address, walletAddress, chain);
     }
 
     let erc20Transfers: MoralisErc20Transfer[] = [];
@@ -439,8 +462,8 @@ export class WalletCoreService {
 
     try {
       [erc20Transfers, walletHistory] = await Promise.all([
-        this.fetchErc20Transfers(address),
-        this.fetchWalletHistory(address),
+        this.fetchErc20Transfers(address, { chain }),
+        this.fetchWalletHistory(address, { chain }),
       ]);
     } catch {
       this.logger.error('Moralis failed and no cached data available');
@@ -455,31 +478,35 @@ export class WalletCoreService {
       address,
       erc20Transfers,
       nativeTransactions,
+      chain,
     );
 
     const insertedTransactionCount = await this.saveNormalizedTransactions(
       address,
       normalizedTransactions,
+      chain,
     );
 
     if (insertedTransactionCount > 0) {
-      this.hybridHoldingsService.clearCache(walletAddress);
+      this.hybridHoldingsService.clearCache(walletAddress, chain);
     }
 
     this.logger.log(
       `Wallet sync completed with ${normalizedTransactions.length} records (full)`,
     );
 
-    return this.getStoredWalletData(address, walletAddress);
+    return this.getStoredWalletData(address, walletAddress, chain);
   }
 
   async getStoredTransactions(
     address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<StoredWalletTransactionsResponse> {
     const walletAddress = address.toLowerCase();
     const transactions = await this.transactionRepo.find({
       where: {
         wallet_address: walletAddress,
+        chain_id: chain,
       },
       order: {
         block_number: 'DESC',
@@ -494,11 +521,15 @@ export class WalletCoreService {
     };
   }
 
-  async getTransactionEntities(address: string): Promise<TransactionEntity[]> {
+  async getTransactionEntities(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<TransactionEntity[]> {
     const walletAddress = address.toLowerCase();
     return this.transactionRepo.find({
       where: {
         wallet_address: walletAddress,
+        chain_id: chain,
       },
       order: {
         timestamp: 'ASC',
@@ -508,11 +539,13 @@ export class WalletCoreService {
 
   async getTransactionEntitiesUnordered(
     address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<TransactionEntity[]> {
     const walletAddress = address.toLowerCase();
     return this.transactionRepo.find({
       where: {
         wallet_address: walletAddress,
+        chain_id: chain,
       },
     });
   }
@@ -619,10 +652,12 @@ export class WalletCoreService {
   private async getStoredWalletData(
     address: string,
     walletAddress: string,
+    chain: SupportedChain,
   ): Promise<WalletTransactionsResponse> {
     const cachedTransactions = await this.transactionRepo.find({
       where: {
         wallet_address: walletAddress,
+        chain_id: chain,
       },
       order: {
         block_number: 'DESC',
@@ -658,11 +693,15 @@ export class WalletCoreService {
     };
   }
 
-  private async getLatestStoredBlock(address: string): Promise<number | null> {
+  private async getLatestStoredBlock(
+    address: string,
+    chain: SupportedChain,
+  ): Promise<number | null> {
     const result = await this.transactionRepo
       .createQueryBuilder('transaction')
       .select('MAX(transaction.block_number)', 'latestBlock')
       .where('transaction.wallet_address = :address', { address })
+      .andWhere('transaction.chain_id = :chain', { chain })
       .getRawOne<{ latestBlock: string | null }>();
 
     if (!result?.latestBlock) {
@@ -706,6 +745,7 @@ export class WalletCoreService {
   private async saveNormalizedTransactions(
     address: string,
     transactions: NormalizedTransaction[],
+    chain: SupportedChain,
   ): Promise<number> {
     const transactionsToSave = transactions.filter(
       (
@@ -775,6 +815,7 @@ export class WalletCoreService {
         .values(
           transactionsToSave.map((transaction) => ({
             wallet_address: address.toLowerCase(),
+            chain_id: chain,
             transaction_hash: transaction.hash,
             block_number: transaction.block_number,
             timestamp: new Date(transaction.timestamp),
@@ -792,6 +833,7 @@ export class WalletCoreService {
       await this.hybridHoldingsService.syncKnownTokens(
         address.toLowerCase(),
         transactionsToSave,
+        chain,
       );
 
       if (Array.isArray(insertResult.raw)) {
@@ -815,9 +857,11 @@ export class WalletCoreService {
     address: string,
     erc20Transfers: MoralisErc20Transfer[],
     nativeTransactions: MoralisWalletHistoryItem[],
+    chain: SupportedChain,
   ): NormalizedTransaction[] {
     const normalizedByHash = new Map<string, NormalizedTransaction>();
     const normalizedAddress = address.toLowerCase();
+    const chainProfile = getChainProfile(chain);
 
     for (const transaction of nativeTransactions) {
       const normalizedTransaction = this.getOrCreateNormalizedTransaction(
@@ -838,14 +882,14 @@ export class WalletCoreService {
                   from_address: transaction.from_address,
                   to_address: transaction.to_address ?? '',
                   value: transaction.value,
-                  token_symbol: 'ETH',
+                  token_symbol: chainProfile.nativeSymbol,
                 },
               ]
             : [];
 
       for (const nativeTransfer of nativeTransfers) {
         const entry: NormalizedTokenAmount = {
-          token: nativeTransfer.token_symbol ?? 'ETH',
+          token: nativeTransfer.token_symbol ?? chainProfile.nativeSymbol,
           amount: String(nativeTransfer.value),
           decimals: 18,
         };
@@ -902,7 +946,7 @@ export class WalletCoreService {
             ...transaction,
             inputs,
             outputs,
-          }),
+          }, chain),
         };
       })
       .sort((left, right) => right.block_number - left.block_number);
@@ -983,6 +1027,7 @@ export class WalletCoreService {
 
   private getTransactionType(
     transaction: NormalizedTransaction,
+    chain: SupportedChain,
   ): NormalizedTransaction['type'] {
     const inputTokens = new Set(transaction.inputs.map((entry) => entry.token));
     const outputTokens = new Set(transaction.outputs.map((entry) => entry.token));
@@ -994,13 +1039,13 @@ export class WalletCoreService {
       return 'unknown';
     }
 
-    const bridgeTo = this.isKnownBridgeAddress(transaction.to);
-    const bridgeFrom = this.isKnownBridgeAddress(transaction.from);
-    const lendingTo = this.isKnownLendingProtocolAddress(transaction.to);
-    const lendingFrom = this.isKnownLendingProtocolAddress(transaction.from);
-    const vaultTo = this.isKnownVaultProtocolAddress(transaction.to);
-    const vaultFrom = this.isKnownVaultProtocolAddress(transaction.from);
-    const rewardFrom = this.isKnownRewardDistributorAddress(transaction.from);
+    const bridgeTo = this.isKnownBridgeAddress(transaction.to, chain);
+    const bridgeFrom = this.isKnownBridgeAddress(transaction.from, chain);
+    const lendingTo = this.isKnownLendingProtocolAddress(transaction.to, chain);
+    const lendingFrom = this.isKnownLendingProtocolAddress(transaction.from, chain);
+    const vaultTo = this.isKnownVaultProtocolAddress(transaction.to, chain);
+    const vaultFrom = this.isKnownVaultProtocolAddress(transaction.from, chain);
+    const rewardFrom = this.isKnownRewardDistributorAddress(transaction.from, chain);
 
     if (hasInputs && !hasOutputs) {
       if (lendingTo) {
@@ -1008,12 +1053,12 @@ export class WalletCoreService {
         return 'repay';
       }
 
-      if (bridgeTo || this.isLikelyBridgeOutWithoutReturn(transaction)) {
+      if (bridgeTo || this.isLikelyBridgeOutWithoutReturn(transaction, chain)) {
         this.logger.debug(`Detected bridge_out tx ${transaction.hash}`);
         return 'bridge_out';
       }
 
-      if (vaultTo && transaction.inputs.some((entry) => this.isBaseAssetLike(entry))) {
+      if (vaultTo && transaction.inputs.some((entry) => this.isBaseAssetLike(entry, chain))) {
         this.logger.debug(`Detected vault_deposit tx ${transaction.hash}`);
         return 'vault_deposit';
       }
@@ -1052,7 +1097,7 @@ export class WalletCoreService {
         return 'reward_claim';
       }
 
-      if (vaultFrom && transaction.outputs.some((entry) => this.isBaseAssetLike(entry))) {
+      if (vaultFrom && transaction.outputs.some((entry) => this.isBaseAssetLike(entry, chain))) {
         this.logger.debug(`Detected vault_withdraw tx ${transaction.hash}`);
         return 'vault_withdraw';
       }
@@ -1069,8 +1114,8 @@ export class WalletCoreService {
     if (
       inputTokens.size === 1 &&
       outputTokens.size === 1 &&
-      [...inputTokens][0].toUpperCase() === 'ETH' &&
-      [...outputTokens][0].toUpperCase() === 'WETH'
+      this.isNativeSymbol([...inputTokens][0], chain) &&
+      this.isWrappedNativeSymbol([...outputTokens][0], chain)
     ) {
       this.logger.debug(`Detected wrap tx ${transaction.hash}`);
       return 'wrap';
@@ -1080,8 +1125,8 @@ export class WalletCoreService {
     if (
       inputTokens.size === 1 &&
       outputTokens.size === 1 &&
-      [...inputTokens][0].toUpperCase() === 'WETH' &&
-      [...outputTokens][0].toUpperCase() === 'ETH'
+      this.isWrappedNativeSymbol([...inputTokens][0], chain) &&
+      this.isNativeSymbol([...outputTokens][0], chain)
     ) {
       this.logger.debug(`Detected unwrap tx ${transaction.hash}`);
       return 'unwrap';
@@ -1151,8 +1196,8 @@ export class WalletCoreService {
     }
 
     if (singleInputEntry && singleOutputEntry) {
-      const inputIsBaseAsset = this.isBaseAssetLike(singleInputEntry);
-      const outputIsBaseAsset = this.isBaseAssetLike(singleOutputEntry);
+      const inputIsBaseAsset = this.isBaseAssetLike(singleInputEntry, chain);
+      const outputIsBaseAsset = this.isBaseAssetLike(singleOutputEntry, chain);
       const inputIsLendingReceipt = this.isLikelyLendingReceiptToken(singleInputEntry);
       const outputIsLendingReceipt =
         this.isLikelyLendingReceiptToken(singleOutputEntry);
@@ -1208,8 +1253,8 @@ export class WalletCoreService {
         return 'staking_unwrap';
       }
 
-      const inputIsBaseStakingAsset = this.isStakingBaseAsset(singleInputEntry);
-      const outputIsBaseStakingAsset = this.isStakingBaseAsset(singleOutputEntry);
+      const inputIsBaseStakingAsset = this.isStakingBaseAsset(singleInputEntry, chain);
+      const outputIsBaseStakingAsset = this.isStakingBaseAsset(singleOutputEntry, chain);
 
       if (inputIsBaseStakingAsset && outputIsStakingDerivative) {
         this.logger.debug(`Detected stake tx ${transaction.hash}`);
@@ -1265,25 +1310,53 @@ export class WalletCoreService {
     return this.normalizeAddress(address) === WalletCoreService.ZERO_ADDRESS;
   }
 
-  private isKnownBridgeAddress(address?: string): boolean {
+  private isKnownBridgeAddress(
+    address: string | undefined,
+    chain: SupportedChain,
+  ): boolean {
+    if (chain !== 'ethereum') {
+      return false;
+    }
+
     const normalizedAddress = this.normalizeAddress(address);
 
     return WalletCoreService.BRIDGE_PROTOCOL_ADDRESSES.has(normalizedAddress);
   }
 
-  private isKnownLendingProtocolAddress(address?: string): boolean {
+  private isKnownLendingProtocolAddress(
+    address: string | undefined,
+    chain: SupportedChain,
+  ): boolean {
+    if (chain !== 'ethereum') {
+      return false;
+    }
+
     const normalizedAddress = this.normalizeAddress(address);
 
     return WalletCoreService.LENDING_PROTOCOL_ADDRESSES.has(normalizedAddress);
   }
 
-  private isKnownVaultProtocolAddress(address?: string): boolean {
+  private isKnownVaultProtocolAddress(
+    address: string | undefined,
+    chain: SupportedChain,
+  ): boolean {
+    if (chain !== 'ethereum') {
+      return false;
+    }
+
     const normalizedAddress = this.normalizeAddress(address);
 
     return WalletCoreService.VAULT_PROTOCOL_ADDRESSES.has(normalizedAddress);
   }
 
-  private isKnownRewardDistributorAddress(address?: string): boolean {
+  private isKnownRewardDistributorAddress(
+    address: string | undefined,
+    chain: SupportedChain,
+  ): boolean {
+    if (chain !== 'ethereum') {
+      return false;
+    }
+
     const normalizedAddress = this.normalizeAddress(address);
 
     return WalletCoreService.REWARD_DISTRIBUTOR_ADDRESSES.has(normalizedAddress);
@@ -1350,10 +1423,15 @@ export class WalletCoreService {
     );
   }
 
-  private isBaseAssetLike(entry: NormalizedTokenAmount): boolean {
+  private isBaseAssetLike(
+    entry: NormalizedTokenAmount,
+    chain: SupportedChain,
+  ): boolean {
     const symbol = this.normalizeTokenSymbol(entry.token);
 
     return (
+      this.isNativeSymbol(symbol, chain) ||
+      this.isWrappedNativeSymbol(symbol, chain) ||
       WalletCoreService.BASE_ASSET_SYMBOLS.has(symbol) ||
       this.isPendleBaseOrRestakedAsset(entry)
     );
@@ -1380,6 +1458,7 @@ export class WalletCoreService {
 
   private isLikelyBridgeOutWithoutReturn(
     transaction: NormalizedTransaction,
+    chain: SupportedChain,
   ): boolean {
     if (transaction.inputs.length === 0 || transaction.outputs.length > 0) {
       return false;
@@ -1389,7 +1468,7 @@ export class WalletCoreService {
       return false;
     }
 
-    return transaction.inputs.some((entry) => this.isBaseAssetLike(entry));
+    return transaction.inputs.some((entry) => this.isBaseAssetLike(entry, chain));
   }
 
   private isPendleBaseOrRestakedAsset(entry: NormalizedTokenAmount): boolean {
@@ -1462,9 +1541,34 @@ export class WalletCoreService {
     );
   }
 
-  private isStakingBaseAsset(entry: NormalizedTokenAmount): boolean {
-    return WalletCoreService.STAKING_BASE_ASSET_SYMBOLS.has(
-      this.normalizeTokenSymbol(entry.token),
+  private isStakingBaseAsset(
+    entry: NormalizedTokenAmount,
+    chain: SupportedChain,
+  ): boolean {
+    const symbol = this.normalizeTokenSymbol(entry.token);
+
+    return (
+      this.isNativeSymbol(symbol, chain) ||
+      this.isWrappedNativeSymbol(symbol, chain) ||
+      WalletCoreService.STAKING_BASE_ASSET_SYMBOLS.has(symbol)
+    );
+  }
+
+  private isNativeSymbol(symbol: string, chain: SupportedChain): boolean {
+    const normalizedSymbol = this.normalizeTokenSymbol(symbol);
+    const chainProfile = getChainProfile(chain);
+
+    return chainProfile.nativeAliases.some(
+      (alias) => alias.toUpperCase() === normalizedSymbol,
+    );
+  }
+
+  private isWrappedNativeSymbol(symbol: string, chain: SupportedChain): boolean {
+    const normalizedSymbol = this.normalizeTokenSymbol(symbol);
+    const chainProfile = getChainProfile(chain);
+
+    return chainProfile.wrappedAliases.some(
+      (alias) => alias.toUpperCase() === normalizedSymbol,
     );
   }
 
@@ -1520,6 +1624,7 @@ export class WalletCoreService {
     return this.fetchPaginatedMoralisEndpoint<MoralisErc20Transfer>(
       `/${address}/erc20/transfers`,
       'ERC-20 transfers',
+      options?.chain ?? DEFAULT_SUPPORTED_CHAIN,
       options,
     );
   }
@@ -1531,6 +1636,7 @@ export class WalletCoreService {
     return this.fetchPaginatedMoralisEndpoint<MoralisWalletHistoryItem>(
       `/wallets/${address}/history`,
       'wallet history',
+      options?.chain ?? DEFAULT_SUPPORTED_CHAIN,
       options,
     );
   }
@@ -1540,8 +1646,10 @@ export class WalletCoreService {
   >(
     path: string,
     operation: string,
+    chain: SupportedChain,
     options?: MoralisFetchOptions,
   ): Promise<T[]> {
+    const chainProfile = getChainProfile(chain);
     const items: T[] = [];
     let cursor: string | undefined;
     let shouldContinue = true;
@@ -1551,7 +1659,7 @@ export class WalletCoreService {
         const response = await this.callMoralisWithRetry((apiKey) =>
           this.moralisClient.get<MoralisPaginatedResponse<T>>(path, {
             params: {
-              chain: 'eth',
+              chain: chainProfile.moralisId,
               order: 'DESC',
               limit: 100,
               ...(cursor ? { cursor } : {}),

@@ -44,6 +44,11 @@ import { WalletContextService } from './wallet-context.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletPortfolioService } from './wallet-portfolio.service';
 import { WalletPricingService } from './wallet-pricing.service';
+import {
+	DEFAULT_SUPPORTED_CHAIN,
+	SupportedChain,
+	getChainProfile,
+} from '../../shared/constants/chains';
 
 interface ScoreBracket {
 	min: number;
@@ -108,21 +113,26 @@ export class WalletScoringService {
 	async getWalletScore(
 		address: string,
 		debug = false,
+		chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
 	): Promise<WalletScoreResult> {
 		const [context, summary, portfolioResult] = await Promise.all([
-			this.walletContextService.getWalletContext(address),
-			this.walletPnlService.getWalletSummary(address),
-			this.walletPortfolioService.getPortfolioWithAvailability(address),
+			this.walletContextService.getWalletContext(address, undefined, chain),
+			this.walletPnlService.getWalletSummary(address, chain),
+			this.walletPortfolioService.getPortfolioWithAvailability(address, chain),
 		]);
 
 		const { portfolio, balancesAvailable } = portfolioResult;
-		const scoringEligiblePortfolio = this.filterScoringEligibleHoldings(portfolio);
+		const scoringEligiblePortfolio = this.filterScoringEligibleHoldings(
+			portfolio,
+			chain,
+		);
 		const scoredAt = new Date().toISOString();
 
 		if (!context.isTraderWallet) {
 			const confidenceProfile = await this.walletConfidenceService.getConfidence(
 				address,
 				{ summary },
+				chain,
 			);
 			const positiveValueHoldings = this.filterHoldingsByUsdValue(
 				scoringEligiblePortfolio,
@@ -158,7 +168,7 @@ export class WalletScoringService {
 			}
 
 			const tokenCategories =
-				await this.walletAnalyticsService.getTokenCategoryMetrics(address);
+				await this.walletAnalyticsService.getTokenCategoryMetrics(address, chain);
 
 			return this.scoreHolder(
 				summary.address,
@@ -168,17 +178,18 @@ export class WalletScoringService {
 				scoredAt,
 				confidenceProfile,
 				debug,
+				chain,
 			);
 		}
 
 		const [activity, riskResult, holdTime, tokenCategories, dexMetrics, trades] =
 			await Promise.all([
-				this.walletAnalyticsService.getActivityMetrics(address),
-				this.walletAnalyticsService.getRiskMetrics(address, true),
-				this.walletAnalyticsService.getHoldTimeMetrics(address),
-				this.walletAnalyticsService.getTokenCategoryMetrics(address),
-				this.walletAnalyticsService.getDexMetrics(address),
-				this.walletPnlService.getTrades(address),
+				this.walletAnalyticsService.getActivityMetrics(address, chain),
+				this.walletAnalyticsService.getRiskMetrics(address, true, chain),
+				this.walletAnalyticsService.getHoldTimeMetrics(address, chain),
+				this.walletAnalyticsService.getTokenCategoryMetrics(address, chain),
+				this.walletAnalyticsService.getDexMetrics(address, false, chain),
+				this.walletPnlService.getTrades(address, chain),
 			]);
 		const risk = this.extractRiskMetrics(riskResult);
 		const realizedTradeCount = this.resolveRealizedTradeSampleSize(
@@ -195,6 +206,7 @@ export class WalletScoringService {
 				holdTime,
 				trades,
 			},
+			chain,
 		);
 		const gateStatus = this.resolveGateStatus(context, summary, activity);
 
@@ -354,11 +366,12 @@ export class WalletScoringService {
 		scoredAt: string,
 		confidenceProfile: WalletConfidenceFields,
 		debug: boolean,
+		chain: SupportedChain,
 	): WalletScoreResult {
-		const positiveValueHoldings = this.filterHoldingsByUsdValue(portfolio, 0);
-		const nonDustHoldings = this.filterHoldingsByUsdValue(portfolio, 1);
+		const positiveValueHoldings = this.filterHoldingsByUsdValue(portfolio, 0, chain);
+		const nonDustHoldings = this.filterHoldingsByUsdValue(portfolio, 1, chain);
 		const qualityAssetPercent = this.calculateQualityAssetPercent(tokenCategories);
-		const uniqueTokenCount = this.countUniquePortfolioTokens(nonDustHoldings);
+		const uniqueTokenCount = this.countUniquePortfolioTokens(nonDustHoldings, chain);
 		const categoryDiversity = tokenCategories.categoryDiversity;
 		const memecoinHoldingPercent = tokenCategories.memecoinHoldingPercent;
 		const avgHoldingDaysValue = this.computeAverageHoldingDays(positiveValueHoldings);
@@ -382,7 +395,7 @@ export class WalletScoringService {
 			holderScaleEligibleHoldings,
 		);
 		const nonDustCountValue = nonDustHoldings.length;
-		const hasEthValue = this.hasEthExposure(portfolio) ? 1 : 0;
+		const hasEthValue = this.hasNativeExposure(portfolio, chain) ? 1 : 0;
 
 		const qualityAssetPercentMetric = this.createMetricDebug(
 			qualityAssetPercent,
@@ -1064,10 +1077,13 @@ export class WalletScoringService {
 		return this.roundDecimal((trustedHoldingsUsd / totalHoldingsUsd) * 100);
 	}
 
-	private countUniquePortfolioTokens(portfolio: WalletPortfolioItem[]): number {
+	private countUniquePortfolioTokens(
+		portfolio: WalletPortfolioItem[],
+		chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+	): number {
 		return new Set(
 			portfolio
-				.filter((holding) => this.isScoringEligibleHolding(holding))
+				.filter((holding) => this.isScoringEligibleHolding(holding, chain))
 				.map((holding) =>
 				holding.contractAddress?.toLowerCase() ?? holding.token.trim().toLowerCase(),
 				),
@@ -1745,9 +1761,10 @@ export class WalletScoringService {
 	private filterHoldingsByUsdValue(
 		portfolio: WalletPortfolioItem[],
 		minimumUsdValue: number,
+		chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
 	): WalletPortfolioItem[] {
 		return portfolio.filter((holding) => {
-			if (!this.isScoringEligibleHolding(holding)) {
+			if (!this.isScoringEligibleHolding(holding, chain)) {
 				return false;
 			}
 
@@ -1833,15 +1850,27 @@ export class WalletScoringService {
 		return this.roundDecimal(Math.max(...usdValues));
 	}
 
-	private hasEthExposure(portfolio: WalletPortfolioItem[]): boolean {
+	private hasNativeExposure(
+		portfolio: WalletPortfolioItem[],
+		chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+	): boolean {
+		const chainProfile = getChainProfile(chain);
+
 		return portfolio.some((holding) => {
-			if (!this.isScoringEligibleHolding(holding)) {
+			if (!this.isScoringEligibleHolding(holding, chain)) {
 				return false;
 			}
 
 			const token = holding.token.trim().toUpperCase();
 
-			return token === 'ETH' || token === 'WETH';
+			return (
+				chainProfile.nativeAliases.some(
+					(alias) => alias.toUpperCase() === token,
+				) ||
+				chainProfile.wrappedAliases.some(
+					(alias) => alias.toUpperCase() === token,
+				)
+			);
 		});
 	}
 
@@ -1868,11 +1897,17 @@ export class WalletScoringService {
 
 	private filterScoringEligibleHoldings(
 		portfolio: WalletPortfolioItem[],
+		chain: SupportedChain,
 	): WalletPortfolioItem[] {
-		return portfolio.filter((holding) => this.isScoringEligibleHolding(holding));
+		return portfolio.filter((holding) =>
+			this.isScoringEligibleHolding(holding, chain),
+		);
 	}
 
-	private isScoringEligibleHolding(holding: WalletPortfolioItem): boolean {
+	private isScoringEligibleHolding(
+		holding: WalletPortfolioItem,
+		chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+	): boolean {
 		if (holding.tokenQualityLabel === 'spoofed_major_symbol') {
 			return false;
 		}
@@ -1880,6 +1915,7 @@ export class WalletScoringService {
 		return !this.walletPricingService.isSpoofedMajorSymbol(
 			holding.token,
 			holding.contractAddress,
+			chain,
 		);
 	}
 

@@ -6,6 +6,10 @@ import {
 } from '../wallet.types';
 import { WalletCoreService } from './wallet-core.service';
 import { PricedTrade, WalletPricingService } from './wallet-pricing.service';
+import {
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+} from '../../shared/constants/chains';
 
 type FifoBuyLot = { amount: number; price: number; timestamp: number };
 
@@ -51,9 +55,12 @@ export class WalletPnlService {
     private readonly walletPricingService: WalletPricingService,
   ) {}
 
-  async getTrades(address: string): Promise<Trade[]> {
+  async getTrades(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<Trade[]> {
     const transactions =
-      await this.walletCoreService.getTransactionEntities(address);
+      await this.walletCoreService.getTransactionEntities(address, chain);
 
     const swapTransactions = transactions
       .filter((transaction) => transaction.type === 'swap')
@@ -96,8 +103,11 @@ export class WalletPnlService {
     return trades.sort((left, right) => left.timestamp - right.timestamp);
   }
 
-  async getPricedTrades(address: string): Promise<PricedTrade[]> {
-    const trades = await this.getTrades(address);
+  async getPricedTrades(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<PricedTrade[]> {
+    const trades = await this.getTrades(address, chain);
 
     const externalPriceCache = new Map<string, number>();
     const pricedTrades: PricedTrade[] = trades.map((trade) => ({
@@ -128,6 +138,7 @@ export class WalletPnlService {
           trade.token,
           trade.contractAddress,
           trade.timestamp,
+          chain,
         );
 
         if (inferredCandidate) {
@@ -139,6 +150,7 @@ export class WalletPnlService {
           !this.walletPricingService.isTrustedMajorToken(
             trade.token,
             trade.contractAddress,
+            chain,
           )
         ) {
           continue;
@@ -147,6 +159,7 @@ export class WalletPnlService {
         trade.price = await this.fetchHistoricalTradePriceCached(
           trade,
           externalPriceCache,
+          chain,
         );
       }
 
@@ -162,6 +175,7 @@ export class WalletPnlService {
         knownTrade.price,
         unknownTrade,
         tradesAtTimestamp.length,
+        chain,
       );
 
       if (!inferenceDecision) {
@@ -175,6 +189,7 @@ export class WalletPnlService {
         unknownTrade.timestamp,
         inferenceDecision.price,
         inferenceDecision.confidenceScore,
+        chain,
       );
     }
 
@@ -187,6 +202,7 @@ export class WalletPnlService {
         trade.token,
         trade.contractAddress,
         trade.timestamp,
+        chain,
       );
 
       if (inferredCandidate) {
@@ -197,17 +213,19 @@ export class WalletPnlService {
       trade.price = await this.fetchHistoricalTradePriceCached(
         trade,
         externalPriceCache,
+        chain,
       );
     }
 
-    return this.walletPricingService.inferMissingSwapPrices(pricedTrades);
+    return this.walletPricingService.inferMissingSwapPrices(pricedTrades, chain);
   }
 
   private async fetchHistoricalTradePriceCached(
     trade: Trade,
     priceCache: Map<string, number>,
+    chain: SupportedChain,
   ): Promise<number> {
-    const cacheKey = `${trade.contractAddress?.toLowerCase() ?? trade.token.toUpperCase()}-${trade.timestamp}`;
+    const cacheKey = `${chain}:${trade.contractAddress?.toLowerCase() ?? trade.token.toUpperCase()}-${trade.timestamp}`;
     const cached = priceCache.get(cacheKey);
 
     if (cached !== undefined) {
@@ -218,13 +236,17 @@ export class WalletPnlService {
       trade.token,
       trade.contractAddress,
       trade.timestamp,
+      chain,
     );
     priceCache.set(cacheKey, fetchedPrice);
     return fetchedPrice;
   }
 
-  async getRealizedTradeMetrics(address: string): Promise<RealizedTradeMetrics[]> {
-    const pricedTrades = await this.getPricedTrades(address);
+  async getRealizedTradeMetrics(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<RealizedTradeMetrics[]> {
+    const pricedTrades = await this.getPricedTrades(address, chain);
 
     return this.analyzePricedTrades(pricedTrades).realizedTradeMetrics;
   }
@@ -261,24 +283,33 @@ export class WalletPnlService {
     return this.roundDecimal(pricedLotRois[middleIndex], 4);
   }
 
-  async getCompletedTradeLots(address: string): Promise<CompletedTradeLot[]> {
-    const pricedTrades = await this.getPricedTrades(address);
+  async getCompletedTradeLots(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<CompletedTradeLot[]> {
+    const pricedTrades = await this.getPricedTrades(address, chain);
 
     return this.analyzePricedTrades(pricedTrades).completedTradeLots;
   }
 
-  async getPnL(address: string): Promise<WalletPnLResponse> {
-    const pricedTrades = await this.getPricedTrades(address);
+  async getPnL(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletPnLResponse> {
+    const pricedTrades = await this.getPricedTrades(address, chain);
     const analysis = this.analyzePricedTrades(pricedTrades);
 
     return this.buildPnlByToken(analysis);
   }
 
-  async getWalletSummary(address: string): Promise<WalletSummaryResponse> {
+  async getWalletSummary(
+    address: string,
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
+  ): Promise<WalletSummaryResponse> {
     const walletAddress = address.toLowerCase();
     const [transactions, pricedTrades] = await Promise.all([
-      this.walletCoreService.getTransactionEntitiesUnordered(address),
-      this.getPricedTrades(address),
+      this.walletCoreService.getTransactionEntitiesUnordered(address, chain),
+      this.getPricedTrades(address, chain),
     ]);
     const analysis = this.analyzePricedTrades(pricedTrades);
     const pnlByToken = this.buildPnlByToken(analysis);

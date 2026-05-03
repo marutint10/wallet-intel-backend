@@ -9,6 +9,10 @@ import {
 import { WalletAnalyticsService } from './wallet-analytics.service';
 import { WalletPnlService } from './wallet-pnl.service';
 import { WalletTriageService } from './wallet-triage.service';
+import {
+  DEFAULT_SUPPORTED_CHAIN,
+  SupportedChain,
+} from '../../shared/constants/chains';
 
 @Injectable()
 export class WalletContextService {
@@ -25,16 +29,17 @@ export class WalletContextService {
       activity?: WalletActivityMetricsResponse;
       triage?: WalletTriageResponse | null;
     } = {},
+    chain: SupportedChain = DEFAULT_SUPPORTED_CHAIN,
   ): Promise<WalletContextResponse> {
     const summary = input.summary
       ? input.summary
-      : await this.walletPnlService.getWalletSummary(address);
+      : await this.walletPnlService.getWalletSummary(address, chain);
     const triage =
       input.triage !== undefined
         ? input.triage
         : await this.walletTriageService.getWalletTriage(address, {
             summary,
-          });
+          }, chain);
 
     if (triage) {
       return {
@@ -54,7 +59,7 @@ export class WalletContextService {
 
     const activity = input.activity
       ? input.activity
-      : await this.walletAnalyticsService.getActivityMetrics(address);
+      : await this.walletAnalyticsService.getActivityMetrics(address, chain);
     const walletSubtype = this.resolveEoaSubtype({
       tradesPerActiveDay: activity.tradesPerActiveDay,
       avgTradeGapHours: activity.avgTradeGapHours,
