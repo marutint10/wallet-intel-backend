@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   Trade,
   WalletActivityMetricsResponse,
@@ -14,7 +14,13 @@ import {
   WalletTokenCategoryMetricsResponse,
 } from '../wallet.types';
 import { DEX_ROUTERS, UNKNOWN_DEX_LABEL } from '../constants/dex-routers';
-import { TokenCategory, classifyToken } from '../constants/token-categories';
+import {
+  MAJOR_SYMBOL_CATEGORY_FALLBACKS,
+  NATIVE_TOKEN_CATEGORIES,
+  TOKEN_CATEGORY_MAPS,
+  TokenCategory,
+  classifyToken,
+} from '../constants/token-categories';
 import {
   RealizedTradeMetrics,
   WalletPnlService,
@@ -33,8 +39,53 @@ interface PortfolioConcentrationSnapshot {
   concentrationRisk: number;
 }
 
+type AnalyticsTokenCategory =
+  | 'Blue Chip / L1'
+  | 'DeFi'
+  | 'Stablecoin'
+  | 'AI'
+  | 'Gaming'
+  | 'Memecoin'
+  | 'Other';
+
+interface TokenCategoryMarketSignal {
+  liquidityUsd: number | null;
+  priceSources: string[];
+}
+
+interface TokenClassificationInput {
+  token: string;
+  contractAddress?: string | null;
+  chain: SupportedChain;
+  marketSignal?: TokenCategoryMarketSignal;
+}
+
+const TOKEN_CATEGORY_BUCKETS: AnalyticsTokenCategory[] = [
+  'Blue Chip / L1',
+  'DeFi',
+  'Stablecoin',
+  'AI',
+  'Gaming',
+  'Memecoin',
+  'Other',
+];
+
+const TOKEN_CATEGORY_PRIORITY: Record<AnalyticsTokenCategory, number> = {
+  Memecoin: 7,
+  AI: 6,
+  Gaming: 5,
+  DeFi: 4,
+  Other: 3,
+  'Blue Chip / L1': 2,
+  Stablecoin: 1,
+};
+
+const MEMECOIN_FALLBACK_LIQUIDITY_USD = 500_000;
+
 @Injectable()
 export class WalletAnalyticsService {
+  private readonly logger = new Logger(WalletAnalyticsService.name);
+
   constructor(
     private readonly walletCoreService: WalletCoreService,
     private readonly walletPnlService: WalletPnlService,
@@ -275,31 +326,30 @@ export class WalletAnalyticsService {
     const tradesByCategory = new Map<string, number>();
     const volumeByCategory = new Map<string, number>();
     const currentHoldingsByCategory = new Map<string, number>();
+    const marketSignals = this.buildTokenCategoryMarketSignals(
+      metricEligibleHoldings,
+    );
+    const tradesBySwap = this.groupTradesBySwap(metricEligibleTrades);
 
-    for (const trade of metricEligibleTrades) {
-      const category = classifyToken(
-        trade.contractAddress,
-        trade.token,
+    for (const swapTrades of tradesBySwap.values()) {
+      const categoryLabel = this.classifySwapCategory(
+        swapTrades,
+        marketSignals,
         chain,
-      ).category;
-      const categoryLabel = category.toString();
+      );
 
       tradesByCategory.set(
         categoryLabel,
         (tradesByCategory.get(categoryLabel) ?? 0) + 1,
       );
 
-      const tradeAmount = Number(trade.amount);
+      const tradeVolume = this.computeSwapVolumeUsd(swapTrades);
 
-      if (
-        Number.isFinite(trade.price) &&
-        trade.price > 0 &&
-        Number.isFinite(tradeAmount)
-      ) {
+      if (tradeVolume > 0) {
         volumeByCategory.set(
           categoryLabel,
           this.roundDecimal(
-            (volumeByCategory.get(categoryLabel) ?? 0) + trade.price * tradeAmount,
+            (volumeByCategory.get(categoryLabel) ?? 0) + tradeVolume,
           ),
         );
       }
@@ -316,12 +366,16 @@ export class WalletAnalyticsService {
         continue;
       }
 
-      const category = classifyToken(
-        holding.contractAddress,
-        holding.token,
+      const categoryLabel = this.classifyTokenCategory({
+        token: holding.token,
+        contractAddress: holding.contractAddress,
         chain,
-      ).category;
-      const categoryLabel = category.toString();
+        marketSignal: this.getTokenCategoryMarketSignal(
+          holding.token,
+          holding.contractAddress,
+          marketSignals,
+        ),
+      });
 
       currentHoldingsByCategory.set(
         categoryLabel,
@@ -331,7 +385,10 @@ export class WalletAnalyticsService {
       );
     }
 
-    const totalTrades = metricEligibleTrades.length;
+    const totalTrades = Array.from(tradesByCategory.values()).reduce(
+      (total, value) => total + value,
+      0,
+    );
     const totalVolume = Array.from(volumeByCategory.values()).reduce(
       (total, value) => total + value,
       0,
@@ -340,56 +397,289 @@ export class WalletAnalyticsService {
       (total, value) => total + value,
       0,
     );
-    const dominantTradingCategoryEntry = Array.from(tradesByCategory.entries()).sort(
-      (left, right) => right[1] - left[1],
-    )[0] ?? null;
+    const tradePercentByCategory = this.buildCategoryPercentages(
+      tradesByCategory,
+      totalTrades,
+    );
+    const holdingPercentByCategory = this.buildCategoryPercentages(
+      currentHoldingsByCategory,
+      totalHoldingsUsd,
+    );
+    const dominantTradingCategory = this.resolveDominantCategory(
+      tradePercentByCategory,
+    );
     const dominantHoldingCategoryEntry = Array.from(
       currentHoldingsByCategory.entries(),
     ).sort((left, right) => right[1] - left[1])[0] ?? null;
-    const memecoinTrades = tradesByCategory.get(TokenCategory.MEMECOIN) ?? 0;
-    const blueChipTrades = tradesByCategory.get(TokenCategory.BLUE_CHIP) ?? 0;
-    const stablecoinVolume = volumeByCategory.get(TokenCategory.STABLECOIN) ?? 0;
-    const memecoinHoldings =
-      currentHoldingsByCategory.get(TokenCategory.MEMECOIN) ?? 0;
-    const blueChipHoldings =
-      currentHoldingsByCategory.get(TokenCategory.BLUE_CHIP) ?? 0;
-    const stablecoinHoldings =
-      currentHoldingsByCategory.get(TokenCategory.STABLECOIN) ?? 0;
 
     return {
       tradesByCategory: Object.fromEntries(tradesByCategory.entries()),
       historicalVolumeByCategory: Object.fromEntries(volumeByCategory.entries()),
-      dominantTradingCategory: dominantTradingCategoryEntry?.[0] ?? null,
+      dominantTradingCategory,
       categoryDiversity: tradesByCategory.size,
-      memecoinTradePercent:
-        totalTrades > 0
-          ? this.roundDecimal((memecoinTrades / totalTrades) * 100)
-          : 0,
-      blueChipTradePercent:
-        totalTrades > 0
-          ? this.roundDecimal((blueChipTrades / totalTrades) * 100)
-          : 0,
-      stablecoinTradePercent:
-        totalVolume > 0
-          ? this.roundDecimal((stablecoinVolume / totalVolume) * 100)
-          : 0,
+      memecoinTradePercent: tradePercentByCategory.Memecoin,
+      blueChipTradePercent: tradePercentByCategory['Blue Chip / L1'],
+      defiTradePercent: tradePercentByCategory.DeFi,
+      stablecoinTradePercent: tradePercentByCategory.Stablecoin,
+      aiNarrativeTradePercent: tradePercentByCategory.AI,
+      gamingTradePercent: tradePercentByCategory.Gaming,
+      otherTradePercent: tradePercentByCategory.Other,
       currentHoldingsByCategory: Object.fromEntries(
         currentHoldingsByCategory.entries(),
       ),
       dominantHoldingCategory: dominantHoldingCategoryEntry?.[0] ?? null,
-      memecoinHoldingPercent:
-        totalHoldingsUsd > 0
-          ? this.roundDecimal((memecoinHoldings / totalHoldingsUsd) * 100)
-          : 0,
-      blueChipHoldingPercent:
-        totalHoldingsUsd > 0
-          ? this.roundDecimal((blueChipHoldings / totalHoldingsUsd) * 100)
-          : 0,
-      stablecoinHoldingPercent:
-        totalHoldingsUsd > 0
-          ? this.roundDecimal((stablecoinHoldings / totalHoldingsUsd) * 100)
-          : 0,
+      memecoinHoldingPercent: holdingPercentByCategory.Memecoin,
+      blueChipHoldingPercent: holdingPercentByCategory['Blue Chip / L1'],
+      defiHoldingPercent: holdingPercentByCategory.DeFi,
+      stablecoinHoldingPercent: holdingPercentByCategory.Stablecoin,
+      aiNarrativeHoldingPercent: holdingPercentByCategory.AI,
+      gamingHoldingPercent: holdingPercentByCategory.Gaming,
+      otherHoldingPercent: holdingPercentByCategory.Other,
     };
+  }
+
+  private groupTradesBySwap<T extends Trade>(trades: T[]): Map<string, T[]> {
+    const tradesBySwap = new Map<string, T[]>();
+
+    trades.forEach((trade, index) => {
+      const swapKey = trade.transactionHash
+        ? trade.transactionHash.toLowerCase()
+        : `${trade.timestamp}:${trade.routeHopIndex ?? index}`;
+      const swapTrades = tradesBySwap.get(swapKey) ?? [];
+
+      swapTrades.push(trade);
+      tradesBySwap.set(swapKey, swapTrades);
+    });
+
+    return tradesBySwap;
+  }
+
+  private classifySwapCategory<T extends Trade>(
+    trades: T[],
+    marketSignals: Map<string, TokenCategoryMarketSignal>,
+    chain: SupportedChain,
+  ): AnalyticsTokenCategory {
+    const categories = trades.map((trade) =>
+      this.classifyTokenCategory({
+        token: trade.token,
+        contractAddress: trade.contractAddress,
+        chain,
+        marketSignal: this.getTokenCategoryMarketSignal(
+          trade.token,
+          trade.contractAddress,
+          marketSignals,
+        ),
+      }),
+    );
+
+    return categories.sort(
+      (left, right) => TOKEN_CATEGORY_PRIORITY[right] - TOKEN_CATEGORY_PRIORITY[left],
+    )[0] ?? 'Other';
+  }
+
+  private classifyTokenCategory(
+    input: TokenClassificationInput,
+  ): AnalyticsTokenCategory {
+    const tokenMeta = classifyToken(input.contractAddress, input.token, input.chain);
+    const hasVerifiedCategory = this.hasVerifiedTokenCategory(
+      input.contractAddress,
+      input.token,
+      input.chain,
+    );
+    const classifiedCategory = hasVerifiedCategory
+      ? this.normalizeVerifiedCategory(tokenMeta.category)
+      : this.classifyUnknownToken(input.marketSignal);
+
+    this.logger.debug({
+      token: input.token,
+      liquidityUsd: input.marketSignal?.liquidityUsd ?? null,
+      classifiedCategory,
+    });
+
+    return classifiedCategory;
+  }
+
+  private hasVerifiedTokenCategory(
+    contractAddress: string | null | undefined,
+    token: string | null | undefined,
+    chain: SupportedChain,
+  ): boolean {
+    if (contractAddress) {
+      const normalizedAddress = contractAddress.toLowerCase();
+
+      if (TOKEN_CATEGORY_MAPS[chain][normalizedAddress]) {
+        return true;
+      }
+    }
+
+    if (!token) {
+      return false;
+    }
+
+    const normalizedSymbol = token.toUpperCase();
+
+    return Boolean(
+      NATIVE_TOKEN_CATEGORIES[normalizedSymbol] ||
+        MAJOR_SYMBOL_CATEGORY_FALLBACKS[normalizedSymbol],
+    );
+  }
+
+  private normalizeVerifiedCategory(
+    category: TokenCategory,
+  ): AnalyticsTokenCategory {
+    switch (category) {
+      case TokenCategory.BLUE_CHIP:
+      case TokenCategory.LST_LRT:
+        return 'Blue Chip / L1';
+      case TokenCategory.DEFI:
+        return 'DeFi';
+      case TokenCategory.STABLECOIN:
+        return 'Stablecoin';
+      case TokenCategory.AI_NARRATIVE:
+        return 'AI';
+      case TokenCategory.GAMING:
+        return 'Gaming';
+      case TokenCategory.MEMECOIN:
+        return 'Memecoin';
+      default:
+        return 'Other';
+    }
+  }
+
+  private classifyUnknownToken(
+    marketSignal: TokenCategoryMarketSignal | undefined,
+  ): AnalyticsTokenCategory {
+    const liquidityUsd = marketSignal?.liquidityUsd ?? null;
+    const hasLowOrMissingLiquidity =
+      liquidityUsd === null || liquidityUsd < MEMECOIN_FALLBACK_LIQUIDITY_USD;
+    const priceSources = this.normalizePriceSources(marketSignal?.priceSources);
+    const hasDexScreenerOnlyPrice =
+      priceSources.length === 1 && priceSources[0] === 'dexscreener';
+    const hasMissingCoinGeckoPrice = !priceSources.includes('coingecko');
+
+    if (
+      hasLowOrMissingLiquidity &&
+      (hasDexScreenerOnlyPrice || hasMissingCoinGeckoPrice)
+    ) {
+      return 'Memecoin';
+    }
+
+    return 'Other';
+  }
+
+  private buildTokenCategoryMarketSignals(
+    portfolio: WalletPortfolioResponse,
+  ): Map<string, TokenCategoryMarketSignal> {
+    const signals = new Map<string, TokenCategoryMarketSignal>();
+
+    for (const holding of portfolio) {
+      const signal: TokenCategoryMarketSignal = {
+        liquidityUsd: this.parseNullableNumber(holding.liquidityUsd),
+        priceSources: this.normalizePriceSources(holding.priceSources),
+      };
+
+      for (const key of this.getTokenCategorySignalKeys(
+        holding.token,
+        holding.contractAddress,
+      )) {
+        signals.set(key, signal);
+      }
+    }
+
+    return signals;
+  }
+
+  private getTokenCategoryMarketSignal(
+    token: string,
+    contractAddress: string | null | undefined,
+    marketSignals: Map<string, TokenCategoryMarketSignal>,
+  ): TokenCategoryMarketSignal | undefined {
+    for (const key of this.getTokenCategorySignalKeys(token, contractAddress)) {
+      const signal = marketSignals.get(key);
+
+      if (signal) {
+        return signal;
+      }
+    }
+
+    return undefined;
+  }
+
+  private getTokenCategorySignalKeys(
+    token: string,
+    contractAddress?: string | null,
+  ): string[] {
+    const keys: string[] = [];
+
+    if (contractAddress) {
+      keys.push(`address:${contractAddress.toLowerCase()}`);
+    }
+
+    if (token.trim().length > 0) {
+      keys.push(`symbol:${token.toUpperCase()}`);
+    }
+
+    return keys;
+  }
+
+  private computeSwapVolumeUsd<T extends Trade & { price?: number }>(
+    trades: T[],
+  ): number {
+    return trades.reduce((maxVolume, trade) => {
+      const tradeAmount = Number(trade.amount);
+      const price = Number(trade.price ?? 0);
+
+      if (!Number.isFinite(tradeAmount) || !Number.isFinite(price) || price <= 0) {
+        return maxVolume;
+      }
+
+      return Math.max(maxVolume, price * tradeAmount);
+    }, 0);
+  }
+
+  private buildCategoryPercentages(
+    valuesByCategory: Map<string, number>,
+    total: number,
+  ): Record<AnalyticsTokenCategory, number> {
+    return Object.fromEntries(
+      TOKEN_CATEGORY_BUCKETS.map((category) => [
+        category,
+        total > 0
+          ? this.roundDecimal(((valuesByCategory.get(category) ?? 0) / total) * 100)
+          : 0,
+      ]),
+    ) as Record<AnalyticsTokenCategory, number>;
+  }
+
+  private resolveDominantCategory(
+    percentages: Record<AnalyticsTokenCategory, number>,
+  ): AnalyticsTokenCategory | null {
+    if (percentages.Memecoin > 40) {
+      return 'Memecoin';
+    }
+
+    const sortedCategories = TOKEN_CATEGORY_BUCKETS
+      .filter((category) => category !== 'Other' || percentages.Other > 50)
+      .sort((left, right) => percentages[right] - percentages[left]);
+    const dominantCategory = sortedCategories[0] ?? null;
+
+    if (!dominantCategory || percentages[dominantCategory] <= 0) {
+      return null;
+    }
+
+    return dominantCategory;
+  }
+
+  private normalizePriceSources(sources: string[] | undefined): string[] {
+    return (sources ?? [])
+      .map((source) => source.trim().toLowerCase())
+      .filter((source) => source.length > 0);
+  }
+
+  private parseNullableNumber(value: string | number | null | undefined): number | null {
+    const parsed = typeof value === 'number' ? value : Number(value);
+
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   private isMetricEligibleTrade(

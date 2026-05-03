@@ -1279,7 +1279,10 @@ export class ClassificationService {
 	}
 
 	private scoreDefiStrategist(input: ClassificationInputs): number {
-		if (input.tokenCategories.dominantTradingCategory !== TokenCategory.DEFI) {
+		if (
+			input.tokenCategories.dominantTradingCategory !== TokenCategory.DEFI &&
+			input.tokenCategories.dominantTradingCategory !== 'DeFi'
+		) {
 			return 0;
 		}
 
