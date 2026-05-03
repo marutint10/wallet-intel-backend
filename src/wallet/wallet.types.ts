@@ -4,6 +4,7 @@ import type {
   MoralisNativeBalanceResponse,
   MoralisWalletHistoryItem,
 } from './services/wallet-core.service';
+import type { SupportedChain } from '../shared/constants/chains';
 
 export interface NormalizedTokenAmount {
   token: string;
@@ -754,6 +755,146 @@ export type WalletIntelligenceResponse = WalletIntelligence;
 export type WalletIntelligenceResult =
   | WalletIntelligenceLiteResponse
   | WalletIntelligenceResponse;
+
+export interface UnifiedWalletHolding extends WalletPortfolioItem {
+  chain: SupportedChain;
+  chainNativeSymbol: string;
+}
+
+export interface UnifiedIntelligenceMetrics
+  extends Omit<
+    WalletIntelligenceMetrics,
+    'medianTradeRoi' | 'medianTradeROI'
+  > {
+  medianTradeRoi: number | null;
+  medianTradeROI: number | null;
+  unifiedNotices: string[];
+}
+
+export interface UnifiedScoreChainContribution {
+  score: number | null;
+  weight: number;
+  swaps: number;
+  portfolio: number;
+}
+
+export interface UnifiedScoreResponse {
+  address: string;
+  score: number | null;
+  scorePath: WalletScorePath | 'unified' | 'unified_no_data' | 'unified_triage';
+  mode: 'unified';
+  confidence: WalletConfidenceLabel;
+  confidenceLabel: WalletConfidenceLabel;
+  confidenceScore: number;
+  confidenceReason: string;
+  confidenceReasoning: string[];
+  band: WalletScoreBand | string;
+  breakdown: Record<string, unknown>;
+  scoreExplanation: WalletScoreExplanation;
+  chainContributions: Partial<Record<SupportedChain, UnifiedScoreChainContribution>>;
+  chainsContributing: SupportedChain[];
+  gateStatus: WalletScoreGateStatus | 'Unknown';
+  balancesAvailable: boolean;
+  scoredAt: string;
+  walletType?: WalletType;
+  walletSubtype?: WalletSubtype;
+  note?: string;
+}
+
+export interface UnifiedClassificationResponse {
+  address: string;
+  type: string;
+  primaryType: string;
+  primaryScore: number;
+  confidence: WalletConfidenceLabel;
+  confidenceLabel: WalletConfidenceLabel;
+  confidenceScore: number;
+  confidenceReason: string;
+  confidenceReasoning: string[];
+  description: string;
+  traits: string[];
+  riskProfile: 'conservative' | 'moderate' | 'aggressive';
+  secondaryTypes: string[];
+  scoreBreakdown: Record<string, number>;
+  allScores: Record<string, number>;
+  classifiedAt: string;
+  mode: 'unified';
+  primaryChain: SupportedChain | null;
+  classificationSource: 'trading_activity' | 'portfolio_value' | 'triage' | 'no_data';
+  perChainClassifications: Partial<Record<SupportedChain, string>>;
+  chainsAnalyzed: SupportedChain[];
+}
+
+export interface UnifiedIntelligenceContext extends WalletIntelligenceContext {
+  perChainWalletType: Partial<
+    Record<
+      SupportedChain,
+      {
+        type: WalletType;
+        subtype: WalletSubtype;
+      }
+    >
+  >;
+}
+
+export interface UnifiedFeaturesResponse {
+  summary: WalletIntelligenceSummary;
+  risk: WalletRiskMetricsResponse;
+  holdTime: Omit<WalletHoldTimeMetricsResponse, 'medianHoldHours'> & {
+    medianHoldHours: number | null;
+  };
+  activity: WalletActivityMetricsResponse;
+}
+
+export interface UnifiedDeepAnalysis {
+  crossChainStrategy: string;
+  strategyDiagnosis: string;
+  skillVsLuck: {
+    verdict: 'skilled' | 'unskilled' | 'insufficient_data';
+    confidence: 'high' | 'medium' | 'low';
+    reasoning: string;
+  };
+  hiddenRisks: string[];
+  copyTradeVerdict: {
+    recommendation: 'follow' | 'cautious' | 'avoid';
+    reasoning: string;
+  };
+  chainBreakdown: string;
+  oneSentenceTruth: string;
+}
+
+export interface UnifiedAiAnalysis {
+  aiSummary: string | null;
+  deepAnalysis: UnifiedDeepAnalysis | WalletDeepAnalysis | WalletTriageDeepAnalysis | null;
+}
+
+export interface UnifiedIntelligenceResponse {
+  address: string;
+  mode: 'unified';
+  analyzedAt: string;
+  chainsAnalyzed: SupportedChain[];
+  chainsWithActivity: SupportedChain[];
+  chainsTimedOut: SupportedChain[];
+  chainErrors: Partial<Record<SupportedChain, string>>;
+  chainActivity: Record<SupportedChain, 'active_trader' | 'active_holder' | 'empty' | 'failed'>;
+  partialResult: boolean;
+  note: string | null;
+  context: UnifiedIntelligenceContext;
+  summary: WalletIntelligenceSummary;
+  metrics: UnifiedIntelligenceMetrics;
+  score: UnifiedScoreResponse;
+  classification: UnifiedClassificationResponse;
+  portfolio: UnifiedWalletHolding[];
+  visiblePortfolio: UnifiedWalletHolding[];
+  portfolioSummary: WalletPortfolioSummary & {
+    perChainValue: Record<SupportedChain, number>;
+  };
+  cumulativePnL: WalletCumulativePnLEntry[];
+  features: UnifiedFeaturesResponse;
+  aiSummary: string | null;
+  deepAnalysis: UnifiedDeepAnalysis | WalletDeepAnalysis | WalletTriageDeepAnalysis | null;
+  perChain: Record<SupportedChain, WalletIntelligenceResponse | null>;
+}
 
 export interface WalletIntelligenceOptions {
   lite?: boolean;

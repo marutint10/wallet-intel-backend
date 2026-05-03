@@ -5,6 +5,9 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cache } from 'cache-manager';
 import {
+  UnifiedAiAnalysis,
+  UnifiedDeepAnalysis,
+  UnifiedIntelligenceResponse,
   WalletDeepAnalysis,
   WalletIntelligence,
   WalletScorePath,
@@ -25,6 +28,7 @@ type GeminiSummaryResult = {
 export class WalletAiService {
   private static readonly AI_SUMMARY_CACHE_PREFIX = 'ai_summary:';
   private static readonly DEEP_ANALYSIS_CACHE_PREFIX = 'ai_analysis:';
+  private static readonly UNIFIED_AI_CACHE_PREFIX = 'unified_ai:';
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly FALLBACK_CACHE_TTL_SECONDS = 1_800;
   private static readonly GEMINI_PRIMARY_SUMMARY_MODEL = 'gemini-2.5-flash';
@@ -41,6 +45,89 @@ export class WalletAiService {
     private readonly configService: ConfigService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
+
+  async generateUnifiedAnalysis(
+    address: string,
+    payload: UnifiedIntelligenceResponse,
+  ): Promise<UnifiedAiAnalysis> {
+    const normalizedAddress = address.toLowerCase();
+    const cacheKey = WalletAiService.UNIFIED_AI_CACHE_PREFIX + normalizedAddress;
+    const emptyResult: UnifiedAiAnalysis = {
+      aiSummary: null,
+      deepAnalysis: null,
+    };
+
+    try {
+      const cached = await this.cacheManager.get<UnifiedAiAnalysis>(cacheKey);
+
+      if (cached) {
+        this.logger.debug(`[UnifiedAI] Cache hit for ${address}`);
+        return cached;
+      }
+
+      const apiKey =
+        this.configService.get<string>('ANTHROPIC_API_KEY') ??
+        this.configService.get<string>('anthropic.apiKey') ??
+        '';
+
+      if (apiKey.trim().length === 0) {
+        this.logger.warn(
+          `[UnifiedAI] Anthropic API key missing for ${address}; returning unified response without AI commentary`,
+        );
+        return emptyResult;
+      }
+
+      const client = new Anthropic({ apiKey });
+      const response = await client.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1600,
+        temperature: 0.3,
+        system:
+          'You are a crypto wallet analyst specializing in multi-chain behavioral intelligence. Respond in valid JSON only. Do not include markdown, backticks, or prose outside the JSON object.',
+        messages: [
+          {
+            role: 'user',
+            content: this.buildUnifiedAnalysisUserMessage(address, payload),
+          },
+        ],
+      });
+      const text = response.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('')
+        .trim();
+      const parsed = this.parseDeepAnalysisJson<{
+        summary?: string;
+        deepAnalysis?: UnifiedDeepAnalysis;
+      }>(text);
+
+      if (!parsed?.summary || !parsed.deepAnalysis) {
+        this.logger.warn(
+          `[UnifiedAI] Failed to parse unified Claude response for ${address}; returning null AI fields`,
+        );
+        return emptyResult;
+      }
+
+      const result: UnifiedAiAnalysis = {
+        aiSummary: parsed.summary,
+        deepAnalysis: parsed.deepAnalysis,
+      };
+
+      await this.cacheManager.set(
+        cacheKey,
+        result,
+        WalletAiService.CACHE_TTL_SECONDS,
+      );
+
+      return result;
+    } catch (error) {
+      this.logger.warn(
+        `[UnifiedAI] Unified analysis generation failed for ${address}; returning null AI fields`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      return emptyResult;
+    }
+  }
 
   async generateSummary(
     address: string,
@@ -853,6 +940,86 @@ Return only the JSON, nothing else.`
 Return only the JSON, nothing else.`;
 
     return `${JSON.stringify(messagePayload, null, 2)}\n\n${instruction}`;
+  }
+
+  private buildUnifiedAnalysisUserMessage(
+    address: string,
+    payload: UnifiedIntelligenceResponse,
+  ): string {
+    const chainSections = payload.chainsAnalyzed
+      .map((chain) => {
+        const data = payload.perChain[chain];
+
+        if (!data) {
+          return `=== ${chain.toUpperCase()} ===\n- No data returned`;
+        }
+
+        const holdings = (data.visiblePortfolio ?? [])
+          .slice(0, 8)
+          .map(
+            (holding) =>
+              `${holding.token} (${this.formatUsd(this.parseUsdValue(holding.usdValue))})`,
+          )
+          .join(', ');
+
+        return `=== ${chain.toUpperCase()} ===
+- Wallet Type: ${data.context?.walletType} / ${data.context?.walletSubtype ?? 'EOA'}
+- Classification: ${'primaryType' in data.classification ? data.classification.primaryType : 'None'} (confidence: ${data.classification?.confidence ?? 'N/A'})
+- Score: ${data.score?.score ?? 'N/A'} / 100 (${'band' in data.score ? data.score.band : data.score.scoreBand ?? 'N/A'})
+- Total Swaps: ${data.summary?.total_swaps ?? 0}
+- Total Transactions: ${data.summary?.total_transactions ?? 0}
+- Realized PnL: ${this.formatUsd(Number(data.summary?.totalRealizedPnL ?? 0))}
+- Win Rate: ${this.formatPercent(Number(data.summary?.avgWinRate ?? 0))}
+- Portfolio Value: ${this.formatUsd(Number(data.portfolioSummary?.totalPortfolioValueUsd ?? 0))}
+- Holdings: ${holdings || 'None'}
+- Top Classification Scores: ${'allScores' in data.classification ? JSON.stringify(data.classification.allScores) : '{}'}
+`;
+      })
+      .join('\n');
+
+    return `Analyze this wallet across ${payload.chainsAnalyzed.length} EVM chains and write a unified cross-chain analysis.
+
+WALLET ADDRESS: ${address}
+
+${chainSections}
+
+UNIFIED METRICS:
+- Total Portfolio Value (all chains): ${this.formatUsd(payload.portfolioSummary.totalPortfolioValueUsd)}
+- Total Realized PnL (all chains): ${this.formatUsd(payload.summary.totalRealizedPnL)}
+- Total Swaps (all chains): ${payload.summary.total_swaps}
+- Unified Score: ${payload.score.score ?? 'N/A'} / 100
+- Unified Classification: ${payload.classification.primaryType}
+- Chains With Activity: ${payload.chainsWithActivity.join(', ') || 'none'}
+- Partial Result: ${payload.partialResult ? 'yes' : 'no'}
+
+Write your analysis in this exact JSON format:
+{
+  "summary": "3-5 sentence unified summary covering the wallet's cross-chain presence. Mention which chains are active, overall strategy, and total portfolio. Do not just repeat per-chain summaries; synthesize a cross-chain narrative.",
+  "deepAnalysis": {
+    "crossChainStrategy": "How this wallet uses different chains, including whether it trades on one and holds on another.",
+    "strategyDiagnosis": "Overall trading or holding strategy across all chains.",
+    "skillVsLuck": {
+      "verdict": "skilled | unskilled | insufficient_data",
+      "confidence": "high | medium | low",
+      "reasoning": "Assessment based on combined performance across all chains."
+    },
+    "hiddenRisks": ["Risk 1 considering cross-chain exposure", "Risk 2", "Risk 3"],
+    "copyTradeVerdict": {
+      "recommendation": "follow | cautious | avoid",
+      "reasoning": "Assessment considering performance and behavior across all chains."
+    },
+    "chainBreakdown": "Brief note on what each chain contributes to the overall picture.",
+    "oneSentenceTruth": "One direct sentence about this wallet's cross-chain behavior."
+  }
+}
+
+Rules:
+- If a chain has zero activity, say so briefly and focus on active chains.
+- If the wallet is only active on one chain, acknowledge the others as dormant or dust.
+- If the wallet shows different behavior on different chains, call that out explicitly.
+- Never fabricate data. If metrics are zero, say there is no trading activity.
+- Be specific with dollar amounts, percentages, and chain names.
+- Return only valid JSON.`;
   }
 
   private getTop3Holdings(payload: WalletIntelligence): Array<{

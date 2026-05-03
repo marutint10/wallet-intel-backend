@@ -13,3 +13,4 @@ export { WalletPortfolioService } from './wallet-portfolio.service';
 export { WalletPricingService } from './wallet-pricing.service';
 export { WalletService } from './wallet.service';
 export { WalletAiService } from './wallet-ai.service';
+export { UnifiedIntelligenceService } from './unified-intelligence.service';
