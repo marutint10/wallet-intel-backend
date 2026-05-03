@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   Trade,
   WalletActivityMetricsResponse,
@@ -15,6 +15,8 @@ import {
   WalletIntelligenceResult,
   WalletIntelligenceScore,
   WalletIntelligenceSummary,
+  WalletIntelligenceDexMetrics,
+  WalletIntelligenceTokenCategories,
   WalletPortfolioSummary,
   WalletContextResponse,
   WalletDexMetricsResult,
@@ -91,6 +93,7 @@ export class WalletService {
     string,
     { expiresAt: number; value: WalletIntelligenceResult }
   >();
+  private readonly logger = new Logger(WalletService.name);
 
   constructor(
     private readonly walletCoreService: WalletCoreService,
@@ -247,6 +250,10 @@ export class WalletService {
         this.walletAnalyticsService.getRiskMetrics(normalizedAddress, false, chain),
         this.walletPortfolioService.getPortfolio(normalizedAddress, chain),
       ]);
+    const [tokenCategoryMetrics, dexMetrics] = await Promise.all([
+      this.getSafeTokenCategoryMetrics(normalizedAddress, chain),
+      this.getSafeDexMetrics(normalizedAddress, chain),
+    ]);
     const visiblePortfolio = this.buildVisiblePortfolio(fullPortfolio);
     const [metrics, realizedTrades] = await Promise.all([
       this.buildRoiMetrics(
@@ -322,6 +329,8 @@ export class WalletService {
       },
       holdTime,
       activity,
+      tokenCategoryMetrics,
+      dexMetrics,
       verbose,
     );
     const intelligencePayload: WalletIntelligence = {
@@ -530,6 +539,8 @@ export class WalletService {
     },
     holdTime: WalletHoldTimeMetricsResponse,
     activity: WalletActivityMetricsResponse,
+    tokenCategoryMetrics: WalletTokenCategoryMetricsResponse | null,
+    dexMetrics: WalletDexMetricsResult | null,
     verbose: boolean,
   ): WalletIntelligenceFeatures {
     const features: WalletIntelligenceFeatures = {
@@ -537,6 +548,8 @@ export class WalletService {
       risk,
       holdTime,
       activity,
+      tokenCategories: this.buildTokenCategoryFeatures(tokenCategoryMetrics),
+      dexMetrics: this.buildDexMetricFeatures(dexMetrics),
     };
 
     if (verbose) {
@@ -548,6 +561,75 @@ export class WalletService {
     }
 
     return features;
+  }
+
+  private async getSafeTokenCategoryMetrics(
+    address: string,
+    chain: SupportedChain,
+  ): Promise<WalletTokenCategoryMetricsResponse | null> {
+    try {
+      return await this.walletAnalyticsService.getTokenCategoryMetrics(
+        address,
+        chain,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to load token category metrics for ${address} on ${chain}: ${this.getErrorMessage(error)}`,
+      );
+      return null;
+    }
+  }
+
+  private async getSafeDexMetrics(
+    address: string,
+    chain: SupportedChain,
+  ): Promise<WalletDexMetricsResult | null> {
+    try {
+      return await this.walletAnalyticsService.getDexMetrics(
+        address,
+        false,
+        chain,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to load DEX metrics for ${address} on ${chain}: ${this.getErrorMessage(error)}`,
+      );
+      return null;
+    }
+  }
+
+  private buildTokenCategoryFeatures(
+    metrics: WalletTokenCategoryMetricsResponse | null,
+  ): WalletIntelligenceTokenCategories {
+    return {
+      memecoinPercent: metrics?.memecoinTradePercent ?? 0,
+      blueChipPercent: metrics?.blueChipTradePercent ?? 0,
+      defiPercent: metrics?.defiTradePercent ?? 0,
+      stablecoinPercent: metrics?.stablecoinTradePercent ?? 0,
+      l2Percent: 0,
+      aiNarrativePercent: metrics?.aiNarrativeTradePercent ?? 0,
+      gamingPercent: metrics?.gamingTradePercent ?? 0,
+      otherPercent: metrics?.otherTradePercent ?? 0,
+      dominantCategory: metrics?.dominantTradingCategory ?? 'Unknown',
+      categoryDiversity: metrics?.categoryDiversity ?? 0,
+      tradesByCategory: metrics?.tradesByCategory ?? {},
+    };
+  }
+
+  private buildDexMetricFeatures(
+    metrics: WalletDexMetricsResult | null,
+  ): WalletIntelligenceDexMetrics {
+    return {
+      primaryDex: metrics?.primaryDex ?? 'Unknown',
+      primaryDexShare: metrics?.primaryDexShare ?? 0,
+      dexDiversity: metrics?.dexDiversity ?? 0,
+      tradesPerDex: metrics?.tradesPerDex ?? {},
+      unknownDexPercent: metrics?.unknownDexPercent ?? 0,
+    };
+  }
+
+  private getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private buildIntelligenceSummary(

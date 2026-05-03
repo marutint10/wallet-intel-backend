@@ -23,10 +23,12 @@ import {
   WalletConfidenceLabel,
   WalletCumulativePnLEntry,
   WalletHoldTimeBuckets,
+  WalletIntelligenceDexMetrics,
   WalletIntelligenceResponse,
   WalletIntelligenceRoiLabels,
   WalletIntelligenceRoiSampleWarnings,
   WalletIntelligenceSummary,
+  WalletIntelligenceTokenCategories,
   WalletIntelligenceTrustSignals,
   WalletPortfolioSummary,
   WalletPricingCoverage,
@@ -592,6 +594,9 @@ export class UnifiedIntelligenceService {
     summary: WalletIntelligenceSummary,
     mergedHoldings: UnifiedWalletHolding[],
   ): UnifiedFeaturesResponse {
+    const tokenCategories = this.buildUnifiedTokenCategories(activeChains);
+    const dexMetrics = this.buildUnifiedDexMetrics(activeChains);
+
     return {
       summary,
       risk: {
@@ -649,7 +654,165 @@ export class UnifiedIntelligenceService {
           4,
         ),
       },
+      tokenCategories,
+      dexMetrics,
     };
+  }
+
+  private buildUnifiedTokenCategories(
+    activeChains: ChainIntelligenceResult[],
+  ): WalletIntelligenceTokenCategories {
+    const percentages = {
+      memecoinPercent: this.round(
+        this.weightedAverage(
+          activeChains,
+          'features.tokenCategories.memecoinPercent',
+          'summary.total_swaps',
+        ),
+        2,
+      ),
+      blueChipPercent: this.round(
+        this.weightedAverage(
+          activeChains,
+          'features.tokenCategories.blueChipPercent',
+          'summary.total_swaps',
+        ),
+        2,
+      ),
+      defiPercent: this.round(
+        this.weightedAverage(
+          activeChains,
+          'features.tokenCategories.defiPercent',
+          'summary.total_swaps',
+        ),
+        2,
+      ),
+      stablecoinPercent: this.round(
+        this.weightedAverage(
+          activeChains,
+          'features.tokenCategories.stablecoinPercent',
+          'summary.total_swaps',
+        ),
+        2,
+      ),
+      l2Percent: this.round(
+        this.weightedAverage(
+          activeChains,
+          'features.tokenCategories.l2Percent',
+          'summary.total_swaps',
+        ),
+        2,
+      ),
+      aiNarrativePercent: this.round(
+        this.weightedAverage(
+          activeChains,
+          'features.tokenCategories.aiNarrativePercent',
+          'summary.total_swaps',
+        ),
+        2,
+      ),
+      gamingPercent: this.round(
+        this.weightedAverage(
+          activeChains,
+          'features.tokenCategories.gamingPercent',
+          'summary.total_swaps',
+        ),
+        2,
+      ),
+      otherPercent: this.round(
+        this.weightedAverage(
+          activeChains,
+          'features.tokenCategories.otherPercent',
+          'summary.total_swaps',
+        ),
+        2,
+      ),
+    };
+
+    return {
+      ...percentages,
+      dominantCategory: this.getDominantTokenCategory(percentages),
+      categoryDiversity: Object.values(percentages).filter((value) => value > 0).length,
+      tradesByCategory: this.mergeCountRecords(
+        activeChains,
+        'features.tokenCategories.tradesByCategory',
+      ),
+    };
+  }
+
+  private buildUnifiedDexMetrics(
+    activeChains: ChainIntelligenceResult[],
+  ): WalletIntelligenceDexMetrics {
+    const tradesPerDex = this.mergeCountRecords(
+      activeChains,
+      'features.dexMetrics.tradesPerDex',
+    );
+    const sortedDexes = Object.entries(tradesPerDex).sort(
+      (left, right) => right[1] - left[1],
+    );
+    const totalDexTrades = sortedDexes.reduce(
+      (sum, [, count]) => sum + count,
+      0,
+    );
+
+    return {
+      primaryDex: sortedDexes[0]?.[0] ?? 'Unknown',
+      primaryDexShare:
+        totalDexTrades > 0
+          ? this.round(((sortedDexes[0]?.[1] ?? 0) / totalDexTrades) * 100, 2)
+          : 0,
+      dexDiversity: sortedDexes.filter(([dex]) => dex !== 'Unknown').length,
+      tradesPerDex,
+      unknownDexPercent:
+        totalDexTrades > 0
+          ? this.round(((tradesPerDex.Unknown ?? 0) / totalDexTrades) * 100, 2)
+          : 0,
+    };
+  }
+
+  private getDominantTokenCategory(
+    percentages: Omit<WalletIntelligenceTokenCategories, 'dominantCategory' | 'categoryDiversity' | 'tradesByCategory'>,
+  ): string {
+    const categoryLabels: Record<keyof typeof percentages, string> = {
+      memecoinPercent: 'Memecoin',
+      blueChipPercent: 'Blue Chip / L1',
+      defiPercent: 'DeFi',
+      stablecoinPercent: 'Stablecoin',
+      l2Percent: 'L2 / Infrastructure',
+      aiNarrativePercent: 'AI',
+      gamingPercent: 'Gaming',
+      otherPercent: 'Other',
+    };
+    const [dominantKey, dominantPercent] = Object.entries(percentages).sort(
+      (left, right) => right[1] - left[1],
+    )[0] ?? [null, 0];
+
+    if (!dominantKey || dominantPercent <= 0) {
+      return 'Unknown';
+    }
+
+    return categoryLabels[dominantKey as keyof typeof percentages];
+  }
+
+  private mergeCountRecords(
+    activeChains: ChainIntelligenceResult[],
+    path: string,
+  ): Record<string, number> {
+    const merged: Record<string, number> = {};
+
+    for (const { data } of activeChains) {
+      const record = this.getPath(data, path);
+
+      if (!record || typeof record !== 'object') {
+        continue;
+      }
+
+      for (const [key, value] of Object.entries(record)) {
+        merged[key] = (merged[key] ?? 0) + this.toNumber(value);
+      }
+    }
+
+    return merged;
   }
 
   private computeUnifiedScore(
