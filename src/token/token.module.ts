@@ -12,6 +12,9 @@ import { HolderAggregationService } from './services/holder-aggregation.service'
 import { LiteClassifierService } from './services/lite-classifier.service';
 import { LiteFeatureService } from './services/lite-feature.service';
 import { LiteIngestionService } from './services/lite-ingestion.service';
+import { LitePnlService } from './services/lite-pnl.service';
+import { LitePortfolioService } from './services/lite-portfolio.service';
+import { LitePricingService } from './services/lite-pricing.service';
 import { LiteScorerService } from './services/lite-scorer.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
 import { TokenController } from './token.controller';
@@ -33,6 +36,9 @@ import { TokenController } from './token.controller';
     LiteFeatureService,
     LiteClassifierService,
     LiteScorerService,
+    LitePricingService,
+    LitePortfolioService,
+    LitePnlService,
     HolderAggregationService,
     TokenAnalysisService,
   ],
