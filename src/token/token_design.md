@@ -444,3 +444,13 @@ File: src/token/services/lite-pnl.service.ts
 - stablecoin-side USD valuation first, current-price fallback otherwise
 - outputs: realized PnL, win rate, profit factor, ROI, largest win/loss
 - feeds into classifier Smart Money/Paper Hand/Degen/Bot signals and scorer profitability dimension
+
+### WalletFilterService
+
+File: src/token/services/wallet-filter.service.ts
+
+- labels wallets before analysis: exchange, contract, lp_pool, bridge, burn, dust, eoa
+- static lookup maps for ~25 known exchanges, ~10 known routers/contracts, and burn addresses
+- eth_getCode check via Alchemy for unknown addresses
+- only eoa wallets proceed through full analysis pipeline
+- reduces API calls and eliminates Insufficient Data spam on exchange-heavy tokens
