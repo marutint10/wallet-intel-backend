@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { LiteClassification } from './lite-classifier.service';
 import { LiteScore } from './lite-scorer.service';
 import type { PortfolioContext } from './lite-portfolio.service';
+import type { WalletLabel } from './wallet-filter.service';
 
 export interface AnalyzedHolder {
   walletAddress: string;
@@ -9,6 +10,8 @@ export interface AnalyzedHolder {
   rank: number;
   usdValue: number;
   tokenPrice: number;
+  walletLabel: WalletLabel;
+  walletLabelDetail?: string | null;
   classification: LiteClassification | null;
   score: LiteScore | null;
   portfolio?: PortfolioContext | null;
@@ -35,6 +38,8 @@ export interface HolderQualityMetrics {
     activeTraders: number;
     riskDegen: number;
     botsUnknown: number;
+    exchanges: number;
+    contractsPools: number;
   };
   topHolderAvgScore: number;
   pnlAggregation: HolderPnlAggregation;
@@ -76,6 +81,13 @@ export interface RiskCallout {
 export class HolderAggregationService {
   // 1. Compute quality metrics from classification results
   computeQualityMetrics(holders: AnalyzedHolder[]): HolderQualityMetrics {
+    const totalHolders = holders.length;
+    const exchangeCount = holders.filter(
+      (holder) => holder.walletLabel === 'exchange',
+    ).length;
+    const contractPoolCount = holders.filter((holder) =>
+      ['contract', 'lp_pool', 'bridge'].includes(holder.walletLabel),
+    ).length;
     const analyzed = holders.filter(
       (holder) => holder.classification !== null && holder.score !== null,
     );
@@ -90,6 +102,14 @@ export class HolderAggregationService {
           activeTraders: 0,
           riskDegen: 0,
           botsUnknown: 0,
+          exchanges:
+            totalHolders > 0
+              ? Math.round((exchangeCount / totalHolders) * 100)
+              : 0,
+          contractsPools:
+            totalHolders > 0
+              ? Math.round((contractPoolCount / totalHolders) * 100)
+              : 0,
         },
         topHolderAvgScore: 0,
         pnlAggregation: this.computePnlAggregation(holders),
@@ -157,6 +177,12 @@ export class HolderAggregationService {
         activeTraders: pct(activeTraderCount),
         riskDegen: pct(riskDegenCount),
         botsUnknown: pct(botsUnknownCount),
+        exchanges:
+          totalHolders > 0 ? Math.round((exchangeCount / totalHolders) * 100) : 0,
+        contractsPools:
+          totalHolders > 0
+            ? Math.round((contractPoolCount / totalHolders) * 100)
+            : 0,
       },
       topHolderAvgScore,
       pnlAggregation: this.computePnlAggregation(holders),
@@ -234,6 +260,7 @@ export class HolderAggregationService {
   generateRiskCallouts(
     quality: HolderQualityMetrics,
     distribution: HolderDistribution,
+    holders: AnalyzedHolder[] = [],
   ): RiskCallout[] {
     const callouts: RiskCallout[] = [];
 
@@ -312,6 +339,15 @@ export class HolderAggregationService {
       }
     }
 
+    const exchangeConcentrationPct = this.computeExchangeSupplyConcentration(holders);
+    if (exchangeConcentrationPct > 40) {
+      callouts.push({
+        type: 'info',
+        title: 'High Exchange Concentration',
+        description: `${exchangeConcentrationPct}% of top holders are exchange wallets. Actual retail/investor distribution may differ from what is shown.`,
+      });
+    }
+
     // Always have at least one callout
     if (callouts.length === 0) {
       callouts.push({
@@ -323,6 +359,26 @@ export class HolderAggregationService {
     }
 
     return callouts.slice(0, 5);
+  }
+
+  private computeExchangeSupplyConcentration(holders: AnalyzedHolder[]): number {
+    if (holders.length === 0) {
+      return 0;
+    }
+
+    const totalSupply = holders.reduce(
+      (sum, holder) => sum + this.parseBigIntSafe(holder.balance),
+      0n,
+    );
+    if (totalSupply <= 0n) {
+      return 0;
+    }
+
+    const exchangeSupply = holders
+      .filter((holder) => holder.walletLabel === 'exchange')
+      .reduce((sum, holder) => sum + this.parseBigIntSafe(holder.balance), 0n);
+
+    return Math.round(Number((exchangeSupply * 10000n) / totalSupply)) / 100;
   }
 
   // --- GINI COEFFICIENT ---
