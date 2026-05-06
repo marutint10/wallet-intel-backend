@@ -13,6 +13,7 @@ import { LiteClassifierService } from './services/lite-classifier.service';
 import { LiteFeatureService } from './services/lite-feature.service';
 import { LiteIngestionService } from './services/lite-ingestion.service';
 import { LiteScorerService } from './services/lite-scorer.service';
+import { TokenAnalysisService } from './services/token-analysis.service';
 import { TokenController } from './token.controller';
 
 @Module({
@@ -33,6 +34,7 @@ import { TokenController } from './token.controller';
     LiteClassifierService,
     LiteScorerService,
     HolderAggregationService,
+    TokenAnalysisService,
   ],
 })
 export class TokenModule {}
