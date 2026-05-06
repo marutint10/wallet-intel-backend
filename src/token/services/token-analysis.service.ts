@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { ConfigService } from '@nestjs/config';
 import { TokenAnalysisEntity } from '../entities/token-analysis.entity';
 import { ChainbaseService } from './chainbase.service';
@@ -170,6 +171,12 @@ export class TokenAnalysisService {
     const quality = this.aggregation.computeQualityMetrics(analyzed);
     const distribution = this.aggregation.computeDistribution(holders, '0');
     const callouts = this.aggregation.generateRiskCallouts(quality, distribution);
+    const qualityMetrics =
+      quality as unknown as QueryDeepPartialEntity<Record<string, unknown> | null>;
+    const distributionMetrics =
+      distribution as unknown as QueryDeepPartialEntity<
+        Record<string, unknown> | null
+      >;
 
     // Step 4: Save to database
     await this.tokenRepo.upsert(
@@ -178,8 +185,8 @@ export class TokenAnalysisService {
         chain,
         totalHolders: holders.length,
         holdersData: analyzed,
-        qualityMetrics: quality,
-        distribution,
+        qualityMetrics,
+        distribution: distributionMetrics,
         riskCallouts: callouts,
         status: 'done',
         errorMessage: null,
