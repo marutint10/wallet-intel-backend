@@ -16,6 +16,14 @@ export interface LiteTransfer {
   blockNumber: number;
 }
 
+export interface LiteTokenBalance {
+  contractAddress: string;
+  balance: string;
+  decimals: number;
+  symbol?: string | null;
+  name?: string | null;
+}
+
 const ETHERSCAN_CHAIN_ID_MAP: Record<string, string> = {
   ethereum: '1',
   polygon: '137',
@@ -24,6 +32,13 @@ const ETHERSCAN_CHAIN_ID_MAP: Record<string, string> = {
 const ALCHEMY_RPC_MAP: Record<string, string> = {
   base: 'https://base-mainnet.g.alchemy.com/v2',
   bsc: 'https://bnb-mainnet.g.alchemy.com/v2',
+};
+
+const ALCHEMY_NETWORK_MAP: Record<string, string> = {
+  ethereum: 'eth-mainnet',
+  polygon: 'polygon-mainnet',
+  bsc: 'bnb-mainnet',
+  base: 'base-mainnet',
 };
 
 interface EtherscanTransferRow {
@@ -68,6 +83,25 @@ interface AlchemyAssetTransfersResponse {
   };
 }
 
+interface AlchemyTokenBalanceRow {
+  contractAddress?: string;
+  tokenBalance?: string;
+}
+
+interface AlchemyTokenBalancesResponse {
+  result?: {
+    tokenBalances?: AlchemyTokenBalanceRow[];
+  };
+}
+
+interface AlchemyTokenMetadataResponse {
+  result?: {
+    decimals?: number;
+    symbol?: string | null;
+    name?: string | null;
+  };
+}
+
 @Injectable()
 export class LiteIngestionService {
   private readonly logger = new Logger(LiteIngestionService.name);
@@ -90,6 +124,85 @@ export class LiteIngestionService {
     }
 
     throw new Error(`Unsupported chain for lite ingestion: ${chain}`);
+  }
+
+  async getTokenBalances(
+    walletAddress: string,
+    chain: string,
+  ): Promise<LiteTokenBalance[]> {
+    const apiKey = this.configService.get<string>('ALCHEMY_API_KEY') ?? '';
+    if (!apiKey) {
+      this.logger.warn('ALCHEMY_API_KEY is missing; skipping portfolio fetch');
+      return [];
+    }
+
+    const normalizedChain = chain.toLowerCase();
+    const network = ALCHEMY_NETWORK_MAP[normalizedChain];
+    if (!network) {
+      return [];
+    }
+
+    const url = `https://${network}.g.alchemy.com/v2/${apiKey}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'alchemy_getTokenBalances',
+          params: [walletAddress, 'erc20'],
+          id: 1,
+        }),
+      });
+
+      const data = (await response.json()) as AlchemyTokenBalancesResponse;
+      const balances = data.result?.tokenBalances ?? [];
+      const nonZero = balances.filter(
+        (balance) =>
+          balance.contractAddress &&
+          balance.tokenBalance &&
+          balance.tokenBalance !== '0x0' &&
+          balance.tokenBalance !== '0x',
+      );
+
+      const enriched: LiteTokenBalance[] = [];
+      for (const balance of nonZero.slice(0, 50)) {
+        try {
+          const metadataResponse = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'alchemy_getTokenMetadata',
+              params: [balance.contractAddress],
+              id: 2,
+            }),
+          });
+          const metadataData =
+            (await metadataResponse.json()) as AlchemyTokenMetadataResponse;
+          const metadata = metadataData.result;
+          const decimals = metadata?.decimals ?? 18;
+
+          enriched.push({
+            contractAddress: balance.contractAddress!.toLowerCase(),
+            balance: this.formatUnits(balance.tokenBalance ?? '0', decimals),
+            decimals,
+            symbol: metadata?.symbol ?? null,
+            name: metadata?.name ?? null,
+          });
+        } catch {
+          continue;
+        }
+      }
+
+      return enriched;
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Portfolio fetch failed for ${walletAddress}: ${this.getErrorMessage(err)}`,
+      );
+      return [];
+    }
   }
 
   private async fetchFromEtherscan(

@@ -8,6 +8,20 @@ export interface SwapPair {
   outs: LiteTransfer[];
 }
 
+export interface LiteSwap {
+  txHash: string;
+  timestamp: number;
+  blockNumber: number;
+  soldToken: string;
+  soldSymbol?: string;
+  soldAmount: number;
+  boughtToken: string;
+  boughtSymbol?: string;
+  boughtAmount: number;
+  estimatedUsdValue?: number;
+  priceSource?: string;
+}
+
 export interface LiteFeatureVector {
   address: string;
   chain: string;
@@ -164,6 +178,46 @@ export class LiteFeatureService {
     };
   }
 
+  extractSwaps(transfers: LiteTransfer[], walletAddress: string): LiteSwap[] {
+    const swapPairs = this.detectSwaps(transfers, walletAddress);
+    const swaps: LiteSwap[] = [];
+
+    for (const swap of swapPairs) {
+      const sold = this.largestTransfer(swap.outs);
+      if (!sold) {
+        continue;
+      }
+
+      const bought = this.largestTransfer(
+        swap.ins.filter(
+          (transfer) =>
+            transfer.tokenContract.toLowerCase() !== sold.tokenContract.toLowerCase(),
+        ),
+      );
+      if (!bought) {
+        continue;
+      }
+
+      const liteSwap: LiteSwap = {
+        txHash: swap.txHash,
+        timestamp: swap.timestamp,
+        blockNumber: Math.max(sold.blockNumber, bought.blockNumber),
+        soldToken: sold.tokenContract.toLowerCase(),
+        soldSymbol: sold.tokenSymbol,
+        soldAmount: Number.parseFloat(sold.humanAmount) || 0,
+        boughtToken: bought.tokenContract.toLowerCase(),
+        boughtSymbol: bought.tokenSymbol,
+        boughtAmount: Number.parseFloat(bought.humanAmount) || 0,
+      };
+
+      if (liteSwap.soldAmount > 0 && liteSwap.boughtAmount > 0) {
+        swaps.push(liteSwap);
+      }
+    }
+
+    return swaps;
+  }
+
   // Group by txHash. A swap = same tx has IN and OUT with DIFFERENT token contracts.
   private detectSwaps(transfers: LiteTransfer[], walletAddress: string): SwapPair[] {
     const byHash = new Map<string, LiteTransfer[]>();
@@ -281,6 +335,18 @@ export class LiteFeatureService {
     }
     const count = symbols.filter((symbol) => categorySet.has(symbol)).length;
     return Math.round((count / symbols.length) * 100);
+  }
+
+  private largestTransfer(transfers: LiteTransfer[]): LiteTransfer | null {
+    if (transfers.length === 0) {
+      return null;
+    }
+
+    return [...transfers].sort(
+      (left, right) =>
+        (Number.parseFloat(right.humanAmount) || 0) -
+        (Number.parseFloat(left.humanAmount) || 0),
+    )[0];
   }
 
   private emptyVector(address: string, chain: string): LiteFeatureVector {
