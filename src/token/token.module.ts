@@ -17,6 +17,7 @@ import { LitePortfolioService } from './services/lite-portfolio.service';
 import { LitePricingService } from './services/lite-pricing.service';
 import { LiteScorerService } from './services/lite-scorer.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
+import { WalletFilterService } from './services/wallet-filter.service';
 import { TokenController } from './token.controller';
 
 @Module({
@@ -39,6 +40,7 @@ import { TokenController } from './token.controller';
     LitePricingService,
     LitePortfolioService,
     LitePnlService,
+    WalletFilterService,
     HolderAggregationService,
     TokenAnalysisService,
   ],
