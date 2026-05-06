@@ -1,5 +1,6 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ChainbaseService } from './services/chainbase.service';
+import { LiteClassifierService } from './services/lite-classifier.service';
 import { LiteIngestionService } from './services/lite-ingestion.service';
 import { LiteFeatureService } from './services/lite-feature.service';
 
@@ -9,6 +10,7 @@ export class TokenController {
     private readonly chainbase: ChainbaseService,
     private readonly liteIngestion: LiteIngestionService,
     private readonly liteFeature: LiteFeatureService,
+    private readonly liteClassifier: LiteClassifierService,
   ) {}
 
   // GET /token/:address/holders?chain=ethereum
@@ -59,5 +61,21 @@ export class TokenController {
     );
     const features = this.liteFeature.extractFeatures(transfers, address, chain);
     return features;
+  }
+
+  // GET /token/wallet/:address/classify?chain=ethereum
+  @Get('wallet/:address/classify')
+  async classifyWallet(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+  ) {
+    const transfers = await this.liteIngestion.getRecentTransfers(
+      address,
+      chain,
+      200,
+    );
+    const features = this.liteFeature.extractFeatures(transfers, address, chain);
+    const classification = this.liteClassifier.classify(features);
+    return { features, classification };
   }
 }

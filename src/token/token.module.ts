@@ -8,6 +8,7 @@ import {
   WhaleAlertEntity,
 } from './entities';
 import { ChainbaseService } from './services/chainbase.service';
+import { LiteClassifierService } from './services/lite-classifier.service';
 import { LiteFeatureService } from './services/lite-feature.service';
 import { LiteIngestionService } from './services/lite-ingestion.service';
 import { TokenController } from './token.controller';
@@ -23,6 +24,11 @@ import { TokenController } from './token.controller';
     ]),
   ],
   controllers: [TokenController],
-  providers: [ChainbaseService, LiteIngestionService, LiteFeatureService],
+  providers: [
+    ChainbaseService,
+    LiteIngestionService,
+    LiteFeatureService,
+    LiteClassifierService,
+  ],
 })
 export class TokenModule {}
