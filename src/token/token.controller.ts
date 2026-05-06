@@ -3,6 +3,7 @@ import { ChainbaseService } from './services/chainbase.service';
 import { LiteClassifierService } from './services/lite-classifier.service';
 import { LiteIngestionService } from './services/lite-ingestion.service';
 import { LiteFeatureService } from './services/lite-feature.service';
+import { LiteScorerService } from './services/lite-scorer.service';
 
 @Controller('token')
 export class TokenController {
@@ -11,6 +12,7 @@ export class TokenController {
     private readonly liteIngestion: LiteIngestionService,
     private readonly liteFeature: LiteFeatureService,
     private readonly liteClassifier: LiteClassifierService,
+    private readonly liteScorer: LiteScorerService,
   ) {}
 
   // GET /token/:address/holders?chain=ethereum
@@ -77,5 +79,22 @@ export class TokenController {
     const features = this.liteFeature.extractFeatures(transfers, address, chain);
     const classification = this.liteClassifier.classify(features);
     return { features, classification };
+  }
+
+  // GET /token/wallet/:address/score?chain=ethereum
+  @Get('wallet/:address/score')
+  async scoreWallet(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+  ) {
+    const transfers = await this.liteIngestion.getRecentTransfers(
+      address,
+      chain,
+      200,
+    );
+    const features = this.liteFeature.extractFeatures(transfers, address, chain);
+    const classification = this.liteClassifier.classify(features);
+    const score = this.liteScorer.score(features);
+    return { score, classification };
   }
 }
