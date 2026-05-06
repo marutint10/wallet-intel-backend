@@ -23,6 +23,9 @@ Current capabilities:
 - classify wallet behavior into lite archetypes
 - score wallet quality on a fixed 0-100 scale with confidence and band
 - aggregate analyzed holder results into token-level quality/distribution/risk callouts
+- attach current USD price and per-holder usdValue to holder rows
+- compute portfolio context for top holders via Alchemy balances and batch pricing
+- compute lite realized PnL from detected swaps and feed profitability into classification/scoring
 - run full token analysis asynchronously and persist output in Postgres
 - expose polling endpoints to fetch analysis status and final result
 
@@ -55,7 +58,9 @@ Responsibilities:
 - initialize/refresh token_analyses row with status=processing
 - run analysis in background without blocking request thread
 - fetch top holders for the token
+- fetch current token price once per analysis
 - analyze holders in batches with delays (rate-limit friendly)
+- enrich holder rows with usdValue, top-holder portfolio context, and lite PnL summaries
 - aggregate holder-level analytics into token-level metrics
 - persist status done/error and payload into token_analyses
 
@@ -91,6 +96,7 @@ Responsibilities:
   - Alchemy asset transfers for base/bsc
 - normalize provider payloads into LiteTransfer shape
 - compute direction IN/OUT based on target wallet
+- fetch ERC-20 token balances for portfolio context via Alchemy getTokenBalances
 
 Notes:
 
@@ -104,6 +110,7 @@ File: src/token/services/lite-feature.service.ts
 Responsibilities:
 
 - detect swaps by grouping transfers per txHash
+- expose normalized swap rows for PnL reconstruction
 - require both IN and OUT legs, and different token contracts, to mark as swap
 - estimate hold times using FIFO lot matching
 - compute behavior metrics:
@@ -148,6 +155,7 @@ Responsibilities:
   - portfolioQuality
   - experience
   - activity
+  - profitability (when PnL data is available)
 - return score band and confidence
 
 Bands:
@@ -358,7 +366,7 @@ Manual note:
 The orchestrator saves output into token_analyses JSONB columns:
 
 - holders_data: per-holder analyzed rows (classification + score)
-- quality_metrics: aggregated holder quality metrics
+- quality_metrics: aggregated holder quality metrics plus tokenPriceUsd, priceSource, and PnL aggregation
 - distribution: concentration/distribution metrics
 - risk_callouts: generated token-level insights
 
@@ -407,3 +415,32 @@ Example:
 3. GET /token/wallet/:address/features
 4. GET /token/wallet/:address/classify
 5. GET /token/wallet/:address/score
+
+## 11. Pipeline Upgrades (Post-MVP)
+
+### LitePricingService
+
+File: src/token/services/lite-pricing.service.ts
+
+- DexScreener primary, CoinGecko fallback
+- 5-minute in-memory cache
+- batch pricing for portfolio valuation
+- used by: orchestrator holder USD values, portfolio service, PnL service
+
+### LitePortfolioService
+
+File: src/token/services/lite-portfolio.service.ts
+
+- fetches full token balances via Alchemy getTokenBalances
+- prices holdings via batch CoinGecko
+- computes: totalPortfolioUsd, trackedTokenWeight, diversificationScore
+- only runs for top 50 holders for API cost management
+
+### LitePnlService
+
+File: src/token/services/lite-pnl.service.ts
+
+- FIFO position lot reconstruction from detected swaps
+- stablecoin-side USD valuation first, current-price fallback otherwise
+- outputs: realized PnL, win rate, profit factor, ROI, largest win/loss
+- feeds into classifier Smart Money/Paper Hand/Degen/Bot signals and scorer profitability dimension
