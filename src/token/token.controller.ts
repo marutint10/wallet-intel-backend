@@ -1,5 +1,9 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ChainbaseService } from './services/chainbase.service';
+import {
+  AnalyzedHolder,
+  HolderAggregationService,
+} from './services/holder-aggregation.service';
 import { LiteClassifierService } from './services/lite-classifier.service';
 import { LiteIngestionService } from './services/lite-ingestion.service';
 import { LiteFeatureService } from './services/lite-feature.service';
@@ -13,6 +17,7 @@ export class TokenController {
     private readonly liteFeature: LiteFeatureService,
     private readonly liteClassifier: LiteClassifierService,
     private readonly liteScorer: LiteScorerService,
+    private readonly holderAggregation: HolderAggregationService,
   ) {}
 
   // GET /token/:address/holders?chain=ethereum
@@ -96,5 +101,51 @@ export class TokenController {
     const classification = this.liteClassifier.classify(features);
     const score = this.liteScorer.score(features);
     return { score, classification };
+  }
+
+  // GET /token/:address/overview?chain=ethereum
+  // Tests the full pipeline: fetch holders, analyze top 5, aggregate metrics
+  @Get(':address/overview')
+  async getTokenOverview(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+  ) {
+    // 1. Fetch top 20 holders from Chainbase
+    const { holders } = await this.chainbase.getTopHolders(address, chain, 20);
+
+    // 2. Analyze first 5 holders only (for speed during testing)
+    const analyzed: AnalyzedHolder[] = [];
+    for (const holder of holders.slice(0, 5)) {
+      const transfers = await this.liteIngestion.getRecentTransfers(
+        holder.walletAddress,
+        chain,
+        200,
+      );
+      const features = this.liteFeature.extractFeatures(
+        transfers,
+        holder.walletAddress,
+        chain,
+      );
+      const classification = this.liteClassifier.classify(features);
+      const score = this.liteScorer.score(features);
+      analyzed.push({ ...holder, classification, score });
+    }
+
+    // 3. Aggregate
+    const quality = this.holderAggregation.computeQualityMetrics(analyzed);
+    const distribution = this.holderAggregation.computeDistribution(holders, '0');
+    const callouts = this.holderAggregation.generateRiskCallouts(
+      quality,
+      distribution,
+    );
+
+    return {
+      contractAddress: address,
+      chain,
+      quality,
+      distribution,
+      callouts,
+      analyzedHolders: analyzed,
+    };
   }
 }
