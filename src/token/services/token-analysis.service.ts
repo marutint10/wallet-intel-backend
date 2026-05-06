@@ -9,6 +9,9 @@ import { LiteIngestionService } from './lite-ingestion.service';
 import { LiteFeatureService } from './lite-feature.service';
 import { LiteClassifierService } from './lite-classifier.service';
 import { LiteScorerService } from './lite-scorer.service';
+import { LitePricingService } from './lite-pricing.service';
+import { LitePortfolioService } from './lite-portfolio.service';
+import { LitePnlService } from './lite-pnl.service';
 import {
   HolderAggregationService,
   AnalyzedHolder,
@@ -26,6 +29,9 @@ export class TokenAnalysisService {
     private readonly feature: LiteFeatureService,
     private readonly classifier: LiteClassifierService,
     private readonly scorer: LiteScorerService,
+    private readonly pricing: LitePricingService,
+    private readonly portfolio: LitePortfolioService,
+    private readonly pnl: LitePnlService,
     private readonly aggregation: HolderAggregationService,
     private readonly config: ConfigService,
   ) {}
@@ -107,11 +113,29 @@ export class TokenAnalysisService {
     const { holders } = await this.chainbase.getTopHolders(contractAddress, chain, 100);
     this.logger.log(`Fetched ${holders.length} holders for ${contractAddress}`);
 
+    const tokenPrice = await this.pricing.getTokenPrice(contractAddress, chain);
+    this.logger.log(
+      `Token price: $${tokenPrice.priceUsd} (source: ${tokenPrice.source})`,
+    );
+
+    const enrichedHolders = holders.map((holder) => {
+      const balanceNum = Number.parseFloat(holder.balance);
+      const usdValue = Number.isFinite(balanceNum)
+        ? Math.round(balanceNum * tokenPrice.priceUsd * 100) / 100
+        : 0;
+
+      return {
+        ...holder,
+        usdValue,
+        tokenPrice: tokenPrice.priceUsd,
+      };
+    });
+
     // Step 2: Analyze each holder in batches of 5
     const analyzed: AnalyzedHolder[] = [];
 
-    for (let i = 0; i < holders.length; i += batchSize) {
-      const batch = holders.slice(i, i + batchSize);
+    for (let i = 0; i < enrichedHolders.length; i += batchSize) {
+      const batch = enrichedHolders.slice(i, i + batchSize);
 
       const results = await Promise.allSettled(
         batch.map(async (holder) => {
@@ -126,15 +150,50 @@ export class TokenAnalysisService {
               holder.walletAddress,
               chain,
             );
-            const classification = this.classifier.classify(features);
-            const score = this.scorer.score(features);
+            const swaps = this.feature.extractSwaps(transfers, holder.walletAddress);
+            const pnlMetrics = await this.pnl.computePnl(swaps, chain);
+            const classification = this.classifier.classify(features, pnlMetrics);
+            const score = this.scorer.score(features, pnlMetrics);
+
+            let portfolioContext = null;
+            if (holder.rank <= 50) {
+              try {
+                portfolioContext = await this.portfolio.getPortfolioContext(
+                  holder.walletAddress,
+                  contractAddress,
+                  holder.usdValue,
+                  chain,
+                );
+              } catch (err: unknown) {
+                this.logger.warn(
+                  `Portfolio fetch failed for ${holder.walletAddress}: ${this.getErrorMessage(err)}`,
+                );
+              }
+            }
+
+            const pnlSummary =
+              pnlMetrics.trades.length > 0
+                ? {
+                    totalPnlUsd: pnlMetrics.totalRealizedPnlUsd,
+                    winRate: pnlMetrics.winRate,
+                    avgRoi: pnlMetrics.avgRoiPercent,
+                    profitFactor: pnlMetrics.profitFactor,
+                    tradeCount: pnlMetrics.trades.length,
+                    largestWin: pnlMetrics.largestWinUsd,
+                    largestLoss: pnlMetrics.largestLossUsd,
+                  }
+                : null;
 
             return {
               walletAddress: holder.walletAddress,
               balance: holder.balance,
               rank: holder.rank,
+              usdValue: holder.usdValue,
+              tokenPrice: holder.tokenPrice,
               classification,
               score,
+              portfolio: portfolioContext,
+              pnl: pnlSummary,
             } as AnalyzedHolder;
           } catch (err: unknown) {
             this.logger.warn(
@@ -144,8 +203,13 @@ export class TokenAnalysisService {
               walletAddress: holder.walletAddress,
               balance: holder.balance,
               rank: holder.rank,
+              usdValue: holder.usdValue,
+              tokenPrice: holder.tokenPrice,
               classification: null,
               score: null,
+              portfolio: null,
+              pnl: null,
+              error: this.getErrorMessage(err),
             } as AnalyzedHolder;
           }
         }),
@@ -158,12 +222,12 @@ export class TokenAnalysisService {
       }
 
       // Respect Etherscan rate limits between batches
-      if (i + batchSize < holders.length) {
+      if (i + batchSize < enrichedHolders.length) {
         await this.sleep(batchDelayMs);
       }
 
       this.logger.log(
-        `Analyzed ${Math.min(i + batchSize, holders.length)}/${holders.length} holders`,
+        `Analyzed ${Math.min(i + batchSize, enrichedHolders.length)}/${enrichedHolders.length} holders`,
       );
     }
 
@@ -171,8 +235,17 @@ export class TokenAnalysisService {
     const quality = this.aggregation.computeQualityMetrics(analyzed);
     const distribution = this.aggregation.computeDistribution(holders, '0');
     const callouts = this.aggregation.generateRiskCallouts(quality, distribution);
+    const qualityWithPrice = {
+      ...quality,
+      tokenPriceUsd: tokenPrice.priceUsd,
+      priceSource: tokenPrice.source,
+      priceFetchedAt: tokenPrice.fetchedAt,
+      priceConfidence: tokenPrice.confidence,
+    };
     const qualityMetrics =
-      quality as unknown as QueryDeepPartialEntity<Record<string, unknown> | null>;
+      qualityWithPrice as unknown as QueryDeepPartialEntity<
+        Record<string, unknown> | null
+      >;
     const distributionMetrics =
       distribution as unknown as QueryDeepPartialEntity<
         Record<string, unknown> | null
@@ -183,7 +256,7 @@ export class TokenAnalysisService {
       {
         contractAddress,
         chain,
-        totalHolders: holders.length,
+        totalHolders: enrichedHolders.length,
         holdersData: analyzed,
         qualityMetrics,
         distribution: distributionMetrics,

@@ -1,13 +1,29 @@
 import { Injectable } from '@nestjs/common';
 import { LiteClassification } from './lite-classifier.service';
 import { LiteScore } from './lite-scorer.service';
+import type { PortfolioContext } from './lite-portfolio.service';
 
 export interface AnalyzedHolder {
   walletAddress: string;
   balance: string;
   rank: number;
+  usdValue: number;
+  tokenPrice: number;
   classification: LiteClassification | null;
   score: LiteScore | null;
+  portfolio?: PortfolioContext | null;
+  pnl?: HolderPnlSummary | null;
+  error?: string;
+}
+
+export interface HolderPnlSummary {
+  totalPnlUsd: number;
+  winRate: number;
+  avgRoi: number;
+  profitFactor: number;
+  tradeCount: number;
+  largestWin: number;
+  largestLoss: number;
 }
 
 export interface HolderQualityMetrics {
@@ -21,6 +37,16 @@ export interface HolderQualityMetrics {
     botsUnknown: number;
   };
   topHolderAvgScore: number;
+  pnlAggregation: HolderPnlAggregation;
+}
+
+export interface HolderPnlAggregation {
+  holdersWithPnlData: number;
+  avgWinRate: number | null;
+  avgProfitFactor: number | null;
+  holdersInProfit: number;
+  holdersAtLoss: number;
+  smartMoneyCount: number;
 }
 
 export interface HolderDistribution {
@@ -66,6 +92,7 @@ export class HolderAggregationService {
           botsUnknown: 0,
         },
         topHolderAvgScore: 0,
+        pnlAggregation: this.computePnlAggregation(holders),
       };
     }
 
@@ -132,6 +159,7 @@ export class HolderAggregationService {
         botsUnknown: pct(botsUnknownCount),
       },
       topHolderAvgScore,
+      pnlAggregation: this.computePnlAggregation(holders),
     };
   }
 
@@ -261,6 +289,29 @@ export class HolderAggregationService {
       });
     }
 
+    const pnlAggregation = quality.pnlAggregation;
+    if (pnlAggregation.holdersWithPnlData > 10) {
+      const smartPct = Math.round(
+        (pnlAggregation.smartMoneyCount / pnlAggregation.holdersWithPnlData) * 100,
+      );
+
+      if (smartPct > 30) {
+        callouts.push({
+          type: 'positive',
+          title: 'Strong Smart Money Presence',
+          description: `${smartPct}% of analyzed holders show profitable trading histories (win rate >60%, profit factor >1.5).`,
+        });
+      }
+
+      if (pnlAggregation.avgWinRate !== null && pnlAggregation.avgWinRate < 35) {
+        callouts.push({
+          type: 'warning',
+          title: 'Low Holder Profitability',
+          description: `Average win rate across analyzed holders is ${pnlAggregation.avgWinRate}%. Most holders are losing money on their trades.`,
+        });
+      }
+    }
+
     // Always have at least one callout
     if (callouts.length === 0) {
       callouts.push({
@@ -295,6 +346,38 @@ export class HolderAggregationService {
     }
 
     return Math.abs(numerator / (n * total));
+  }
+
+  private computePnlAggregation(holders: AnalyzedHolder[]): HolderPnlAggregation {
+    const holdersWithPnl = holders.filter(
+      (holder): holder is AnalyzedHolder & { pnl: HolderPnlSummary } =>
+        holder.pnl !== null && holder.pnl !== undefined,
+    );
+
+    return {
+      holdersWithPnlData: holdersWithPnl.length,
+      avgWinRate:
+        holdersWithPnl.length > 0
+          ? this.roundAverage(holdersWithPnl.map((holder) => holder.pnl.winRate))
+          : null,
+      avgProfitFactor:
+        holdersWithPnl.length > 0
+          ? this.roundAverage(holdersWithPnl.map((holder) => holder.pnl.profitFactor))
+          : null,
+      holdersInProfit: holdersWithPnl.filter((holder) => holder.pnl.totalPnlUsd > 0)
+        .length,
+      holdersAtLoss: holdersWithPnl.filter((holder) => holder.pnl.totalPnlUsd < 0)
+        .length,
+      smartMoneyCount: holdersWithPnl.filter(
+        (holder) => holder.pnl.winRate > 60 && holder.pnl.profitFactor > 1.5,
+      ).length,
+    };
+  }
+
+  private roundAverage(values: number[]): number {
+    return Math.round(
+      (values.reduce((sum, value) => sum + value, 0) / values.length) * 100,
+    ) / 100;
   }
 
   private parseBigIntSafe(value: string): bigint {
