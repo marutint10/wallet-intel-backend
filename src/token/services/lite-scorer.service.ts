@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { LiteFeatureVector } from './lite-feature.service';
+import type { WalletPnlMetrics } from './lite-pnl.service';
 
 export interface LiteScore {
   score: number;
@@ -11,6 +12,7 @@ export interface LiteScore {
     portfolioQuality: number;
     experience: number;
     activity: number;
+    profitability: number;
   };
 }
 
@@ -24,7 +26,10 @@ const SCORE_BANDS = [
 
 @Injectable()
 export class LiteScorerService {
-  score(features: LiteFeatureVector): LiteScore {
+  score(
+    features: LiteFeatureVector,
+    pnlMetrics: WalletPnlMetrics | null = null,
+  ): LiteScore {
     // Gate: not enough data
     if (features.swapCount < 3) {
       return {
@@ -37,6 +42,7 @@ export class LiteScorerService {
           portfolioQuality: 0,
           experience: 0,
           activity: 0,
+          profitability: 0,
         },
       };
     }
@@ -46,11 +52,14 @@ export class LiteScorerService {
     const portfolioQuality = this.scorePortfolioQuality(features);
     const experience = this.scoreExperience(features);
     const activity = this.scoreActivity(features);
+    const profitability = this.scoreProfitability(pnlMetrics);
 
-    // Total out of 80 max -> scale to 100
     const rawTotal =
       consistency + riskManagement + portfolioQuality + experience + activity;
-    const score = Math.round((rawTotal / 80) * 100);
+    const score =
+      profitability > 0
+        ? Math.round((rawTotal / 80) * 70 + profitability)
+        : Math.round((rawTotal / 80) * 100);
     const clampedScore = Math.min(100, Math.max(0, score));
 
     const band =
@@ -74,8 +83,29 @@ export class LiteScorerService {
         portfolioQuality,
         experience,
         activity,
+        profitability,
       },
     };
+  }
+
+  private scoreProfitability(pnlMetrics: WalletPnlMetrics | null): number {
+    if (!pnlMetrics || pnlMetrics.trades.length < 3) {
+      return 0;
+    }
+
+    const winRateScore = this.clamp(pnlMetrics.winRate / 4, 0, 25);
+    const profitFactorScore = this.clamp((pnlMetrics.profitFactor / 2) * 25, 0, 25);
+    const roiScore = this.clamp((pnlMetrics.avgRoiPercent / 50) * 25, 0, 25);
+    const consistencyScore = pnlMetrics.winRate > 55 ? 20 : 10;
+
+    return Math.round(
+      ((winRateScore + profitFactorScore + roiScore + consistencyScore) / 100) *
+        30,
+    );
+  }
+
+  private clamp(value: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, value));
   }
 
   // CONSISTENCY (max 20)

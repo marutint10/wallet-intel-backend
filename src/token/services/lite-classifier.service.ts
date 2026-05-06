@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { LiteFeatureVector } from './lite-feature.service';
+import type { WalletPnlMetrics } from './lite-pnl.service';
 
 export interface LiteClassification {
   primaryType: string;
@@ -11,9 +12,15 @@ export interface LiteClassification {
 
 @Injectable()
 export class LiteClassifierService {
-  classify(features: LiteFeatureVector): LiteClassification {
+  classify(
+    features: LiteFeatureVector,
+    pnlMetrics: WalletPnlMetrics | null = null,
+  ): LiteClassification {
     // Gate: not enough data to classify
-    if (features.swapCount < 3 || features.matchedLotCount < 2) {
+    if (
+      (features.swapCount < 3 || features.matchedLotCount < 2) &&
+      !this.hasUsablePnl(pnlMetrics)
+    ) {
       return {
         primaryType: 'Insufficient Data',
         confidence: 'low',
@@ -32,6 +39,8 @@ export class LiteClassifierService {
       Accumulator: this.scoreAccumulator(features),
       Whale: this.scoreWhale(features),
     };
+
+    this.applyPnlSignals(scores, pnlMetrics);
 
     // Sort by score descending
     const sorted = Object.entries(scores).sort((a, b) => b[1] - a[1]);
@@ -54,8 +63,45 @@ export class LiteClassifierService {
       confidence,
       primaryScore: Math.round(primaryScore),
       secondaryType: secondary,
-      reasoning: this.buildReasoning(primaryType, features),
+      reasoning: this.buildReasoning(primaryType, features, pnlMetrics),
     };
+  }
+
+  private applyPnlSignals(
+    scores: Record<string, number>,
+    pnlMetrics: WalletPnlMetrics | null,
+  ): void {
+    if (!this.hasUsablePnl(pnlMetrics)) {
+      return;
+    }
+
+    if (pnlMetrics.winRate > 65 && pnlMetrics.avgRoiPercent > 30) {
+      scores['Smart Money'] = Math.max(scores['Smart Money'] ?? 0, 82);
+      scores['Swing Trader'] = Math.min(100, scores['Swing Trader'] + 20);
+      scores['Diamond Hand'] = Math.min(100, scores['Diamond Hand'] + 10);
+    }
+
+    if (pnlMetrics.winRate < 35 && pnlMetrics.profitFactor < 0.8) {
+      scores.Degen = Math.min(100, scores.Degen + 25);
+    }
+
+    if (pnlMetrics.avgRoiPercent < -10 && pnlMetrics.avgHoldDurationHours < 48) {
+      scores['Paper Hand'] = Math.max(scores['Paper Hand'] ?? 0, 72);
+    }
+
+    if (
+      pnlMetrics.winRate > 60 &&
+      pnlMetrics.avgHoldDurationHours < 2 &&
+      Math.abs(pnlMetrics.avgRoiPercent) < 10
+    ) {
+      scores['Bot / Automated'] = Math.min(100, scores['Bot / Automated'] + 20);
+    }
+  }
+
+  private hasUsablePnl(
+    pnlMetrics: WalletPnlMetrics | null,
+  ): pnlMetrics is WalletPnlMetrics {
+    return Boolean(pnlMetrics && pnlMetrics.trades.length >= 3);
   }
 
   private scoreDiamondHand(f: LiteFeatureVector): number {
@@ -267,13 +313,25 @@ export class LiteClassifierService {
     return 'high';
   }
 
-  private buildReasoning(type: string, f: LiteFeatureVector): string {
+  private buildReasoning(
+    type: string,
+    f: LiteFeatureVector,
+    pnlMetrics: WalletPnlMetrics | null,
+  ): string {
     const holdDays =
       f.medianHoldHours !== null
         ? `${(f.medianHoldHours / 24).toFixed(1)}d median hold`
         : 'no completed holds';
 
     switch (type) {
+      case 'Smart Money':
+        return pnlMetrics
+          ? `${pnlMetrics.winRate}% win rate, ${pnlMetrics.avgRoiPercent}% average ROI, and ${pnlMetrics.profitFactor} profit factor across realized trades.`
+          : `Profitable realized trading pattern across ${f.swapCount} swaps.`;
+      case 'Paper Hand':
+        return pnlMetrics
+          ? `Sells quickly at a loss: ${pnlMetrics.avgRoiPercent}% average ROI with ${pnlMetrics.avgHoldDurationHours}h average holds.`
+          : `Short hold behavior across ${f.swapCount} swaps.`;
       case 'Diamond Hand':
         return `Holds positions for ${holdDays} with low trade frequency (${f.tradesPerDay.toFixed(2)}/day).`;
       case 'Swing Trader':
