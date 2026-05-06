@@ -2,6 +2,7 @@ import { Logger, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import configuration from './config/configuration';
+import { TokenModule } from './token/token.module';
 import { WalletModule } from './wallet/wallet.module';
 
 const databaseLogger = new Logger('DatabaseConfig');
@@ -70,6 +71,7 @@ const shouldUseSsl = (
         };
       },
     }),
+    TokenModule,
     WalletModule,
   ],
 })
