@@ -1,9 +1,13 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ChainbaseService } from './services/chainbase.service';
+import { LiteIngestionService } from './services/lite-ingestion.service';
 
 @Controller('token')
 export class TokenController {
-  constructor(private readonly chainbase: ChainbaseService) {}
+  constructor(
+    private readonly chainbase: ChainbaseService,
+    private readonly liteIngestion: LiteIngestionService,
+  ) {}
 
   // GET /token/:address/holders?chain=ethereum
   // Tests that Chainbase returns top holders for any token contract
@@ -18,6 +22,25 @@ export class TokenController {
       chain,
       totalHolders: result.totalHolders,
       holders: result.holders.slice(0, 20),
+    };
+  }
+
+  // GET /token/wallet/:address/transfers?chain=ethereum
+  @Get('wallet/:address/transfers')
+  async getWalletTransfers(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+  ) {
+    const transfers = await this.liteIngestion.getRecentTransfers(
+      address,
+      chain,
+      200,
+    );
+    return {
+      walletAddress: address,
+      chain,
+      totalTransfers: transfers.length,
+      transfers: transfers.slice(0, 10),
     };
   }
 }

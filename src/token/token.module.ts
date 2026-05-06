@@ -8,6 +8,7 @@ import {
   WhaleAlertEntity,
 } from './entities';
 import { ChainbaseService } from './services/chainbase.service';
+import { LiteIngestionService } from './services/lite-ingestion.service';
 import { TokenController } from './token.controller';
 
 @Module({
@@ -21,6 +22,6 @@ import { TokenController } from './token.controller';
     ]),
   ],
   controllers: [TokenController],
-  providers: [ChainbaseService],
+  providers: [ChainbaseService, LiteIngestionService],
 })
 export class TokenModule {}
