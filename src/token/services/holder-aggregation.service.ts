@@ -4,6 +4,7 @@ import { LiteScore } from './lite-scorer.service';
 import type { PortfolioContext } from './lite-portfolio.service';
 import type {
   HolderLabel,
+  LabelEvidence,
   TeamDetectionResult,
 } from './token-intelligence.service';
 
@@ -17,6 +18,9 @@ export interface AnalyzedHolder {
   walletLabelDetail?: string | null;
   isTeamLinked: boolean;
   teamConnectionPath?: string | null;
+  labelConfidence: number;
+  labelEvidence: LabelEvidence[];
+  teamConnectionScore: number;
   classification: LiteClassification | null;
   score: LiteScore | null;
   portfolio?: PortfolioContext | null;
@@ -51,6 +55,17 @@ export interface HolderQualityMetrics {
   };
   topHolderAvgScore: number;
   pnlAggregation: HolderPnlAggregation;
+  categoryConcentration: CategoryConcentration;
+}
+
+export interface CategoryConcentration {
+  eoaHolders: { count: number; pctOfSupply: number; avgScore: number | null };
+  teamLinked: { count: number; pctOfSupply: number; avgConfidence: number };
+  exchanges: { count: number; pctOfSupply: number };
+  contractsAndPools: { count: number; pctOfSupply: number };
+  vestingLocked: { count: number; pctOfSupply: number };
+  burnDead: { count: number; pctOfSupply: number };
+  dust: { count: number; pctOfSupply: number };
 }
 
 export interface HolderPnlAggregation {
@@ -88,8 +103,17 @@ export interface RiskCallout {
 @Injectable()
 export class HolderAggregationService {
   // 1. Compute quality metrics from classification results
-  computeQualityMetrics(holders: AnalyzedHolder[]): HolderQualityMetrics {
+  computeQualityMetrics(
+    holders: AnalyzedHolder[],
+    totalSupply: string = '0',
+    totalSupplyFormatted: number | null = null,
+  ): HolderQualityMetrics {
     const totalHolders = holders.length;
+    const categoryConcentration = this.computeCategoryConcentration(
+      holders,
+      totalSupply,
+      totalSupplyFormatted,
+    );
     const exchangeCount = holders.filter(
       (holder) =>
         holder.walletLabel === 'exchange' || holder.walletLabel === 'cex_deposit',
@@ -147,6 +171,7 @@ export class HolderAggregationService {
         },
         topHolderAvgScore: 0,
         pnlAggregation: this.computePnlAggregation(holders),
+        categoryConcentration,
       };
     }
 
@@ -232,6 +257,7 @@ export class HolderAggregationService {
       },
       topHolderAvgScore,
       pnlAggregation: this.computePnlAggregation(holders),
+      categoryConcentration,
     };
   }
 
@@ -352,6 +378,25 @@ export class HolderAggregationService {
       });
     }
 
+    if (quality.categoryConcentration.eoaHolders.pctOfSupply < 30) {
+      callouts.push({
+        type: 'warning',
+        title: 'Low Retail Holder Concentration',
+        description: `Only ${quality.categoryConcentration.eoaHolders.pctOfSupply.toFixed(1)}% of analyzed supply is held by individual wallets (EOAs). The majority is in exchanges, contracts, and team wallets.`,
+      });
+    }
+
+    if (
+      quality.categoryConcentration.teamLinked.count > 0 &&
+      quality.categoryConcentration.teamLinked.avgConfidence > 70
+    ) {
+      callouts.push({
+        type: 'info',
+        title: 'High-Confidence Team Detection',
+        description: `${quality.categoryConcentration.teamLinked.count} team-connected wallet(s) identified with average confidence score of ${quality.categoryConcentration.teamLinked.avgConfidence}. Evidence-based detection, not speculation.`,
+      });
+    }
+
     if (teamDetection?.riskLevel === 'critical') {
       callouts.push({
         type: 'warning',
@@ -447,6 +492,129 @@ export class HolderAggregationService {
     }
 
     return callouts.slice(0, 5);
+  }
+
+  private computeCategoryConcentration(
+    holders: AnalyzedHolder[],
+    totalSupply: string,
+    totalSupplyFormatted: number | null,
+  ): CategoryConcentration {
+    const totals = {
+      eoa: { count: 0, balance: 0, scoreSum: 0, scoreCount: 0 },
+      team: { count: 0, balance: 0, confidenceSum: 0 },
+      exchanges: { count: 0, balance: 0 },
+      contracts: { count: 0, balance: 0 },
+      vesting: { count: 0, balance: 0 },
+      burn: { count: 0, balance: 0 },
+      dust: { count: 0, balance: 0 },
+    };
+
+    const totalHeld = holders.reduce(
+      (sum, holder) => sum + this.parseBalanceAsNumber(holder.balance),
+      0,
+    );
+    const onchainTotal =
+      typeof totalSupplyFormatted === 'number' &&
+      Number.isFinite(totalSupplyFormatted) &&
+      totalSupplyFormatted > 0
+        ? totalSupplyFormatted
+        : null;
+    const rawTotalCandidate = this.parseBalanceAsNumber(totalSupply);
+    const rawTotal =
+      Number.isFinite(rawTotalCandidate) && rawTotalCandidate > 0
+        ? rawTotalCandidate
+        : null;
+    const effectiveSupply = onchainTotal ?? rawTotal ?? totalHeld;
+
+    for (const holder of holders) {
+      const balance = this.parseBalanceAsNumber(holder.balance);
+
+      if (holder.walletLabel === 'eoa') {
+        totals.eoa.count += 1;
+        totals.eoa.balance += balance;
+        if (holder.score) {
+          totals.eoa.scoreSum += holder.score.score;
+          totals.eoa.scoreCount += 1;
+        }
+      }
+
+      if (holder.isTeamLinked) {
+        totals.team.count += 1;
+        totals.team.balance += balance;
+        totals.team.confidenceSum += holder.teamConnectionScore;
+      }
+
+      if (holder.walletLabel === 'exchange' || holder.walletLabel === 'cex_deposit') {
+        totals.exchanges.count += 1;
+        totals.exchanges.balance += balance;
+      }
+
+      if (
+        ['dex_pool', 'dex_router', 'bridge', 'staking', 'generic_contract'].includes(
+          holder.walletLabel,
+        )
+      ) {
+        totals.contracts.count += 1;
+        totals.contracts.balance += balance;
+      }
+
+      if (holder.walletLabel === 'vesting') {
+        totals.vesting.count += 1;
+        totals.vesting.balance += balance;
+      }
+
+      if (holder.walletLabel === 'burn') {
+        totals.burn.count += 1;
+        totals.burn.balance += balance;
+      }
+
+      if (holder.walletLabel === 'dust') {
+        totals.dust.count += 1;
+        totals.dust.balance += balance;
+      }
+    }
+
+    const toPct = (value: number): number =>
+      effectiveSupply > 0 ? Math.round((value / effectiveSupply) * 10000) / 100 : 0;
+
+    return {
+      eoaHolders: {
+        count: totals.eoa.count,
+        pctOfSupply: toPct(totals.eoa.balance),
+        avgScore:
+          totals.eoa.scoreCount > 0
+            ? Math.round((totals.eoa.scoreSum / totals.eoa.scoreCount) * 100) / 100
+            : null,
+      },
+      teamLinked: {
+        count: totals.team.count,
+        pctOfSupply: toPct(totals.team.balance),
+        avgConfidence:
+          totals.team.count > 0
+            ? Math.round(totals.team.confidenceSum / totals.team.count)
+            : 0,
+      },
+      exchanges: {
+        count: totals.exchanges.count,
+        pctOfSupply: toPct(totals.exchanges.balance),
+      },
+      contractsAndPools: {
+        count: totals.contracts.count,
+        pctOfSupply: toPct(totals.contracts.balance),
+      },
+      vestingLocked: {
+        count: totals.vesting.count,
+        pctOfSupply: toPct(totals.vesting.balance),
+      },
+      burnDead: {
+        count: totals.burn.count,
+        pctOfSupply: toPct(totals.burn.balance),
+      },
+      dust: {
+        count: totals.dust.count,
+        pctOfSupply: toPct(totals.dust.balance),
+      },
+    };
   }
 
   private computeExchangeSupplyConcentration(holders: AnalyzedHolder[]): number {
