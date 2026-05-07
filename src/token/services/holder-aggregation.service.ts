@@ -2,7 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { LiteClassification } from './lite-classifier.service';
 import { LiteScore } from './lite-scorer.service';
 import type { PortfolioContext } from './lite-portfolio.service';
-import type { WalletLabel } from './wallet-filter.service';
+import type {
+  HolderLabel,
+  TeamDetectionResult,
+} from './token-intelligence.service';
 
 export interface AnalyzedHolder {
   walletAddress: string;
@@ -10,8 +13,10 @@ export interface AnalyzedHolder {
   rank: number;
   usdValue: number;
   tokenPrice: number;
-  walletLabel: WalletLabel;
+  walletLabel: HolderLabel;
   walletLabelDetail?: string | null;
+  isTeamLinked: boolean;
+  teamConnectionPath?: string | null;
   classification: LiteClassification | null;
   score: LiteScore | null;
   portfolio?: PortfolioContext | null;
@@ -40,6 +45,9 @@ export interface HolderQualityMetrics {
     botsUnknown: number;
     exchanges: number;
     contractsPools: number;
+    teamConnected: number;
+    burnDead: number;
+    vestingLocked: number;
   };
   topHolderAvgScore: number;
   pnlAggregation: HolderPnlAggregation;
@@ -83,10 +91,24 @@ export class HolderAggregationService {
   computeQualityMetrics(holders: AnalyzedHolder[]): HolderQualityMetrics {
     const totalHolders = holders.length;
     const exchangeCount = holders.filter(
-      (holder) => holder.walletLabel === 'exchange',
+      (holder) =>
+        holder.walletLabel === 'exchange' || holder.walletLabel === 'cex_deposit',
     ).length;
     const contractPoolCount = holders.filter((holder) =>
-      ['contract', 'lp_pool', 'bridge'].includes(holder.walletLabel),
+      [
+        'dex_pool',
+        'dex_router',
+        'staking',
+        'generic_contract',
+        'bridge',
+      ].includes(holder.walletLabel),
+    ).length;
+    const teamConnectedCount = holders.filter((holder) => holder.isTeamLinked).length;
+    const burnDeadCount = holders.filter(
+      (holder) => holder.walletLabel === 'burn',
+    ).length;
+    const vestingLockedCount = holders.filter(
+      (holder) => holder.walletLabel === 'vesting',
     ).length;
     const analyzed = holders.filter(
       (holder) => holder.classification !== null && holder.score !== null,
@@ -109,6 +131,18 @@ export class HolderAggregationService {
           contractsPools:
             totalHolders > 0
               ? Math.round((contractPoolCount / totalHolders) * 100)
+              : 0,
+          teamConnected:
+            totalHolders > 0
+              ? Math.round((teamConnectedCount / totalHolders) * 100)
+              : 0,
+          burnDead:
+            totalHolders > 0
+              ? Math.round((burnDeadCount / totalHolders) * 100)
+              : 0,
+          vestingLocked:
+            totalHolders > 0
+              ? Math.round((vestingLockedCount / totalHolders) * 100)
               : 0,
         },
         topHolderAvgScore: 0,
@@ -183,6 +217,18 @@ export class HolderAggregationService {
           totalHolders > 0
             ? Math.round((contractPoolCount / totalHolders) * 100)
             : 0,
+        teamConnected:
+          totalHolders > 0
+            ? Math.round((teamConnectedCount / totalHolders) * 100)
+            : 0,
+        burnDead:
+          totalHolders > 0
+            ? Math.round((burnDeadCount / totalHolders) * 100)
+            : 0,
+        vestingLocked:
+          totalHolders > 0
+            ? Math.round((vestingLockedCount / totalHolders) * 100)
+            : 0,
       },
       topHolderAvgScore,
       pnlAggregation: this.computePnlAggregation(holders),
@@ -193,6 +239,7 @@ export class HolderAggregationService {
   computeDistribution(
     holders: Array<{ walletAddress: string; balance: string; rank: number }>,
     totalSupply: string,
+    totalSupplyFormatted: number | null = null,
   ): HolderDistribution {
     const rankedHolders = [...holders].sort((left, right) => left.rank - right.rank);
     const totalHolders = rankedHolders.length;
@@ -207,18 +254,31 @@ export class HolderAggregationService {
       };
     }
 
-    const totalBal = this.parseBigIntSafe(totalSupply);
-    const balances = rankedHolders.map((holder) => this.parseBigIntSafe(holder.balance));
-    const totalHeld = balances.reduce((total, value) => total + value, 0n);
-    const effectiveTotal = totalBal > 0n ? totalBal : totalHeld;
+    const balances = rankedHolders.map((holder) =>
+      this.parseBalanceAsNumber(holder.balance),
+    );
+    const totalHeld = balances.reduce((total, value) => total + value, 0);
+
+    const onchainTotal =
+      typeof totalSupplyFormatted === 'number' &&
+      Number.isFinite(totalSupplyFormatted) &&
+      totalSupplyFormatted > 0
+        ? totalSupplyFormatted
+        : null;
+    const rawTotalCandidate = this.parseBalanceAsNumber(totalSupply);
+    const rawTotal =
+      Number.isFinite(rawTotalCandidate) && rawTotalCandidate > 0
+        ? rawTotalCandidate
+        : null;
+    const effectiveTotal = onchainTotal ?? rawTotal ?? totalHeld;
 
     // Holder size buckets by % of supply
     const buckets = { micro: 0, small: 0, medium: 0, whale: 0 };
 
     for (const balance of balances) {
       const pct =
-        effectiveTotal > 0n
-          ? Number((balance * 10000n) / effectiveTotal) / 100
+        effectiveTotal > 0
+          ? (balance / effectiveTotal) * 100
           : 0;
 
       if (pct > 1) {
@@ -234,14 +294,14 @@ export class HolderAggregationService {
 
     // Supply concentration
     const pctHeld = (count: number): number => {
-      const top = balances.slice(0, count).reduce((total, value) => total + value, 0n);
-      return effectiveTotal > 0n
-        ? Math.round(Number((top * 10000n) / effectiveTotal) / 100)
+      const top = balances.slice(0, count).reduce((total, value) => total + value, 0);
+      return effectiveTotal > 0
+        ? Math.round((top / effectiveTotal) * 100)
         : 0;
     };
 
     // Gini coefficient
-    const gini = this.computeGini(balances.map((balance) => Number(balance)));
+    const gini = this.computeGini(balances);
 
     return {
       totalHolders,
@@ -261,6 +321,7 @@ export class HolderAggregationService {
     quality: HolderQualityMetrics,
     distribution: HolderDistribution,
     holders: AnalyzedHolder[] = [],
+    teamDetection: TeamDetectionResult | null = null,
   ): RiskCallout[] {
     const callouts: RiskCallout[] = [];
 
@@ -288,6 +349,22 @@ export class HolderAggregationService {
         type: 'warning',
         title: 'Bot Activity Detected',
         description: `${quality.breakdown.botsUnknown}% of holders show automated or unclassifiable trading patterns.`,
+      });
+    }
+
+    if (teamDetection?.riskLevel === 'critical') {
+      callouts.push({
+        type: 'warning',
+        title: 'Critical Team Concentration',
+        description: `Team-connected wallets control ${teamDetection.teamTotalPctOfSupply.toFixed(1)}% of total supply across ${teamDetection.teamWalletCount} wallets. This represents significant centralization risk.`,
+      });
+    }
+
+    if (teamDetection?.riskLevel === 'high') {
+      callouts.push({
+        type: 'warning',
+        title: 'High Team Wallet Concentration',
+        description: `${teamDetection.teamWalletCount} team-connected wallets hold ${teamDetection.teamTotalPctOfSupply.toFixed(1)}% of supply. Monitor for distribution events.`,
       });
     }
 
@@ -340,11 +417,22 @@ export class HolderAggregationService {
     }
 
     const exchangeConcentrationPct = this.computeExchangeSupplyConcentration(holders);
-    if (exchangeConcentrationPct > 40) {
+    if (exchangeConcentrationPct > 30) {
       callouts.push({
         type: 'info',
-        title: 'High Exchange Concentration',
-        description: `${exchangeConcentrationPct}% of top holders are exchange wallets. Actual retail/investor distribution may differ from what is shown.`,
+        title: 'Significant Exchange Holdings',
+        description: `Exchange wallets hold approximately ${exchangeConcentrationPct}% of analyzed supply. Actual retail holder distribution may differ.`,
+      });
+    }
+
+    const dexPoolCount = holders.filter(
+      (holder) => holder.walletLabel === 'dex_pool',
+    ).length;
+    if (dexPoolCount > 0) {
+      callouts.push({
+        type: 'info',
+        title: 'DEX Liquidity Pools Detected',
+        description: `${dexPoolCount} liquidity pool(s) found among top holders.`,
       });
     }
 
@@ -367,18 +455,21 @@ export class HolderAggregationService {
     }
 
     const totalSupply = holders.reduce(
-      (sum, holder) => sum + this.parseBigIntSafe(holder.balance),
-      0n,
+      (sum, holder) => sum + this.parseBalanceAsNumber(holder.balance),
+      0,
     );
-    if (totalSupply <= 0n) {
+    if (totalSupply <= 0) {
       return 0;
     }
 
     const exchangeSupply = holders
-      .filter((holder) => holder.walletLabel === 'exchange')
-      .reduce((sum, holder) => sum + this.parseBigIntSafe(holder.balance), 0n);
+      .filter(
+        (holder) =>
+          holder.walletLabel === 'exchange' || holder.walletLabel === 'cex_deposit',
+      )
+      .reduce((sum, holder) => sum + this.parseBalanceAsNumber(holder.balance), 0);
 
-    return Math.round(Number((exchangeSupply * 10000n) / totalSupply)) / 100;
+    return Math.round((exchangeSupply / totalSupply) * 10000) / 100;
   }
 
   // --- GINI COEFFICIENT ---
@@ -442,5 +533,15 @@ export class HolderAggregationService {
     } catch {
       return 0n;
     }
+  }
+
+  private parseBalanceAsNumber(value: string): number {
+    const parsed = Number.parseFloat(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+
+    const asBigInt = this.parseBigIntSafe(value);
+    return Number(asBigInt);
   }
 }
