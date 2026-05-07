@@ -56,10 +56,11 @@ export class LiteScorerService {
 
     const rawTotal =
       consistency + riskManagement + portfolioQuality + experience + activity;
+    const maxRawTotal = features.holdingCategoryMix ? 165 : 90;
     const score =
       profitability > 0
-        ? Math.round((rawTotal / 80) * 70 + profitability)
-        : Math.round((rawTotal / 80) * 100);
+        ? Math.round((rawTotal / maxRawTotal) * 70 + profitability)
+        : Math.round((rawTotal / maxRawTotal) * 100);
     const clampedScore = Math.min(100, Math.max(0, score));
 
     const band =
@@ -166,38 +167,78 @@ export class LiteScorerService {
       score += 2;
     }
 
-    return Math.min(score, 20);
+    let riskBonus = 0;
+    if (f.portfolioRiskSignal === 'conservative') {
+      riskBonus += 10;
+    } else if (f.portfolioRiskSignal === 'balanced') {
+      riskBonus += 5;
+    } else if (f.portfolioRiskSignal === 'degen') {
+      riskBonus -= 5;
+    }
+
+    score += riskBonus;
+
+    return Math.max(0, Math.min(score, 20));
   }
 
-  // PORTFOLIO QUALITY (max 15)
-  // Rewards blue chip holdings and multi-chain activity
+  // PORTFOLIO QUALITY (max 100 when holdings data is available)
+  // Falls back to placeholder holdings signals when portfolio context is absent.
   private scorePortfolioQuality(f: LiteFeatureVector): number {
     let score = 0;
 
-    // Blue chip percentage in trades
-    if (f.blueChipPercent >= 40) {
-      score += 8;
-    } else if (f.blueChipPercent >= 20) {
-      score += 5;
-    } else if (f.blueChipPercent >= 10) {
-      score += 2;
+    if (f.holdingCategoryMix) {
+      // REAL portfolio data available.
+
+      // Diversification (0-30)
+      const divScore = f.portfolioDiversificationScore || 0;
+      score += (divScore / 100) * 30;
+
+      // Category quality (0-30)
+      const qualityAllocation =
+        (f.holdingCategoryMix.bluechip || 0) +
+        (f.holdingCategoryMix.defi || 0) +
+        (f.holdingCategoryMix.infrastructure || 0);
+      score += Math.min(30, qualityAllocation * 0.4);
+
+      // Stablecoin reserve bonus (0-15)
+      const stablePct = f.holdingCategoryMix.stablecoin || 0;
+      if (stablePct >= 5 && stablePct <= 40) {
+        score += 15;
+      } else if (stablePct > 40) {
+        score += 8;
+      }
+
+      // Token count bonus (0-15)
+      const tokenCount = f.totalHoldingTokens || 0;
+      if (tokenCount >= 5 && tokenCount <= 30) {
+        score += 15;
+      } else if (tokenCount > 30) {
+        score += 8;
+      } else if (tokenCount >= 2) {
+        score += 5;
+      }
+
+      // Concentration penalty (0 to -10)
+      const trackedWeight = f.trackedTokenWeight || 0;
+      if (trackedWeight > 80) {
+        score -= 10;
+      } else if (trackedWeight > 50) {
+        score -= 5;
+      }
+    } else {
+      // NO portfolio data: keep placeholder logic.
+      if (f.totalHoldingTokens >= 5) {
+        score += 15;
+      } else if (f.totalHoldingTokens >= 2) {
+        score += 8;
+      }
+
+      if (f.holdingChainCount >= 2) {
+        score += 10;
+      }
     }
 
-    // Multi-chain activity shows sophistication
-    if (f.holdingChainCount >= 3) {
-      score += 4;
-    } else if (f.holdingChainCount >= 2) {
-      score += 2;
-    }
-
-    // Having current holdings (not just speculating and exiting)
-    if (f.totalHoldingTokens >= 5) {
-      score += 3;
-    } else if (f.totalHoldingTokens >= 1) {
-      score += 1;
-    }
-
-    return Math.min(score, 15);
+    return Math.max(0, Math.min(100, score));
   }
 
   // EXPERIENCE (max 15)

@@ -132,6 +132,20 @@ export class LiteClassifierService {
     if (totalLots > 0 && f.holdBuckets.over7d / totalLots > 0.5) {
       score += 15;
     }
+
+    if (f.holdingCategoryMix) {
+      if ((f.trackedTokenWeight ?? 0) > 30 && f.holdingCategoryMix.bluechip > 30) {
+        score += 10;
+      }
+
+      if (
+        f.portfolioRiskSignal === 'conservative' ||
+        f.portfolioRiskSignal === 'balanced'
+      ) {
+        score += 5;
+      }
+    }
+
     return Math.min(score, 100);
   }
 
@@ -161,6 +175,16 @@ export class LiteClassifierService {
     if (f.burstinessCoeff >= 0.5 && f.burstinessCoeff <= 2.5) {
       score += 10;
     }
+
+    if (f.holdingCategoryMix) {
+      if (
+        (f.portfolioDiversificationScore ?? 0) > 50 &&
+        f.holdingCategoryMix.defi > 20
+      ) {
+        score += 5;
+      }
+    }
+
     return Math.min(score, 100);
   }
 
@@ -194,6 +218,13 @@ export class LiteClassifierService {
     ) {
       score += 10;
     }
+
+    if (f.holdingCategoryMix) {
+      if (f.holdingCategoryMix.stablecoin > 30) {
+        score += 5;
+      }
+    }
+
     return Math.min(score, 100);
   }
 
@@ -223,6 +254,21 @@ export class LiteClassifierService {
     if (f.uniqueTokens > 20) {
       score += 10;
     }
+
+    if (f.holdingCategoryMix) {
+      if (f.portfolioRiskSignal === 'degen') {
+        score += 15;
+      }
+
+      if (f.holdingCategoryMix.meme > 50) {
+        score += 10;
+      }
+
+      if ((f.trackedTokenWeight ?? 0) > 60) {
+        score += 10;
+      }
+    }
+
     return Math.min(score, 100);
   }
 
@@ -273,6 +319,17 @@ export class LiteClassifierService {
     if (f.tradesPerDay < 0.2) {
       score += 10;
     }
+
+    if (f.holdingCategoryMix) {
+      if (f.holdingCategoryMix.bluechip > 40) {
+        score += 10;
+      }
+
+      if ((f.portfolioDiversificationScore ?? 0) > 60) {
+        score += 5;
+      }
+    }
+
     return Math.min(score, 100);
   }
 
@@ -323,31 +380,121 @@ export class LiteClassifierService {
         ? `${(f.medianHoldHours / 24).toFixed(1)}d median hold`
         : 'no completed holds';
 
+    let baseReasoning: string;
     switch (type) {
       case 'Smart Money':
-        return pnlMetrics
+        baseReasoning = pnlMetrics
           ? `${pnlMetrics.winRate}% win rate, ${pnlMetrics.avgRoiPercent}% average ROI, and ${pnlMetrics.profitFactor} profit factor across realized trades.`
           : `Profitable realized trading pattern across ${f.swapCount} swaps.`;
+        break;
       case 'Paper Hand':
-        return pnlMetrics
+        baseReasoning = pnlMetrics
           ? `Sells quickly at a loss: ${pnlMetrics.avgRoiPercent}% average ROI with ${pnlMetrics.avgHoldDurationHours}h average holds.`
           : `Short hold behavior across ${f.swapCount} swaps.`;
+        break;
       case 'Diamond Hand':
-        return `Holds positions for ${holdDays} with low trade frequency (${f.tradesPerDay.toFixed(2)}/day).`;
+        baseReasoning = `Holds positions for ${holdDays} with low trade frequency (${f.tradesPerDay.toFixed(2)}/day).`;
+        break;
       case 'Swing Trader':
-        return `${holdDays}, ${f.swapCount} swaps over ${f.tradingSpanDays.toFixed(0)} days - classic swing pattern.`;
+        baseReasoning = `${holdDays}, ${f.swapCount} swaps over ${f.tradingSpanDays.toFixed(0)} days - classic swing pattern.`;
+        break;
       case 'Day Trader':
-        return `Very short ${holdDays} with avg ${f.avgGapHours.toFixed(1)}h between trades.`;
+        baseReasoning = `Very short ${holdDays} with avg ${f.avgGapHours.toFixed(1)}h between trades.`;
+        break;
       case 'Degen':
-        return `${f.memecoinPercent}% memecoin exposure, ${holdDays}, burstiness ${f.burstinessCoeff.toFixed(2)}.`;
+        baseReasoning = `${f.memecoinPercent}% memecoin exposure, ${holdDays}, burstiness ${f.burstinessCoeff.toFixed(2)}.`;
+        break;
       case 'Bot / Automated':
-        return `${f.tradesPerDay.toFixed(1)} trades/day with ${f.avgGapHours.toFixed(2)}h avg gap - systematic pattern.`;
+        baseReasoning = `${f.tradesPerDay.toFixed(1)} trades/day with ${f.avgGapHours.toFixed(2)}h avg gap - systematic pattern.`;
+        break;
       case 'Accumulator':
-        return `More buys than sells (${f.matchedLotCount} matched vs ${f.swapCount} total swaps), ${holdDays}.`;
+        baseReasoning = `More buys than sells (${f.matchedLotCount} matched vs ${f.swapCount} total swaps), ${holdDays}.`;
+        break;
       case 'Whale':
-        return `Long-term active wallet (${f.tradingSpanDays.toFixed(0)} days), ${f.blueChipPercent}% blue chip.`;
+        baseReasoning = `Long-term active wallet (${f.tradingSpanDays.toFixed(0)} days), ${f.blueChipPercent}% blue chip.`;
+        break;
       default:
-        return `Based on ${f.swapCount} swaps over ${f.tradingSpanDays.toFixed(0)} days.`;
+        baseReasoning = `Based on ${f.swapCount} swaps over ${f.tradingSpanDays.toFixed(0)} days.`;
+        break;
     }
+
+    const portfolioReasoning = this.getPortfolioReasoning(type, f);
+    const contextReasoning = this.getPortfolioContextReasoning(f);
+
+    const segments = [baseReasoning, ...portfolioReasoning];
+    if (contextReasoning) {
+      segments.push(contextReasoning);
+    }
+
+    return segments.join(' ');
+  }
+
+  private getPortfolioReasoning(type: string, f: LiteFeatureVector): string[] {
+    if (!f.holdingCategoryMix) {
+      return [];
+    }
+
+    const notes: string[] = [];
+
+    if (type === 'Degen') {
+      if (f.holdingCategoryMix.meme > 50) {
+        notes.push(`Portfolio is ${f.holdingCategoryMix.meme}% meme tokens.`);
+      }
+
+      if ((f.trackedTokenWeight ?? 0) > 60) {
+        notes.push(
+          `This token represents ${(f.trackedTokenWeight ?? 0).toFixed(2)}% of wallet's total portfolio.`,
+        );
+      }
+    }
+
+    if (type === 'Diamond Hand') {
+      if (
+        ((f.trackedTokenWeight ?? 0) > 30 && f.holdingCategoryMix.bluechip > 30) ||
+        f.portfolioRiskSignal === 'conservative' ||
+        f.portfolioRiskSignal === 'balanced'
+      ) {
+        notes.push(
+          'Diversified portfolio with significant conviction in this token.',
+        );
+      }
+    }
+
+    if (type === 'Accumulator') {
+      if (
+        f.holdingCategoryMix.bluechip > 40 ||
+        (f.portfolioDiversificationScore ?? 0) > 60
+      ) {
+        notes.push('Bluechip-heavy portfolio suggests disciplined accumulation.');
+      }
+    }
+
+    if (type === 'Swing Trader') {
+      if (
+        (f.portfolioDiversificationScore ?? 0) > 50 &&
+        f.holdingCategoryMix.defi > 20
+      ) {
+        notes.push('DeFi-engaged portfolio with diversified positions.');
+      }
+    }
+
+    if (type === 'Day Trader') {
+      if (f.holdingCategoryMix.stablecoin > 30) {
+        notes.push('High stablecoin reserves suggest active trading strategy.');
+      }
+    }
+
+    return notes;
+  }
+
+  private getPortfolioContextReasoning(f: LiteFeatureVector): string | null {
+    if (!f.holdingCategoryMix) {
+      return null;
+    }
+
+    return (
+      `Portfolio context: ${(f.portfolioRiskSignal ?? 'aggressive')} profile, ` +
+      `${f.totalHoldingTokens} tokens, ${(f.trackedTokenWeight ?? 0).toFixed(2)}% allocated to this token.`
+    );
   }
 }
