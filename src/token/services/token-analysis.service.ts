@@ -12,7 +12,7 @@ import { LiteScorerService } from './lite-scorer.service';
 import { LitePricingService } from './lite-pricing.service';
 import { LitePortfolioService } from './lite-portfolio.service';
 import { LitePnlService } from './lite-pnl.service';
-import { WalletFilterService } from './wallet-filter.service';
+import { TokenIntelligenceService } from './token-intelligence.service';
 import {
   HolderAggregationService,
   AnalyzedHolder,
@@ -33,7 +33,7 @@ export class TokenAnalysisService {
     private readonly pricing: LitePricingService,
     private readonly portfolio: LitePortfolioService,
     private readonly pnl: LitePnlService,
-    private readonly walletFilter: WalletFilterService,
+    private readonly intelligence: TokenIntelligenceService,
     private readonly aggregation: HolderAggregationService,
     private readonly config: ConfigService,
   ) {}
@@ -116,73 +116,24 @@ export class TokenAnalysisService {
     const { holders } = await this.chainbase.getTopHolders(address, chain, 100);
     this.logger.log(`Fetched ${holders.length} holders for ${contractAddress}`);
 
-    const tokenPrice = await this.pricing.getTokenPrice(address, chain);
+    // ========== PHASE 1: Token Metadata ==========
+    const tokenMetadata = await this.intelligence.getTokenMetadata(
+      contractAddress,
+      chain,
+    );
+    this.logger.log(
+      `Token: ${tokenMetadata.symbol || 'unknown'} | ` +
+        `Supply: ${tokenMetadata.totalSupplyFormatted || 'unknown'} | ` +
+        `Liquidity: $${tokenMetadata.liquidityUsd || 0} | ` +
+        `Deployer: ${tokenMetadata.deployer || 'unknown'} | ` +
+        `Owner: ${tokenMetadata.owner || 'unknown'}`,
+    );
+
+    // Keep using LitePricingService for token price (cached)
+    const tokenPrice = await this.pricing.getTokenPrice(contractAddress, chain);
     this.logger.log(
       `Token price: $${tokenPrice.priceUsd} (source: ${tokenPrice.source})`,
     );
-
-    let tokenName: string | null = null;
-    let tokenSymbol: string | null = null;
-    let totalSupply: string | null = null;
-
-    try {
-      const dexUrl = `https://api.dexscreener.com/latest/dex/tokens/${address}`;
-      const dexResp = await fetch(dexUrl);
-      if (dexResp.ok) {
-        const dexData = (await dexResp.json()) as {
-          pairs?: Array<{
-            baseToken?: { address?: string; name?: string; symbol?: string };
-            quoteToken?: { address?: string; name?: string; symbol?: string };
-          }>;
-        };
-        const pair = dexData.pairs?.[0];
-
-        if (pair?.baseToken?.address?.toLowerCase() === address) {
-          tokenName = pair.baseToken.name ?? null;
-          tokenSymbol = pair.baseToken.symbol ?? null;
-        } else if (pair?.quoteToken?.address?.toLowerCase() === address) {
-          tokenName = pair.quoteToken.name ?? null;
-          tokenSymbol = pair.quoteToken.symbol ?? null;
-        }
-      }
-    } catch {
-      // non-critical metadata enrichment
-    }
-
-    try {
-      const platformMap: Record<string, string> = {
-        ethereum: 'ethereum',
-        polygon: 'polygon-pos',
-        bsc: 'binance-smart-chain',
-        base: 'base',
-      };
-      const platform = platformMap[chain.toLowerCase()];
-
-      if (platform) {
-        const cgUrl = `https://api.coingecko.com/api/v3/coins/${platform}/contract/${address}`;
-        const cgResp = await fetch(cgUrl);
-
-        if (cgResp.ok) {
-          const cgData = (await cgResp.json()) as {
-            name?: string;
-            symbol?: string;
-            market_data?: { total_supply?: number | string | null };
-          };
-
-          if (cgData.market_data?.total_supply !== undefined && cgData.market_data?.total_supply !== null) {
-            totalSupply = String(cgData.market_data.total_supply);
-          }
-          if (!tokenName && cgData.name) {
-            tokenName = cgData.name;
-          }
-          if (!tokenSymbol && cgData.symbol) {
-            tokenSymbol = cgData.symbol.toUpperCase();
-          }
-        }
-      }
-    } catch {
-      // non-critical supply enrichment
-    }
 
     const enrichedHolders = holders.map((holder) => {
       const balanceNum = Number.parseFloat(holder.balance);
@@ -197,23 +148,33 @@ export class TokenAnalysisService {
       };
     });
 
-    const filterResults = await this.walletFilter.filterWallets(
+    // ========== PHASE 2: Classify All Holders + Detect Team ==========
+    const { classifications, teamDetection } =
+      await this.intelligence.classifyHolders(
       enrichedHolders.map((holder) => ({
-        address: holder.walletAddress,
+        walletAddress: holder.walletAddress,
+        balance: holder.balance,
+        rank: holder.rank,
         usdValue: holder.usdValue || 0,
       })),
+      tokenMetadata,
       chain,
     );
+    this.logger.log(
+      `Holders classified: ${classifications.size} total | ` +
+        `Team wallets: ${teamDetection.teamWalletCount} (${teamDetection.teamTotalPctOfSupply.toFixed(1)}% supply) | ` +
+        `Risk: ${teamDetection.riskLevel}`,
+    );
 
-    // Step 2: Analyze each holder in batches of 5
-    const analyzed: AnalyzedHolder[] = [];
+    // ========== PHASE 3: Batch Analysis Loop ==========
+    const analyzedHolders: AnalyzedHolder[] = [];
 
     for (let i = 0; i < enrichedHolders.length; i += batchSize) {
       const batch = enrichedHolders.slice(i, i + batchSize);
 
       const results = await Promise.allSettled(
         batch.map(async (holder) => {
-          const filter = filterResults.get(holder.walletAddress.toLowerCase());
+          const filter = classifications.get(holder.walletAddress.toLowerCase());
 
           if (filter && !filter.shouldAnalyze) {
             return {
@@ -224,6 +185,8 @@ export class TokenAnalysisService {
               tokenPrice: holder.tokenPrice,
               walletLabel: filter.label,
               walletLabelDetail: filter.labelDetail || null,
+              isTeamLinked: filter.isTeamLinked,
+              teamConnectionPath: filter.teamConnectionPath || null,
               classification: null,
               score: null,
               portfolio: null,
@@ -276,18 +239,24 @@ export class TokenAnalysisService {
                   }
                 : null;
 
-            return {
+            const existingAnalysisResult = {
               walletAddress: holder.walletAddress,
               balance: holder.balance,
               rank: holder.rank,
               usdValue: holder.usdValue,
               tokenPrice: holder.tokenPrice,
-              walletLabel: 'eoa',
-              walletLabelDetail: null,
               classification,
               score,
               portfolio: portfolioContext,
               pnl: pnlSummary,
+            };
+
+            return {
+              ...existingAnalysisResult,
+              walletLabel: filter?.label || 'eoa',
+              walletLabelDetail: filter?.labelDetail || null,
+              isTeamLinked: filter?.isTeamLinked || false,
+              teamConnectionPath: filter?.teamConnectionPath || null,
             } as AnalyzedHolder;
           } catch (err: unknown) {
             this.logger.warn(
@@ -301,6 +270,8 @@ export class TokenAnalysisService {
               tokenPrice: holder.tokenPrice,
               walletLabel: filter?.label ?? 'eoa',
               walletLabelDetail: filter?.labelDetail ?? null,
+              isTeamLinked: filter?.isTeamLinked || false,
+              teamConnectionPath: filter?.teamConnectionPath || null,
               classification: null,
               score: null,
               portfolio: null,
@@ -313,7 +284,7 @@ export class TokenAnalysisService {
 
       for (const result of results) {
         if (result.status === 'fulfilled') {
-          analyzed.push(result.value);
+          analyzedHolders.push(result.value);
         }
       }
 
@@ -328,15 +299,17 @@ export class TokenAnalysisService {
     }
 
     // Step 3: Aggregate results
-    const quality = this.aggregation.computeQualityMetrics(analyzed);
+    const quality = this.aggregation.computeQualityMetrics(analyzedHolders);
     const distribution = this.aggregation.computeDistribution(
       holders,
-      totalSupply ?? '0',
+      tokenMetadata.totalSupply ?? '0',
+      tokenMetadata.totalSupplyFormatted,
     );
     const callouts = this.aggregation.generateRiskCallouts(
       quality,
       distribution,
-      analyzed,
+      analyzedHolders,
+      teamDetection,
     );
     const qualityWithPrice = {
       ...quality,
@@ -344,7 +317,14 @@ export class TokenAnalysisService {
       priceSource: tokenPrice.source,
       priceFetchedAt: tokenPrice.fetchedAt,
       priceConfidence: tokenPrice.confidence,
-      totalSupply,
+      totalSupply: tokenMetadata.totalSupplyFormatted?.toString() || null,
+      circulatingSupply: tokenMetadata.circulatingSupply || null,
+      liquidityUsd: tokenMetadata.liquidityUsd,
+      liquidityPairs: tokenMetadata.liquidityPairs,
+      deployer: tokenMetadata.deployer,
+      owner: tokenMetadata.owner,
+      metadataSource: tokenMetadata.source,
+      teamDetection,
     };
     const qualityMetrics =
       qualityWithPrice as unknown as QueryDeepPartialEntity<
@@ -359,10 +339,10 @@ export class TokenAnalysisService {
     await this.tokenRepo.update(
       { contractAddress: address, chain },
       {
-        tokenName,
-        tokenSymbol,
+        tokenName: tokenMetadata.name,
+        tokenSymbol: tokenMetadata.symbol,
         totalHolders: enrichedHolders.length,
-        holdersData: analyzed,
+        holdersData: analyzedHolders,
         qualityMetrics,
         distribution: distributionMetrics,
         riskCallouts: callouts,
