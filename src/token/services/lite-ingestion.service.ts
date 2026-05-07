@@ -156,18 +156,38 @@ export class LiteIngestionService {
         }),
       });
 
+      if (!response.ok) {
+        this.logger.warn(
+          `alchemy_getTokenBalances failed for ${walletAddress} on ${normalizedChain}: HTTP ${response.status}`,
+        );
+        return [];
+      }
+
       const data = (await response.json()) as AlchemyTokenBalancesResponse;
       const balances = data.result?.tokenBalances ?? [];
       const nonZero = balances.filter(
         (balance) =>
           balance.contractAddress &&
           balance.tokenBalance &&
-          balance.tokenBalance !== '0x0' &&
-          balance.tokenBalance !== '0x',
+          this.hasPositiveTokenBalance(balance.tokenBalance),
+      );
+
+      this.logger.debug(
+        `[TokenBalances] ${walletAddress} ${normalizedChain}: raw=${balances.length}, nonZero=${nonZero.length}`,
       );
 
       const enriched: LiteTokenBalance[] = [];
+      let metadataFailures = 0;
       for (const balance of nonZero.slice(0, 50)) {
+        const contractAddress = balance.contractAddress?.toLowerCase();
+        if (!contractAddress) {
+          continue;
+        }
+
+        let decimals = 18;
+        let symbol: string | null = null;
+        let name: string | null = null;
+
         try {
           const metadataResponse = await fetch(url, {
             method: 'POST',
@@ -179,22 +199,38 @@ export class LiteIngestionService {
               id: 2,
             }),
           });
-          const metadataData =
-            (await metadataResponse.json()) as AlchemyTokenMetadataResponse;
-          const metadata = metadataData.result;
-          const decimals = metadata?.decimals ?? 18;
-
-          enriched.push({
-            contractAddress: balance.contractAddress!.toLowerCase(),
-            balance: this.formatUnits(balance.tokenBalance ?? '0', decimals),
-            decimals,
-            symbol: metadata?.symbol ?? null,
-            name: metadata?.name ?? null,
-          });
+          if (metadataResponse.ok) {
+            const metadataData =
+              (await metadataResponse.json()) as AlchemyTokenMetadataResponse;
+            const metadata = metadataData.result;
+            decimals = metadata?.decimals ?? 18;
+            symbol = metadata?.symbol ?? null;
+            name = metadata?.name ?? null;
+          } else {
+            metadataFailures += 1;
+          }
         } catch {
+          metadataFailures += 1;
+        }
+
+        const humanBalance = this.formatUnits(balance.tokenBalance ?? '0', decimals);
+        const balanceValue = Number.parseFloat(humanBalance);
+        if (!Number.isFinite(balanceValue) || balanceValue <= 0) {
           continue;
         }
+
+        enriched.push({
+          contractAddress,
+          balance: humanBalance,
+          decimals,
+          symbol,
+          name,
+        });
       }
+
+      this.logger.debug(
+        `[TokenBalances] ${walletAddress} ${normalizedChain}: enriched=${enriched.length}, metadataFailures=${metadataFailures}`,
+      );
 
       return enriched;
     } catch (err: unknown) {
@@ -365,14 +401,29 @@ export class LiteIngestionService {
       const divisor = BigInt(10) ** BigInt(safeDecimals);
       const whole = bn / divisor;
       const fraction = bn % divisor;
+      if (safeDecimals === 0) {
+        return whole.toString();
+      }
+
       const fractionString = fraction
         .toString()
         .padStart(safeDecimals, '0')
-        .slice(0, 6);
+        .slice(0, 6)
+        .replace(/0+$/, '');
 
-      return `${whole.toString()}.${fractionString}`;
+      return fractionString.length > 0
+        ? `${whole.toString()}.${fractionString}`
+        : whole.toString();
     } catch {
       return '0';
+    }
+  }
+
+  private hasPositiveTokenBalance(value: string): boolean {
+    try {
+      return BigInt(value) > 0n;
+    } catch {
+      return false;
     }
   }
 
