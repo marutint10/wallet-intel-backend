@@ -187,6 +187,9 @@ export class TokenAnalysisService {
               walletLabelDetail: filter.labelDetail || null,
               isTeamLinked: filter.isTeamLinked,
               teamConnectionPath: filter.teamConnectionPath || null,
+              labelConfidence: filter.labelConfidence,
+              labelEvidence: filter.labelEvidence,
+              teamConnectionScore: filter.teamConnectionScore,
               classification: null,
               score: null,
               portfolio: null,
@@ -257,6 +260,9 @@ export class TokenAnalysisService {
               walletLabelDetail: filter?.labelDetail || null,
               isTeamLinked: filter?.isTeamLinked || false,
               teamConnectionPath: filter?.teamConnectionPath || null,
+              labelConfidence: filter?.labelConfidence ?? 50,
+              labelEvidence: filter?.labelEvidence ?? [],
+              teamConnectionScore: filter?.teamConnectionScore ?? 0,
             } as AnalyzedHolder;
           } catch (err: unknown) {
             this.logger.warn(
@@ -272,6 +278,9 @@ export class TokenAnalysisService {
               walletLabelDetail: filter?.labelDetail ?? null,
               isTeamLinked: filter?.isTeamLinked || false,
               teamConnectionPath: filter?.teamConnectionPath || null,
+              labelConfidence: filter?.labelConfidence ?? 50,
+              labelEvidence: filter?.labelEvidence ?? [],
+              teamConnectionScore: filter?.teamConnectionScore ?? 0,
               classification: null,
               score: null,
               portfolio: null,
@@ -299,7 +308,11 @@ export class TokenAnalysisService {
     }
 
     // Step 3: Aggregate results
-    const quality = this.aggregation.computeQualityMetrics(analyzedHolders);
+    const quality = this.aggregation.computeQualityMetrics(
+      analyzedHolders,
+      tokenMetadata.totalSupply ?? '0',
+      tokenMetadata.totalSupplyFormatted,
+    );
     const distribution = this.aggregation.computeDistribution(
       holders,
       tokenMetadata.totalSupply ?? '0',
