@@ -11,6 +11,7 @@ import type {
 export interface AnalyzedHolder {
   walletAddress: string;
   balance: string;
+  rawBalance?: string;
   rank: number;
   usdValue: number;
   tokenPrice: number;
