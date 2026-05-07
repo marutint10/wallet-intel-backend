@@ -173,8 +173,28 @@ export class LitePnlService {
     }
 
     try {
-      const price = await this.pricing.getTokenPrice(soldToken, chain);
-      return swap.soldAmount * price.priceUsd;
+      // Use historical price at swap time for non-stablecoin legs.
+      const historicalSold = await this.pricing.getHistoricalPrice(
+        soldToken,
+        chain,
+        swap.timestamp,
+      );
+      if (historicalSold.priceUsd > 0) {
+        return swap.soldAmount * historicalSold.priceUsd;
+      }
+
+      const historicalBought = await this.pricing.getHistoricalPrice(
+        boughtToken,
+        chain,
+        swap.timestamp,
+      );
+      if (historicalBought.priceUsd > 0) {
+        return swap.boughtAmount * historicalBought.priceUsd;
+      }
+
+      // Last resort fallback to current price.
+      const currentPrice = await this.pricing.getTokenPrice(soldToken, chain);
+      return swap.soldAmount * currentPrice.priceUsd;
     } catch (err: unknown) {
       this.logger.warn(
         `PnL price estimate failed for ${soldToken}: ${this.getErrorMessage(err)}`,
