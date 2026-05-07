@@ -433,6 +433,10 @@ File: src/token/services/lite-pricing.service.ts
 - DexScreener primary, CoinGecko fallback
 - 5-minute in-memory cache
 - batch pricing for portfolio valuation
+- historical price fetching via DefiLlama (primary) with CoinGecko range fallback
+- hour-rounded in-memory cache for historical prices (permanent, prices do not change)
+- 150ms minimum spacing between DefiLlama calls
+- used by LitePnlService for accurate swap-time valuation
 - used by: orchestrator holder USD values, portfolio service, PnL service
 
 ### LitePortfolioService
@@ -449,9 +453,10 @@ File: src/token/services/lite-portfolio.service.ts
 File: src/token/services/lite-pnl.service.ts
 
 - FIFO position lot reconstruction from detected swaps
-- stablecoin-side USD valuation first, current-price fallback otherwise
+- swap valuation priority: stablecoin-side first, DefiLlama historical second, CoinGecko historical third, current price last resort
 - outputs: realized PnL, win rate, profit factor, ROI, largest win/loss
 - feeds into classifier Smart Money/Paper Hand/Degen/Bot signals and scorer profitability dimension
+- matches wallet module's DefiLlama-first historical pricing strategy
 
 ### WalletFilterService
 
