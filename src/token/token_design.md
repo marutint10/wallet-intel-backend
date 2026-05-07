@@ -179,13 +179,16 @@ Responsibilities:
 
 - compute quality metrics from analyzed holders
 - compute distribution metrics (holder buckets, top concentration, gini)
+- compute category-split concentration metrics for eoaHolders, teamLinked, exchanges, contractsAndPools, vestingLocked, burnDead, and dust
 - generate risk/positive/info callouts
+- add callouts for low retail holder concentration and high-confidence team detection
 
 Output families:
 
 - qualityMetrics
 - distribution
 - riskCallouts
+- categoryConcentration (inside qualityMetrics)
 
 ### TokenModule wiring
 
@@ -490,6 +493,10 @@ File: src/token/services/token-intelligence.service.ts
 - degrades safely:
   - missing ALCHEMY_API_KEY: falls back to broad EOA labeling for unknown addresses
   - missing ETHERSCAN_API_KEY: skips deployer/sourcecode/team transfer scans
+- evidence-based labeling: every holder classification includes labelConfidence (0-100), labelEvidence array with type/detail/weight/txHash/txCount, and teamConnectionScore (0-100)
+- weighted team connection scoring: deployer transfers (0.9-0.98), owner transfers (0.85-0.92), treasury controllers (0.80), indirect counterparties (0.4-0.65), multi-signal boost
+- team detection risk levels now factor in confidence: highConfidenceTeamPct drives critical/high thresholds instead of raw teamTotalPctOfSupply alone
+- weak connections (teamConnectionScore < 30) are not marked as team-linked, preventing false positives from incidental interactions
 
 Current integration status:
 
