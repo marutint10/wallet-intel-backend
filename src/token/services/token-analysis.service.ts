@@ -136,14 +136,23 @@ export class TokenAnalysisService {
       `Token price: $${tokenPrice.priceUsd} (source: ${tokenPrice.source})`,
     );
 
+    const tokenDecimals =
+      tokenMetadata.decimals !== null && tokenMetadata.decimals >= 0
+        ? tokenMetadata.decimals
+        : 18;
+
     const enrichedHolders = holders.map((holder) => {
-      const balanceNum = Number.parseFloat(holder.balance);
+      const rawBalance = holder.balance;
+      const normalizedBalance = this.formatUnits(rawBalance, tokenDecimals);
+      const balanceNum = Number.parseFloat(normalizedBalance);
       const usdValue = Number.isFinite(balanceNum)
         ? Math.round(balanceNum * tokenPrice.priceUsd * 100) / 100
         : 0;
 
       return {
         ...holder,
+        rawBalance,
+        balance: Number.isFinite(balanceNum) ? normalizedBalance : '0',
         usdValue,
         tokenPrice: tokenPrice.priceUsd,
       };
@@ -181,6 +190,7 @@ export class TokenAnalysisService {
             return {
               walletAddress: holder.walletAddress,
               balance: holder.balance,
+              rawBalance: holder.rawBalance,
               rank: holder.rank,
               usdValue: holder.usdValue,
               tokenPrice: holder.tokenPrice,
@@ -250,6 +260,7 @@ export class TokenAnalysisService {
             const existingAnalysisResult = {
               walletAddress: holder.walletAddress,
               balance: holder.balance,
+              rawBalance: holder.rawBalance,
               rank: holder.rank,
               usdValue: holder.usdValue,
               tokenPrice: holder.tokenPrice,
@@ -276,6 +287,7 @@ export class TokenAnalysisService {
             return {
               walletAddress: holder.walletAddress,
               balance: holder.balance,
+              rawBalance: holder.rawBalance,
               rank: holder.rank,
               usdValue: holder.usdValue,
               tokenPrice: holder.tokenPrice,
@@ -319,7 +331,7 @@ export class TokenAnalysisService {
       tokenMetadata.totalSupplyFormatted,
     );
     const distribution = this.aggregation.computeDistribution(
-      holders,
+      enrichedHolders,
       tokenMetadata.totalSupply ?? '0',
       tokenMetadata.totalSupplyFormatted,
     );
@@ -383,5 +395,30 @@ export class TokenAnalysisService {
     }
 
     return String(err);
+  }
+
+  private formatUnits(rawValue: string, decimals: number): string {
+    try {
+      const normalizedDecimals = Math.max(0, decimals);
+      const base = BigInt(10) ** BigInt(normalizedDecimals);
+      const amount = BigInt(rawValue || '0');
+      const whole = amount / base;
+      const fraction = amount % base;
+
+      if (normalizedDecimals === 0) {
+        return whole.toString();
+      }
+
+      const fractionText = fraction
+        .toString()
+        .padStart(normalizedDecimals, '0')
+        .replace(/0+$/, '');
+
+      return fractionText.length > 0
+        ? `${whole.toString()}.${fractionText}`
+        : whole.toString();
+    } catch {
+      return '0';
+    }
   }
 }
