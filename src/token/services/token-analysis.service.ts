@@ -11,6 +11,7 @@ import { LiteClassifierService } from './lite-classifier.service';
 import { LiteScorerService } from './lite-scorer.service';
 import { LitePricingService } from './lite-pricing.service';
 import { LitePortfolioService } from './lite-portfolio.service';
+import type { HoldingsProfile } from './lite-portfolio.service';
 import { LitePnlService } from './lite-pnl.service';
 import { TokenIntelligenceService } from './token-intelligence.service';
 import {
@@ -203,20 +204,11 @@ export class TokenAnalysisService {
               chain,
               200,
             );
-            const features = this.feature.extractFeatures(
-              transfers,
-              holder.walletAddress,
-              chain,
-            );
-            const swaps = this.feature.extractSwaps(transfers, holder.walletAddress);
-            const pnlMetrics = await this.pnl.computePnl(swaps, chain);
-            const classification = this.classifier.classify(features, pnlMetrics);
-            const score = this.scorer.score(features, pnlMetrics);
 
-            let portfolioContext = null;
+            let holdingsProfile: HoldingsProfile | null = null;
             if (holder.rank <= 50) {
               try {
-                portfolioContext = await this.portfolio.getPortfolioContext(
+                holdingsProfile = await this.portfolio.getPortfolioContext(
                   holder.walletAddress,
                   address,
                   holder.usdValue,
@@ -228,6 +220,19 @@ export class TokenAnalysisService {
                 );
               }
             }
+
+            const features = this.feature.extractFeatures(
+              transfers,
+              holder.walletAddress,
+              chain,
+              holdingsProfile?.holdingTokenCount,
+              1,
+              holdingsProfile,
+            );
+            const swaps = this.feature.extractSwaps(transfers, holder.walletAddress);
+            const pnlMetrics = await this.pnl.computePnl(swaps, chain);
+            const classification = this.classifier.classify(features, pnlMetrics);
+            const score = this.scorer.score(features, pnlMetrics);
 
             const pnlSummary =
               pnlMetrics.trades.length > 0
@@ -250,7 +255,7 @@ export class TokenAnalysisService {
               tokenPrice: holder.tokenPrice,
               classification,
               score,
-              portfolio: portfolioContext,
+              portfolio: holdingsProfile,
               pnl: pnlSummary,
             };
 

@@ -122,7 +122,22 @@ Responsibilities:
 
 Notes:
 
-- token categories are currently inline in this service (not imported from shared constants yet)
+- token categories now come from src/token/constants/token-categories.ts via classifyTokenCategory(contractAddress, symbol)
+
+### Token Category Constants
+
+File: src/token/constants/token-categories.ts
+
+Responsibilities:
+
+- centralize token category lookup by contract address and symbol fallback
+- expose a single classifyTokenCategory(contractAddress, symbol) canonical entry point
+- define token categories: bluechip, defi, meme, ai, gaming, infrastructure, stablecoin, rwa, other
+
+Used by:
+
+- LiteFeatureService for category-exposure percentages
+- LitePortfolioService for topHolding category labels
 
 ### LiteClassifierService
 
@@ -139,6 +154,10 @@ Responsibilities:
   - Accumulator
   - Whale
 - return primary/secondary type, confidence, and human-readable reasoning
+- portfolio-aware classification signals when HoldingsProfile data is available
+- Degen is boosted by high meme allocation and extreme tracked-token concentration
+- Diamond Hand and Accumulator are boosted by bluechip-heavy, diversified portfolios
+- all portfolio signals are optional and skipped gracefully when holdings data is unavailable
 
 Gating:
 
@@ -158,6 +177,9 @@ Responsibilities:
   - activity
   - profitability (when PnL data is available)
 - return score band and confidence
+- portfolioQuality now uses real holdings data when available: diversification score, category quality (bluechip+defi+infrastructure allocation), stablecoin reserve bonus, token-count balance, and concentration penalty
+- riskManagement includes a small portfolio risk signal adjustment (conservative/balanced bonus, degen penalty)
+- falls back to placeholder-based scoring when holdings data is unavailable (typically rank 51-100)
 
 Bands:
 
@@ -448,8 +470,18 @@ File: src/token/services/lite-portfolio.service.ts
 
 - fetches full token balances via Alchemy getTokenBalances
 - prices holdings via batch CoinGecko
+- now produces a formalized HoldingsProfile with categoryAllocations (bluechip/defi/meme/ai/gaming/infrastructure/stablecoin/rwa/other), portfolioRiskSignal, and per-holding category labels
 - computes: totalPortfolioUsd, trackedTokenWeight, diversificationScore
+- uses centralized src/token/constants/token-categories.ts for classification
+- HoldingsProfile is fetched BEFORE feature extraction for top 50 holders so portfolio signals feed into classification and scoring
 - only runs for top 50 holders for API cost management
+
+### LiteFeatureService
+
+File: src/token/services/lite-feature.service.ts
+
+- feature vector now includes optional holdings-based fields: trackedTokenWeight, portfolioDiversificationScore, holdingCategoryMix, portfolioRiskSignal
+- these fields are populated when HoldingsProfile is available (top 50 holders)
 
 ### LitePnlService
 
