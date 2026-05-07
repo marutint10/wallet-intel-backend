@@ -28,6 +28,7 @@ Current capabilities:
 - compute lite realized PnL from detected swaps and feed profitability into classification/scoring
 - run full token analysis asynchronously and persist output in Postgres
 - expose polling endpoints to fetch analysis status and final result
+- provide an advanced token intelligence service for holder labeling, team-link detection, and richer token metadata collection
 
 Important boundary:
 
@@ -197,8 +198,13 @@ Registered providers:
 - LiteFeatureService
 - LiteClassifierService
 - LiteScorerService
+- LitePricingService
+- LitePortfolioService
+- LitePnlService
+- WalletFilterService
 - HolderAggregationService
 - TokenAnalysisService
+- TokenIntelligenceService
 
 Registered entities:
 
@@ -234,6 +240,10 @@ Exposed by:
    - aggregate holder outputs into quality/distribution/callouts
    - upsert final analysis row with status=done
 4. client polls GET /token/:address?chain=... until done/error
+
+Current runtime note:
+
+- production orchestrator uses TokenIntelligenceService for holder classification, team detection, and token metadata before running lite analysis on EOA holders
 
 Failure behavior:
 
@@ -389,8 +399,6 @@ Resilience behavior:
 
 ## 9. Current limitations and known gaps
 
-- total supply is currently passed as "0" into distribution calculation, so concentration uses effective total from fetched holder balances
-- tokenName/tokenSymbol in token_analyses are present in schema but not populated by orchestrator yet
 - only first two Chainbase pages are currently fetched
 - wallet-level holdingTokenCount and holdingChainCount in features are placeholders unless provided by caller
 - tracked token scheduling and whale alert execution logic is not implemented yet
@@ -454,3 +462,31 @@ File: src/token/services/wallet-filter.service.ts
 - eth_getCode check via Alchemy for unknown addresses
 - only eoa wallets proceed through full analysis pipeline
 - reduces API calls and eliminates Insufficient Data spam on exchange-heavy tokens
+
+### TokenIntelligenceService
+
+File: src/token/services/token-intelligence.service.ts
+
+- introduced as the advanced pre-analysis intelligence layer (token-side only, no wallet-module imports)
+- provides richer holder labels:
+  - eoa, exchange, cex_deposit, dex_router, dex_pool, bridge, burn, vesting, treasury, staking, generic_contract, deployer, owner, team_connected, dust
+- provides token metadata collection from multiple sources:
+  - DexScreener (pair liquidity, price context, fdv-derived supply estimate)
+  - on-chain RPC reads via Alchemy (totalSupply, decimals, name, symbol, owner)
+  - Etherscan contract creation lookup for deployer
+  - CoinGecko fallback for missing metadata/supply fields
+- provides team detection output:
+  - seed-based link analysis from deployer/owner/treasury-connected controllers
+  - transfer-counterparty scan (Etherscan) against top-holder set
+  - team concentration risk scoring (low/medium/high/critical)
+- includes internal caching:
+  - eth_getCode contract detection cache
+  - Etherscan contract-name cache
+- degrades safely:
+  - missing ALCHEMY_API_KEY: falls back to broad EOA labeling for unknown addresses
+  - missing ETHERSCAN_API_KEY: skips deployer/sourcecode/team transfer scans
+
+Current integration status:
+
+- service is registered in TokenModule
+- TokenAnalysisService now invokes it as the active pre-analysis intelligence layer
