@@ -1,0 +1,1464 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+
+export type HolderLabel =
+  | 'eoa'
+  | 'exchange'
+  | 'cex_deposit'
+  | 'dex_router'
+  | 'dex_pool'
+  | 'bridge'
+  | 'burn'
+  | 'vesting'
+  | 'treasury'
+  | 'staking'
+  | 'generic_contract'
+  | 'deployer'
+  | 'owner'
+  | 'team_connected'
+  | 'dust';
+
+export interface HolderFilterResult {
+  address: string;
+  label: HolderLabel;
+  labelDetail?: string;
+  shouldAnalyze: boolean;
+  isTeamLinked: boolean;
+  teamConnectionPath?: string;
+}
+
+export interface TokenMetadata {
+  name: string | null;
+  symbol: string | null;
+  decimals: number | null;
+  totalSupply: string | null;
+  circulatingSupply: string | null;
+  totalSupplyFormatted: number | null;
+  liquidityUsd: number | null;
+  liquidityPairs: Array<{
+    dex: string;
+    pairAddress: string;
+    liquidityUsd: number;
+    priceUsd: number;
+  }>;
+  deployer: string | null;
+  owner: string | null;
+  source: string;
+}
+
+export interface TeamDetectionResult {
+  deployerAddress: string | null;
+  ownerAddress: string | null;
+  teamWallets: Array<{
+    address: string;
+    role: string;
+    connectionPath: string;
+    balance: string;
+    pctOfSupply: number;
+  }>;
+  teamTotalPctOfSupply: number;
+  teamWalletCount: number;
+  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+  riskReason: string;
+}
+
+interface DexScreenerToken {
+  address?: string;
+  name?: string;
+  symbol?: string;
+}
+
+interface DexScreenerPair {
+  chainId?: string;
+  dexId?: string;
+  pairAddress?: string;
+  baseToken?: DexScreenerToken;
+  quoteToken?: DexScreenerToken;
+  priceUsd?: string;
+  fdv?: number;
+  liquidity?: { usd?: number };
+}
+
+interface DexScreenerResponse {
+  pairs?: DexScreenerPair[];
+}
+
+interface EtherscanContractCreationResponse {
+  status?: string;
+  result?: Array<{ contractCreator?: string }>;
+}
+
+interface EtherscanSourceCodeResponse {
+  status?: string;
+  result?: Array<{ ContractName?: string }>;
+}
+
+interface EtherscanTokenTransfer {
+  from?: string;
+  to?: string;
+}
+
+interface EtherscanTokenTransferResponse {
+  status?: string;
+  result?: EtherscanTokenTransfer[];
+}
+
+interface AlchemyAssetTransfer {
+  from?: string;
+  to?: string;
+}
+
+interface AlchemyAssetTransfersResponse {
+  result?: {
+    transfers?: AlchemyAssetTransfer[];
+  };
+}
+
+interface CoinGeckoTokenResponse {
+  name?: string;
+  symbol?: string;
+  market_data?: {
+    total_supply?: number | string | null;
+    circulating_supply?: number | string | null;
+  };
+}
+
+type HolderInput = {
+  walletAddress: string;
+  balance: string;
+  rank: number;
+  usdValue: number;
+};
+
+type ContractClassification = {
+  label: HolderLabel;
+  labelDetail?: string;
+  isTeamLinked: boolean;
+  controller?: string | null;
+};
+
+@Injectable()
+export class TokenIntelligenceService {
+  private readonly logger = new Logger(TokenIntelligenceService.name);
+  private readonly contractCodeCache = new Map<string, boolean>();
+  private readonly contractNameCache = new Map<string, string | null>();
+  private readonly missingKeyWarnings = new Set<string>();
+
+  private static readonly KNOWN_EXCHANGES = new Map<string, string>([
+    ['0x28c6c06298d514db089934071355e5743bf21d60', 'Binance 14'],
+    ['0x21a31ee1afc51d94c2efccaa2092ad1028285549', 'Binance'],
+    ['0xdfd5293d8e347dfe59e90efd55b2956a1343963d', 'Binance'],
+    ['0x47ac0fb4f2d84898e4d9e7b4dab3c24507a6d503', 'Binance'],
+    ['0xf977814e90da44bfa03b6295a0616a897441acec', 'Binance 8'],
+    ['0xa9d1e08c7793af67e9d92fe308d5697fb81d3e43', 'Coinbase'],
+    ['0x71660c4005ba85c37ccec55d0c4493e66fe775d3', 'Coinbase'],
+    ['0x503828976d22510aad0201ac7ec88293211d23da', 'Coinbase'],
+    ['0x5a52e96bacdabb82fd05763e25335261b270efcb', 'OKX'],
+    ['0x6cc5f688a315f3dc28a7781717a9a798a59fda7b', 'OKX'],
+    ['0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0', 'Kraken'],
+    ['0xae2d4617c862309a3d75a0ffb358c7a5009c673f', 'Kraken'],
+    ['0x1ab4973a48dc892cd9971ece8e01dcc7688f8f23', 'Gate.io'],
+    ['0x0d0707963952f2fba59dd06f2b425ace40b492fe', 'Gate.io'],
+    ['0x56eddb7aa87536c09ccc2793473599fd21a8b17f', 'Bybit'],
+    ['0xf89d7b9c864f589bbf53a82105107622b35eaa40', 'Bybit'],
+    ['0x46340b20830761efd32832a74d7169b29feb9758', 'Crypto.com'],
+    ['0xab5c66752a9e8167967685f1450532fb96d5d24f', 'Huobi'],
+    ['0x0548f59fee79f8832c299e01dca5c76f034f558e', 'KuCoin'],
+    ['0xd6216fc19db775df9774a6e33526131da7d19a2c', 'KuCoin'],
+    ['0x2faf487a4414fe77e2327f0bf4ae2a264a776ad2', 'FTX (defunct)'],
+    ['0x974caa59e49682cda0ad2bbe82983419a2ecc400', 'Bitfinex'],
+    ['0x77134cbc06cb00b44f64f51ba68d10b0811c72f5', 'Bitfinex'],
+    ['0xbe0eb53f46cd790cd13851d5eff43d12404d33e8', 'Binance 7'],
+    ['0x3f5ce5fbfe3e9af3971dd833d26ba9b5c936f0be', 'Binance (old)'],
+  ]);
+
+  private static readonly KNOWN_DEX_ROUTERS = new Map<string, string>([
+    ['0x7a250d5630b4cf539739df2c5dacb4c659f2488d', 'Uniswap V2 Router'],
+    ['0xe592427a0aece92de3edee1f18e0157c05861564', 'Uniswap V3 Router'],
+    ['0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad', 'Uniswap Universal Router'],
+    ['0xd9e1ce17f2641f24ae83637ab66a2cca9c378b9f', 'SushiSwap Router'],
+    ['0x1111111254eeb25477b68fb85ed929f73a960582', '1inch V5'],
+    ['0xdef1c0ded9bec7f1a1670819833240f027b25eff', '0x Exchange Proxy'],
+    ['0xba12222222228d8ba445958a75a0704d566bf2c8', 'Balancer Vault'],
+    ['0x6131b5fae19ea4f9d964eac0408e4408b66337b5', 'Kyber Network'],
+    ['0xdef171fe48cf0115b1d80b88dc8eab59176fee57', 'Paraswap V5'],
+    ['0x10ed43c718714eb63d5aa57b78b54704e256024e', 'PancakeSwap V2 (BSC)'],
+    ['0x13f4ea83d0bd40e75c8222255bc855a974568dd4', 'PancakeSwap V3 (BSC)'],
+  ]);
+
+  private static readonly KNOWN_BRIDGES = new Map<string, string>([
+    ['0x3154cf16ccdb4c6d922629664174b904d80f2c35', 'Base Bridge'],
+    ['0x49048044d57e1c92a77f79988d21fa8faf74e97e', 'Base Portal'],
+    ['0x99c9fc46f92e8a1c0dec1b1747d010903e884be1', 'Optimism Bridge'],
+    ['0x3ee18b2214aff97000d974cf647e7c347e8fa585', 'Wormhole'],
+  ]);
+
+  private static readonly BURN_ADDRESSES = new Set<string>([
+    '0x0000000000000000000000000000000000000000',
+    '0x000000000000000000000000000000000000dead',
+    '0xdead000000000000000000000042069420694206',
+    '0x0000000000000000000000000000000000000001',
+  ]);
+
+  private static readonly KNOWN_STAKING_KEYWORDS = [
+    'staking',
+    'stake',
+    'xtoken',
+    'stoken',
+    'staked',
+  ];
+
+  private static readonly KNOWN_VESTING_KEYWORDS = [
+    'vesting',
+    'vest',
+    'timelock',
+    'lock',
+    'linear',
+  ];
+
+  private static readonly KNOWN_TREASURY_KEYWORDS = [
+    'treasury',
+    'multisig',
+    'gnosis',
+    'safe',
+    'dao',
+    'governance',
+    'team',
+  ];
+
+  constructor(private readonly config: ConfigService) {}
+
+  async getTokenMetadata(
+    contractAddress: string,
+    chain: string,
+  ): Promise<TokenMetadata> {
+    const address = contractAddress.toLowerCase();
+    const dexData = await this.getDexScreenerMetadata(address, chain);
+    const rpcUrl = this.getRpcUrl(chain);
+
+    let onchainName: string | null = null;
+    let onchainSymbol: string | null = null;
+    let decimals: number | null = null;
+    let totalSupply: string | null = null;
+    let totalSupplyFormatted: number | null = null;
+    let owner: string | null = null;
+    let usedOnchain = false;
+
+    if (rpcUrl) {
+      const [totalSupplyHex, decimalsHex, nameHex, symbolHex, ownerHex] =
+        await Promise.all([
+          this.ethCall(rpcUrl, address, '0x18160ddd'),
+          this.ethCall(rpcUrl, address, '0x313ce567'),
+          this.ethCall(rpcUrl, address, '0x06fdde03'),
+          this.ethCall(rpcUrl, address, '0x95d89b41'),
+          this.ethCall(rpcUrl, address, '0x8da5cb5b'),
+        ]);
+
+      totalSupply = this.parseUint256(totalSupplyHex);
+      decimals = this.parseSmallUint(decimalsHex);
+      onchainName = this.decodeAbiString(nameHex);
+      onchainSymbol = this.decodeAbiString(symbolHex);
+      owner = this.parseAddressResult(ownerHex);
+
+      if (totalSupply && decimals !== null) {
+        totalSupplyFormatted = this.formatTokenAmount(totalSupply, decimals);
+      }
+
+      usedOnchain = Boolean(
+        totalSupply || decimals !== null || onchainName || onchainSymbol || owner,
+      );
+    } else {
+      this.warnMissingKeyOnce('ALCHEMY_API_KEY', 'Skipping on-chain token metadata');
+    }
+
+    const deployer = await this.getCreatorAddress(address, chain);
+    const coinGeckoData = await this.getCoinGeckoFallback(address, chain, {
+      needsName: !onchainName && !dexData.name,
+      needsSymbol: !onchainSymbol && !dexData.symbol,
+      needsSupply: !totalSupply && dexData.totalSupplyFormatted === null,
+      needsCirculatingSupply: true,
+    });
+
+    const fallbackTotalSupplyFormatted =
+      totalSupplyFormatted ??
+      dexData.totalSupplyFormatted ??
+      this.parseNullableNumber(coinGeckoData.totalSupply);
+    const fallbackTotalSupply =
+      totalSupply ??
+      this.numberToPlainString(dexData.totalSupplyFormatted) ??
+      this.stringOrNull(coinGeckoData.totalSupply);
+    const source = this.buildMetadataSource(
+      usedOnchain,
+      dexData.usedDexScreener,
+      coinGeckoData.usedCoinGecko,
+    );
+
+    return {
+      name: onchainName ?? dexData.name ?? coinGeckoData.name,
+      symbol: onchainSymbol ?? dexData.symbol ?? coinGeckoData.symbol,
+      decimals,
+      totalSupply: fallbackTotalSupply,
+      circulatingSupply: this.stringOrNull(coinGeckoData.circulatingSupply),
+      totalSupplyFormatted: fallbackTotalSupplyFormatted,
+      liquidityUsd: dexData.liquidityUsd,
+      liquidityPairs: dexData.liquidityPairs,
+      deployer,
+      owner,
+      source,
+    };
+  }
+
+  async classifyHolders(
+    holders: HolderInput[],
+    tokenMetadata: TokenMetadata,
+    chain: string,
+  ): Promise<{
+    classifications: Map<string, HolderFilterResult>;
+    teamDetection: TeamDetectionResult;
+  }> {
+    const classifications = new Map<string, HolderFilterResult>();
+    const holderByAddress = new Map<string, HolderInput>();
+
+    for (const holder of holders) {
+      const address = holder.walletAddress.toLowerCase();
+      holderByAddress.set(address, holder);
+      const staticClassification = this.classifyByStaticRules(
+        address,
+        holder.usdValue,
+        tokenMetadata,
+      );
+
+      if (staticClassification) {
+        classifications.set(address, staticClassification);
+      }
+    }
+
+    const remaining = holders.filter(
+      (holder) => !classifications.has(holder.walletAddress.toLowerCase()),
+    );
+    const rpcUrl = this.getRpcUrl(chain);
+    const contractControllers = new Map<string, string>();
+
+    if (!rpcUrl) {
+      this.warnMissingKeyOnce('ALCHEMY_API_KEY', 'Classifying unknown holders as EOAs');
+      for (const holder of remaining) {
+        const address = holder.walletAddress.toLowerCase();
+        classifications.set(address, this.makeResult(address, 'eoa', true, false));
+      }
+    } else {
+      for (let i = 0; i < remaining.length; i += 10) {
+        const batch = remaining.slice(i, i + 10);
+        await Promise.all(
+          batch.map(async (holder) => {
+            const address = holder.walletAddress.toLowerCase();
+            const isContract = await this.isContractAddress(rpcUrl, address);
+
+            if (!isContract) {
+              classifications.set(
+                address,
+                this.makeResult(address, 'eoa', true, false),
+              );
+              return;
+            }
+
+            const classification = await this.classifyContract(
+              rpcUrl,
+              address,
+              chain,
+            );
+            if (classification.controller) {
+              contractControllers.set(address, classification.controller);
+            }
+
+            classifications.set(
+              address,
+              this.makeResult(
+                address,
+                classification.label,
+                false,
+                classification.isTeamLinked,
+                classification.labelDetail,
+                classification.isTeamLinked
+                  ? `${classification.label} -> ${address}`
+                  : undefined,
+              ),
+            );
+          }),
+        );
+
+        if (i + 10 < remaining.length) {
+          await this.sleep(200);
+        }
+      }
+    }
+
+    await this.applyTeamConnections(
+      classifications,
+      holderByAddress,
+      tokenMetadata,
+      contractControllers,
+      chain,
+      rpcUrl,
+    );
+
+    return {
+      classifications,
+      teamDetection: this.buildTeamDetection(
+        classifications,
+        holderByAddress,
+        tokenMetadata,
+      ),
+    };
+  }
+
+  private getRpcUrl(chain: string): string | null {
+    const apiKey = this.config.get<string>('ALCHEMY_API_KEY') ?? '';
+    if (apiKey.trim().length === 0) {
+      return null;
+    }
+
+    const networkMap: Record<string, string> = {
+      ethereum: 'eth-mainnet',
+      polygon: 'polygon-mainnet',
+      bsc: 'bnb-mainnet',
+      base: 'base-mainnet',
+    };
+    const network = networkMap[chain.toLowerCase()];
+
+    return network ? `https://${network}.g.alchemy.com/v2/${apiKey}` : null;
+  }
+
+  private async ethCall(
+    rpcUrl: string,
+    to: string,
+    data: string,
+  ): Promise<string | null> {
+    try {
+      const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_call',
+          params: [{ to, data }, 'latest'],
+          id: 1,
+        }),
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const payload = (await response.json()) as { result?: string };
+      return typeof payload.result === 'string' && payload.result !== '0x'
+        ? payload.result
+        : null;
+    } catch (err: unknown) {
+      this.logger.warn(`eth_call failed: ${this.getErrorMessage(err)}`);
+      return null;
+    }
+  }
+
+  private async getCode(rpcUrl: string, address: string): Promise<string | null> {
+    try {
+      const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_getCode',
+          params: [address, 'latest'],
+          id: 1,
+        }),
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const payload = (await response.json()) as { result?: string };
+      if (!payload.result || payload.result === '0x' || payload.result === '0x0') {
+        return null;
+      }
+
+      return payload.result;
+    } catch (err: unknown) {
+      this.logger.warn(`eth_getCode failed: ${this.getErrorMessage(err)}`);
+      return null;
+    }
+  }
+
+  private async getCreatorAddress(
+    contractAddress: string,
+    chain: string,
+  ): Promise<string | null> {
+    const apiKey = this.config.get<string>('ETHERSCAN_API_KEY') ?? '';
+    if (apiKey.trim().length === 0) {
+      this.warnMissingKeyOnce('ETHERSCAN_API_KEY', 'Skipping deployer lookup');
+      return null;
+    }
+
+    const chainId = this.getEtherscanChainId(chain);
+    if (!chainId) {
+      return null;
+    }
+
+    if (this.shouldSkipEtherscan(chainId)) {
+      return null;
+    }
+
+    try {
+      const url = new URL('https://api.etherscan.io/v2/api');
+      url.searchParams.set('chainid', chainId);
+      url.searchParams.set('module', 'contract');
+      url.searchParams.set('action', 'getcontractcreation');
+      url.searchParams.set('contractaddresses', contractAddress);
+      url.searchParams.set('apikey', apiKey);
+
+      const response = await fetch(url.toString());
+      if (!response.ok) {
+        return null;
+      }
+
+      const payload =
+        (await response.json()) as EtherscanContractCreationResponse;
+      const creator = payload.result?.[0]?.contractCreator;
+
+      return payload.status === '1' && creator ? creator.toLowerCase() : null;
+    } catch (err: unknown) {
+      this.logger.warn(`Deployer lookup failed: ${this.getErrorMessage(err)}`);
+      return null;
+    }
+  }
+
+  private async getDexScreenerMetadata(
+    contractAddress: string,
+    chain: string,
+  ): Promise<{
+    name: string | null;
+    symbol: string | null;
+    liquidityUsd: number | null;
+    totalSupplyFormatted: number | null;
+    liquidityPairs: TokenMetadata['liquidityPairs'];
+    usedDexScreener: boolean;
+  }> {
+    try {
+      const dexChain = this.getDexScreenerChainId(chain);
+      if (!dexChain) {
+        return this.emptyDexMetadata();
+      }
+
+      const response = await fetch(
+        `https://api.dexscreener.com/latest/dex/tokens/${contractAddress}`,
+      );
+      if (!response.ok) {
+        return this.emptyDexMetadata();
+      }
+
+      const payload = (await response.json()) as DexScreenerResponse;
+      const pairs = (payload.pairs ?? [])
+        .filter((pair) => pair.chainId === dexChain)
+        .sort((left, right) =>
+          (right.liquidity?.usd ?? 0) - (left.liquidity?.usd ?? 0),
+        );
+
+      if (pairs.length === 0) {
+        return this.emptyDexMetadata();
+      }
+
+      const bestPair = pairs[0];
+      const matchedToken = this.getMatchedDexToken(bestPair, contractAddress);
+      const priceUsd = this.parseNullableNumber(bestPair.priceUsd);
+      const totalSupplyFormatted =
+        typeof bestPair.fdv === 'number' && priceUsd && priceUsd > 0
+          ? bestPair.fdv / priceUsd
+          : null;
+
+      return {
+        name: matchedToken?.name ?? null,
+        symbol: matchedToken?.symbol ?? null,
+        liquidityUsd: bestPair.liquidity?.usd ?? null,
+        totalSupplyFormatted,
+        liquidityPairs: pairs.slice(0, 5).map((pair) => ({
+          dex: pair.dexId ?? 'unknown',
+          pairAddress: pair.pairAddress ?? '',
+          liquidityUsd: pair.liquidity?.usd ?? 0,
+          priceUsd: this.parseNullableNumber(pair.priceUsd) ?? 0,
+        })),
+        usedDexScreener: true,
+      };
+    } catch (err: unknown) {
+      this.logger.warn(`DexScreener metadata failed: ${this.getErrorMessage(err)}`);
+      return this.emptyDexMetadata();
+    }
+  }
+
+  private async getCoinGeckoFallback(
+    contractAddress: string,
+    chain: string,
+    needs: {
+      needsName: boolean;
+      needsSymbol: boolean;
+      needsSupply: boolean;
+      needsCirculatingSupply: boolean;
+    },
+  ): Promise<{
+    name: string | null;
+    symbol: string | null;
+    totalSupply: string | number | null;
+    circulatingSupply: string | number | null;
+    usedCoinGecko: boolean;
+  }> {
+    if (
+      !needs.needsName &&
+      !needs.needsSymbol &&
+      !needs.needsSupply &&
+      !needs.needsCirculatingSupply
+    ) {
+      return this.emptyCoinGeckoMetadata();
+    }
+
+    const platform = this.getCoinGeckoPlatform(chain);
+    if (!platform) {
+      return this.emptyCoinGeckoMetadata();
+    }
+
+    try {
+      const response = await fetch(
+        `https://api.coingecko.com/api/v3/coins/${platform}/contract/${contractAddress}`,
+      );
+      if (!response.ok) {
+        return this.emptyCoinGeckoMetadata();
+      }
+
+      const payload = (await response.json()) as CoinGeckoTokenResponse;
+      return {
+        name: payload.name ?? null,
+        symbol: payload.symbol ? payload.symbol.toUpperCase() : null,
+        totalSupply: payload.market_data?.total_supply ?? null,
+        circulatingSupply: payload.market_data?.circulating_supply ?? null,
+        usedCoinGecko: true,
+      };
+    } catch (err: unknown) {
+      this.logger.warn(`CoinGecko metadata failed: ${this.getErrorMessage(err)}`);
+      return this.emptyCoinGeckoMetadata();
+    }
+  }
+
+  private classifyByStaticRules(
+    address: string,
+    usdValue: number,
+    tokenMetadata: TokenMetadata,
+  ): HolderFilterResult | null {
+    if (TokenIntelligenceService.BURN_ADDRESSES.has(address)) {
+      return this.makeResult(address, 'burn', false, false, 'Burn Address');
+    }
+
+    const exchangeName = TokenIntelligenceService.KNOWN_EXCHANGES.get(address);
+    if (exchangeName) {
+      return this.makeResult(address, 'exchange', false, false, exchangeName);
+    }
+
+    const dexRouter = TokenIntelligenceService.KNOWN_DEX_ROUTERS.get(address);
+    if (dexRouter) {
+      return this.makeResult(address, 'dex_router', false, false, dexRouter);
+    }
+
+    const bridge = TokenIntelligenceService.KNOWN_BRIDGES.get(address);
+    if (bridge) {
+      return this.makeResult(address, 'bridge', false, false, bridge);
+    }
+
+    if (usdValue < 10) {
+      return this.makeResult(address, 'dust', false, false, 'Holding below $10');
+    }
+
+    if (tokenMetadata.deployer?.toLowerCase() === address) {
+      return this.makeResult(
+        address,
+        'deployer',
+        true,
+        true,
+        'Token deployer',
+        `deployer -> ${address}`,
+      );
+    }
+
+    if (tokenMetadata.owner?.toLowerCase() === address) {
+      return this.makeResult(
+        address,
+        'owner',
+        true,
+        true,
+        'Token owner',
+        `owner -> ${address}`,
+      );
+    }
+
+    return null;
+  }
+
+  private async isContractAddress(
+    rpcUrl: string,
+    address: string,
+  ): Promise<boolean> {
+    if (this.contractCodeCache.has(address)) {
+      return this.contractCodeCache.get(address) ?? false;
+    }
+
+    const code = await this.getCode(rpcUrl, address);
+    const isContract = code !== null;
+    this.contractCodeCache.set(address, isContract);
+
+    return isContract;
+  }
+
+  private async classifyContract(
+    rpcUrl: string,
+    address: string,
+    chain: string,
+  ): Promise<ContractClassification> {
+    const [code, token0Result, ownerResult, contractName] = await Promise.all([
+      this.getCode(rpcUrl, address),
+      this.ethCall(rpcUrl, address, '0x0dfe1681'),
+      this.ethCall(rpcUrl, address, '0x8da5cb5b'),
+      this.getContractName(address, chain),
+    ]);
+    const controller = this.parseAddressResult(ownerResult);
+
+    if (this.isLikelyDexPool(code, token0Result, contractName)) {
+      return {
+        label: 'dex_pool',
+        labelDetail: contractName ?? 'DEX pool contract',
+        isTeamLinked: false,
+        controller,
+      };
+    }
+
+    const keywordLabel = this.classifyContractName(contractName);
+    if (keywordLabel) {
+      return {
+        label: keywordLabel,
+        labelDetail: contractName ?? undefined,
+        isTeamLinked: keywordLabel === 'vesting' || keywordLabel === 'treasury',
+        controller,
+      };
+    }
+
+    return {
+      label: 'generic_contract',
+      labelDetail: contractName ?? undefined,
+      isTeamLinked: false,
+      controller,
+    };
+  }
+
+  private async getContractName(
+    address: string,
+    chain: string,
+  ): Promise<string | null> {
+    if (this.contractNameCache.has(address)) {
+      return this.contractNameCache.get(address) ?? null;
+    }
+
+    const apiKey = this.config.get<string>('ETHERSCAN_API_KEY') ?? '';
+    const chainId = this.getEtherscanChainId(chain);
+    if (chainId && this.shouldSkipEtherscan(chainId)) {
+      this.contractNameCache.set(address, null);
+      return null;
+    }
+
+    if (apiKey.trim().length === 0 || !chainId) {
+      this.warnMissingKeyOnce(
+        'ETHERSCAN_API_KEY',
+        'Skipping contract source/name lookup',
+      );
+      this.contractNameCache.set(address, null);
+      return null;
+    }
+
+    try {
+      const url = new URL('https://api.etherscan.io/v2/api');
+      url.searchParams.set('chainid', chainId);
+      url.searchParams.set('module', 'contract');
+      url.searchParams.set('action', 'getsourcecode');
+      url.searchParams.set('address', address);
+      url.searchParams.set('apikey', apiKey);
+
+      const response = await fetch(url.toString());
+      if (!response.ok) {
+        this.contractNameCache.set(address, null);
+        return null;
+      }
+
+      const payload = (await response.json()) as EtherscanSourceCodeResponse;
+      const contractName = payload.result?.[0]?.ContractName?.trim() || null;
+      this.contractNameCache.set(address, contractName);
+
+      return contractName;
+    } catch (err: unknown) {
+      this.logger.warn(`Contract name lookup failed: ${this.getErrorMessage(err)}`);
+      this.contractNameCache.set(address, null);
+      return null;
+    }
+  }
+
+  private async applyTeamConnections(
+    classifications: Map<string, HolderFilterResult>,
+    holderByAddress: Map<string, HolderInput>,
+    tokenMetadata: TokenMetadata,
+    contractControllers: Map<string, string>,
+    chain: string,
+    rpcUrl: string | null,
+  ): Promise<void> {
+    const seedAddresses = new Map<string, string>();
+    this.addSeed(seedAddresses, tokenMetadata.deployer, 'deployer');
+    this.addSeed(seedAddresses, tokenMetadata.owner, 'owner');
+
+    for (const [contractAddress, controller] of contractControllers.entries()) {
+      const contractClassification = classifications.get(contractAddress);
+      if (
+        contractClassification?.isTeamLinked &&
+        controller &&
+        holderByAddress.has(controller)
+      ) {
+        seedAddresses.set(controller, `${contractClassification.label}_controller`);
+        const controllerClassification = classifications.get(controller);
+        if (controllerClassification?.label === 'eoa') {
+          classifications.set(
+            controller,
+            this.makeResult(
+              controller,
+              'team_connected',
+              true,
+              true,
+              'Team contract controller',
+              `${contractClassification.label} -> ${controller}`,
+            ),
+          );
+        }
+      }
+    }
+
+    if (!rpcUrl) {
+      this.warnMissingKeyOnce('ALCHEMY_API_KEY', 'Skipping team controller checks');
+    }
+
+    const chainId = this.getEtherscanChainId(chain);
+    const requiresEtherscan = Boolean(
+      chainId && !this.shouldSkipEtherscan(chainId),
+    );
+    if (requiresEtherscan) {
+      const apiKey = this.config.get<string>('ETHERSCAN_API_KEY') ?? '';
+      if (apiKey.trim().length === 0) {
+        this.warnMissingKeyOnce('ETHERSCAN_API_KEY', 'Skipping team transaction scan');
+        return;
+      }
+    }
+
+    const topSeeds = [...seedAddresses.entries()].slice(0, 5);
+    for (let i = 0; i < topSeeds.length; i += 1) {
+      const [seedAddress, seedRole] = topSeeds[i];
+      const counterparties = await this.getRecentTokenTransferCounterparties(
+        seedAddress,
+        chain,
+      );
+
+      for (const counterparty of counterparties) {
+        if (!holderByAddress.has(counterparty)) {
+          continue;
+        }
+
+        const current = classifications.get(counterparty);
+        if (
+          current &&
+          ['deployer', 'owner', 'team_connected'].includes(current.label)
+        ) {
+          continue;
+        }
+
+        classifications.set(
+          counterparty,
+          this.makeResult(
+            counterparty,
+            'team_connected',
+            true,
+            true,
+            `Linked to ${seedRole}`,
+            `${seedRole} -> ${counterparty}`,
+          ),
+        );
+      }
+
+      if (i + 1 < topSeeds.length) {
+        await this.sleep(200);
+      }
+    }
+  }
+
+  private async getRecentTokenTransferCounterparties(
+    seedAddress: string,
+    chain: string,
+  ): Promise<Set<string>> {
+    const counterparties = new Set<string>();
+    const chainId = this.getEtherscanChainId(chain);
+
+    if (!chainId) {
+      return counterparties;
+    }
+
+    if (this.shouldSkipEtherscan(chainId)) {
+      return this.getRecentTokenTransferCounterpartiesFromAlchemy(seedAddress, chain);
+    }
+
+    const apiKey = this.config.get<string>('ETHERSCAN_API_KEY') ?? '';
+    if (apiKey.trim().length === 0) {
+      return counterparties;
+    }
+
+    try {
+      const url = new URL('https://api.etherscan.io/v2/api');
+      url.searchParams.set('chainid', chainId);
+      url.searchParams.set('module', 'account');
+      url.searchParams.set('action', 'tokentx');
+      url.searchParams.set('address', seedAddress);
+      url.searchParams.set('page', '1');
+      url.searchParams.set('offset', '100');
+      url.searchParams.set('sort', 'desc');
+      url.searchParams.set('apikey', apiKey);
+
+      const response = await fetch(url.toString());
+      if (!response.ok) {
+        return counterparties;
+      }
+
+      const payload = (await response.json()) as EtherscanTokenTransferResponse;
+      if (payload.status !== '1' || !Array.isArray(payload.result)) {
+        return counterparties;
+      }
+
+      const seed = seedAddress.toLowerCase();
+      for (const transfer of payload.result) {
+        const from = transfer.from?.toLowerCase();
+        const to = transfer.to?.toLowerCase();
+
+        if (from && from !== seed) {
+          counterparties.add(from);
+        }
+        if (to && to !== seed) {
+          counterparties.add(to);
+        }
+      }
+    } catch (err: unknown) {
+      this.logger.warn(`Team transaction scan failed: ${this.getErrorMessage(err)}`);
+    }
+
+    return counterparties;
+  }
+
+  private async getRecentTokenTransferCounterpartiesFromAlchemy(
+    seedAddress: string,
+    chain: string,
+  ): Promise<Set<string>> {
+    const counterparties = new Set<string>();
+    const rpcUrl = this.getRpcUrl(chain);
+
+    if (!rpcUrl) {
+      this.warnMissingKeyOnce(
+        'ALCHEMY_API_KEY',
+        'Skipping Alchemy fallback team transaction scan',
+      );
+      return counterparties;
+    }
+
+    const fetchTransfers = async (
+      direction: 'from' | 'to',
+    ): Promise<AlchemyAssetTransfer[]> => {
+      try {
+        const response = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'alchemy_getAssetTransfers',
+            params: [
+              {
+                ...(direction === 'from'
+                  ? { fromAddress: seedAddress }
+                  : { toAddress: seedAddress }),
+                category: ['erc20'],
+                order: 'desc',
+                maxCount: '0x64',
+              },
+            ],
+            id: 1,
+          }),
+        });
+
+        if (!response.ok) {
+          return [];
+        }
+
+        const payload = (await response.json()) as AlchemyAssetTransfersResponse;
+        return payload.result?.transfers ?? [];
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Alchemy team transaction scan failed: ${this.getErrorMessage(err)}`,
+        );
+        return [];
+      }
+    };
+
+    const [outgoing, incoming] = await Promise.all([
+      fetchTransfers('from'),
+      fetchTransfers('to'),
+    ]);
+
+    const seed = seedAddress.toLowerCase();
+    for (const transfer of [...outgoing, ...incoming]) {
+      const from = transfer.from?.toLowerCase();
+      const to = transfer.to?.toLowerCase();
+
+      if (from && from !== seed) {
+        counterparties.add(from);
+      }
+      if (to && to !== seed) {
+        counterparties.add(to);
+      }
+    }
+
+    return counterparties;
+  }
+
+  private buildTeamDetection(
+    classifications: Map<string, HolderFilterResult>,
+    holderByAddress: Map<string, HolderInput>,
+    tokenMetadata: TokenMetadata,
+  ): TeamDetectionResult {
+    const effectiveSupply = this.getEffectiveSupply(holderByAddress, tokenMetadata);
+    const teamWallets: TeamDetectionResult['teamWallets'] = [];
+
+    for (const [address, classification] of classifications.entries()) {
+      if (!classification.isTeamLinked) {
+        continue;
+      }
+
+      const holder = holderByAddress.get(address);
+      if (!holder) {
+        continue;
+      }
+
+      teamWallets.push({
+        address,
+        role: this.getTeamRole(classification.label),
+        connectionPath: classification.teamConnectionPath ?? classification.label,
+        balance: holder.balance,
+        pctOfSupply: this.calculatePctOfSupply(holder.balance, effectiveSupply),
+      });
+    }
+
+    const teamTotalPctOfSupply = this.roundPercent(
+      teamWallets.reduce((total, wallet) => total + wallet.pctOfSupply, 0),
+    );
+    const risk = this.getTeamRisk(teamTotalPctOfSupply);
+
+    return {
+      deployerAddress: tokenMetadata.deployer,
+      ownerAddress: tokenMetadata.owner,
+      teamWallets,
+      teamTotalPctOfSupply,
+      teamWalletCount: teamWallets.length,
+      riskLevel: risk.riskLevel,
+      riskReason: risk.riskReason,
+    };
+  }
+
+  private makeResult(
+    address: string,
+    label: HolderLabel,
+    shouldAnalyze: boolean,
+    isTeamLinked: boolean,
+    labelDetail?: string,
+    teamConnectionPath?: string,
+  ): HolderFilterResult {
+    return {
+      address,
+      label,
+      ...(labelDetail ? { labelDetail } : {}),
+      shouldAnalyze,
+      isTeamLinked,
+      ...(teamConnectionPath ? { teamConnectionPath } : {}),
+    };
+  }
+
+  private isLikelyDexPool(
+    code: string | null,
+    token0Result: string | null,
+    contractName: string | null,
+  ): boolean {
+    const normalizedName = contractName?.toLowerCase() ?? '';
+    const hasPoolName =
+      normalizedName.includes('pair') ||
+      normalizedName.includes('pool') ||
+      normalizedName.includes('lp');
+    const hasPoolSelectors =
+      Boolean(code?.includes('0902f1ac')) && Boolean(code?.includes('0dfe1681'));
+
+    return hasPoolName || hasPoolSelectors || this.parseAddressResult(token0Result) !== null;
+  }
+
+  private classifyContractName(contractName: string | null): HolderLabel | null {
+    if (!contractName) {
+      return null;
+    }
+
+    const normalizedName = contractName.toLowerCase();
+    if (this.includesKeyword(normalizedName, TokenIntelligenceService.KNOWN_VESTING_KEYWORDS)) {
+      return 'vesting';
+    }
+    if (this.includesKeyword(normalizedName, TokenIntelligenceService.KNOWN_TREASURY_KEYWORDS)) {
+      return 'treasury';
+    }
+    if (this.includesKeyword(normalizedName, TokenIntelligenceService.KNOWN_STAKING_KEYWORDS)) {
+      return 'staking';
+    }
+    if (
+      normalizedName.includes('pair') ||
+      normalizedName.includes('pool') ||
+      normalizedName.includes('lp')
+    ) {
+      return 'dex_pool';
+    }
+
+    return null;
+  }
+
+  private includesKeyword(value: string, keywords: string[]): boolean {
+    return keywords.some((keyword) => value.includes(keyword));
+  }
+
+  private addSeed(
+    seeds: Map<string, string>,
+    address: string | null,
+    role: string,
+  ): void {
+    if (address) {
+      seeds.set(address.toLowerCase(), role);
+    }
+  }
+
+  private getMatchedDexToken(
+    pair: DexScreenerPair,
+    contractAddress: string,
+  ): DexScreenerToken | null {
+    const address = contractAddress.toLowerCase();
+    if (pair.baseToken?.address?.toLowerCase() === address) {
+      return pair.baseToken;
+    }
+    if (pair.quoteToken?.address?.toLowerCase() === address) {
+      return pair.quoteToken;
+    }
+
+    return pair.baseToken ?? pair.quoteToken ?? null;
+  }
+
+  private parseUint256(hexValue: string | null): string | null {
+    if (!hexValue) {
+      return null;
+    }
+
+    try {
+      return BigInt(hexValue).toString();
+    } catch {
+      return null;
+    }
+  }
+
+  private parseSmallUint(hexValue: string | null): number | null {
+    const parsed = this.parseUint256(hexValue);
+    if (!parsed) {
+      return null;
+    }
+
+    const value = Number(parsed);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  private decodeAbiString(hexValue: string | null): string | null {
+    if (!hexValue) {
+      return null;
+    }
+
+    const hex = hexValue.startsWith('0x') ? hexValue.slice(2) : hexValue;
+    if (hex.length === 0) {
+      return null;
+    }
+
+    const dynamic = this.decodeDynamicAbiString(hex);
+    if (dynamic) {
+      return dynamic;
+    }
+
+    return this.decodeBytes32String(hex);
+  }
+
+  private decodeDynamicAbiString(hex: string): string | null {
+    if (hex.length < 128) {
+      return null;
+    }
+
+    try {
+      const offset = Number(BigInt(`0x${hex.slice(0, 64)}`));
+      const lengthStart = offset * 2;
+      const length = Number(BigInt(`0x${hex.slice(lengthStart, lengthStart + 64)}`));
+      const dataStart = lengthStart + 64;
+      const dataHex = hex.slice(dataStart, dataStart + length * 2);
+
+      return this.hexToUtf8(dataHex);
+    } catch {
+      return null;
+    }
+  }
+
+  private decodeBytes32String(hex: string): string | null {
+    return this.hexToUtf8(hex.slice(0, 64));
+  }
+
+  private hexToUtf8(hex: string): string | null {
+    try {
+      const value = Buffer.from(hex, 'hex').toString('utf8').replace(/\0/g, '').trim();
+      return value.length > 0 ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private parseAddressResult(hexValue: string | null): string | null {
+    if (!hexValue) {
+      return null;
+    }
+
+    const hex = hexValue.startsWith('0x') ? hexValue.slice(2) : hexValue;
+    if (hex.length < 40) {
+      return null;
+    }
+
+    const address = `0x${hex.slice(-40)}`.toLowerCase();
+    return /^0x[0-9a-f]{40}$/.test(address) && !/^0x0+$/.test(address)
+      ? address
+      : null;
+  }
+
+  private formatTokenAmount(rawAmount: string, decimals: number): number | null {
+    try {
+      return Number(BigInt(rawAmount)) / 10 ** decimals;
+    } catch {
+      return null;
+    }
+  }
+
+  private parseNullableNumber(value: string | number | null | undefined): number | null {
+    if (value === null || value === undefined) {
+      return null;
+    }
+
+    const parsed = typeof value === 'number' ? value : Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private stringOrNull(value: string | number | null | undefined): string | null {
+    if (value === null || value === undefined) {
+      return null;
+    }
+
+    return String(value);
+  }
+
+  private numberToPlainString(value: number | null): string | null {
+    if (value === null || !Number.isFinite(value)) {
+      return null;
+    }
+
+    return value.toLocaleString('fullwide', { useGrouping: false });
+  }
+
+  private getEffectiveSupply(
+    holderByAddress: Map<string, HolderInput>,
+    tokenMetadata: TokenMetadata,
+  ): number {
+    if (
+      tokenMetadata.totalSupplyFormatted !== null &&
+      tokenMetadata.totalSupplyFormatted > 0
+    ) {
+      return tokenMetadata.totalSupplyFormatted;
+    }
+
+    return [...holderByAddress.values()].reduce((sum, holder) => {
+      const balance = Number.parseFloat(holder.balance);
+      return sum + (Number.isFinite(balance) ? balance : 0);
+    }, 0);
+  }
+
+  private calculatePctOfSupply(balance: string, supply: number): number {
+    const balanceNumber = Number.parseFloat(balance);
+    if (!Number.isFinite(balanceNumber) || supply <= 0) {
+      return 0;
+    }
+
+    return this.roundPercent((balanceNumber / supply) * 100);
+  }
+
+  private roundPercent(value: number): number {
+    return Math.round(value * 10000) / 10000;
+  }
+
+  private getTeamRole(label: HolderLabel): string {
+    if (label === 'deployer' || label === 'owner') {
+      return label;
+    }
+    if (label === 'treasury') {
+      return 'treasury_controller';
+    }
+
+    return 'connected';
+  }
+
+  private getTeamRisk(teamTotalPctOfSupply: number): {
+    riskLevel: TeamDetectionResult['riskLevel'];
+    riskReason: string;
+  } {
+    if (teamTotalPctOfSupply > 40) {
+      return {
+        riskLevel: 'critical',
+        riskReason: 'Team-connected wallets control over 40% of supply',
+      };
+    }
+    if (teamTotalPctOfSupply > 20) {
+      return {
+        riskLevel: 'high',
+        riskReason: 'Team-connected wallets control over 20% of supply',
+      };
+    }
+    if (teamTotalPctOfSupply > 10) {
+      return {
+        riskLevel: 'medium',
+        riskReason: 'Team-connected wallets hold significant supply',
+      };
+    }
+
+    return {
+      riskLevel: 'low',
+      riskReason: 'Team wallet concentration within normal range',
+    };
+  }
+
+  private buildMetadataSource(
+    usedOnchain: boolean,
+    usedDexScreener: boolean,
+    usedCoinGecko: boolean,
+  ): string {
+    if (usedOnchain && usedDexScreener) {
+      return 'onchain+dexscreener';
+    }
+    if (usedDexScreener) {
+      return 'dexscreener';
+    }
+    if (usedOnchain) {
+      return 'onchain';
+    }
+    if (usedCoinGecko) {
+      return 'coingecko';
+    }
+
+    return 'unknown';
+  }
+
+  private shouldSkipEtherscan(chainId: string): boolean {
+    return ['8453', '56'].includes(chainId);
+  }
+
+  private getEtherscanChainId(chain: string): string | null {
+    const chainMap: Record<string, string> = {
+      ethereum: '1',
+      polygon: '137',
+      base: '8453',
+      bsc: '56',
+    };
+
+    return chainMap[chain.toLowerCase()] ?? null;
+  }
+
+  private getDexScreenerChainId(chain: string): string | null {
+    const chainMap: Record<string, string> = {
+      ethereum: 'ethereum',
+      polygon: 'polygon',
+      bsc: 'bsc',
+      base: 'base',
+    };
+
+    return chainMap[chain.toLowerCase()] ?? null;
+  }
+
+  private getCoinGeckoPlatform(chain: string): string | null {
+    const platformMap: Record<string, string> = {
+      ethereum: 'ethereum',
+      polygon: 'polygon-pos',
+      bsc: 'binance-smart-chain',
+      base: 'base',
+    };
+
+    return platformMap[chain.toLowerCase()] ?? null;
+  }
+
+  private emptyDexMetadata(): {
+    name: string | null;
+    symbol: string | null;
+    liquidityUsd: number | null;
+    totalSupplyFormatted: number | null;
+    liquidityPairs: TokenMetadata['liquidityPairs'];
+    usedDexScreener: boolean;
+  } {
+    return {
+      name: null,
+      symbol: null,
+      liquidityUsd: null,
+      totalSupplyFormatted: null,
+      liquidityPairs: [],
+      usedDexScreener: false,
+    };
+  }
+
+  private emptyCoinGeckoMetadata(): {
+    name: string | null;
+    symbol: string | null;
+    totalSupply: string | number | null;
+    circulatingSupply: string | number | null;
+    usedCoinGecko: boolean;
+  } {
+    return {
+      name: null,
+      symbol: null,
+      totalSupply: null,
+      circulatingSupply: null,
+      usedCoinGecko: false,
+    };
+  }
+
+  private warnMissingKeyOnce(key: string, action: string): void {
+    const warningKey = `${key}:${action}`;
+    if (this.missingKeyWarnings.has(warningKey)) {
+      return;
+    }
+
+    this.missingKeyWarnings.add(warningKey);
+    this.logger.warn(`${key} is missing; ${action}`);
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private getErrorMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
