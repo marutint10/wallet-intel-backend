@@ -18,6 +18,15 @@ export type HolderLabel =
   | 'team_connected'
   | 'dust';
 
+export interface LabelEvidence {
+  type: string;
+  detail: string;
+  weight: number;
+  txHash?: string;
+  txCount?: number;
+  counterparty?: string;
+}
+
 export interface HolderFilterResult {
   address: string;
   label: HolderLabel;
@@ -25,6 +34,9 @@ export interface HolderFilterResult {
   shouldAnalyze: boolean;
   isTeamLinked: boolean;
   teamConnectionPath?: string;
+  labelConfidence: number;
+  labelEvidence: LabelEvidence[];
+  teamConnectionScore: number;
 }
 
 export interface TokenMetadata {
@@ -55,9 +67,13 @@ export interface TeamDetectionResult {
     connectionPath: string;
     balance: string;
     pctOfSupply: number;
+    connectionScore: number;
+    evidence: LabelEvidence[];
   }>;
   teamTotalPctOfSupply: number;
   teamWalletCount: number;
+  avgTeamConfidence: number;
+  highConfidenceTeamPct: number;
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
   riskReason: string;
 }
@@ -96,6 +112,7 @@ interface EtherscanSourceCodeResponse {
 interface EtherscanTokenTransfer {
   from?: string;
   to?: string;
+  hash?: string;
 }
 
 interface EtherscanTokenTransferResponse {
@@ -106,6 +123,8 @@ interface EtherscanTokenTransferResponse {
 interface AlchemyAssetTransfer {
   from?: string;
   to?: string;
+  hash?: string;
+  transactionHash?: string;
 }
 
 interface AlchemyAssetTransfersResponse {
@@ -134,7 +153,16 @@ type ContractClassification = {
   label: HolderLabel;
   labelDetail?: string;
   isTeamLinked: boolean;
+  labelConfidence: number;
+  evidence: LabelEvidence[];
+  teamConnectionScore: number;
   controller?: string | null;
+};
+
+type TeamCounterpartySignal = {
+  totalTxCount: number;
+  receivedFromSeedTxCount: number;
+  sampleTxHash?: string;
 };
 
 @Injectable()
@@ -337,13 +365,19 @@ export class TokenIntelligenceService {
       (holder) => !classifications.has(holder.walletAddress.toLowerCase()),
     );
     const rpcUrl = this.getRpcUrl(chain);
-    const contractControllers = new Map<string, string>();
+    const contractControllers = new Map<
+      string,
+      { controller: string; label: HolderLabel }
+    >();
 
     if (!rpcUrl) {
       this.warnMissingKeyOnce('ALCHEMY_API_KEY', 'Classifying unknown holders as EOAs');
       for (const holder of remaining) {
         const address = holder.walletAddress.toLowerCase();
-        classifications.set(address, this.makeResult(address, 'eoa', true, false));
+        classifications.set(
+          address,
+          this.makeFallbackResult(address, 'eoa', true, false),
+        );
       }
     } else {
       for (let i = 0; i < remaining.length; i += 10) {
@@ -351,38 +385,67 @@ export class TokenIntelligenceService {
         await Promise.all(
           batch.map(async (holder) => {
             const address = holder.walletAddress.toLowerCase();
-            const isContract = await this.isContractAddress(rpcUrl, address);
+            try {
+              const isContract = await this.isContractAddress(rpcUrl, address);
 
-            if (!isContract) {
+              if (!isContract) {
+                classifications.set(
+                  address,
+                  this.makeResult(address, 'eoa', true, false, {
+                    labelConfidence: 95,
+                    labelEvidence: [
+                      {
+                        type: 'bytecode_check',
+                        detail:
+                          'No contract bytecode found - externally owned account',
+                        weight: 1.0,
+                      },
+                    ],
+                    teamConnectionScore: 0,
+                  }),
+                );
+                return;
+              }
+
+              const classification = await this.classifyContract(
+                rpcUrl,
+                address,
+                chain,
+              );
+              if (classification.controller) {
+                contractControllers.set(address, {
+                  controller: classification.controller,
+                  label: classification.label,
+                });
+              }
+
               classifications.set(
                 address,
-                this.makeResult(address, 'eoa', true, false),
+                this.makeResult(
+                  address,
+                  classification.label,
+                  false,
+                  classification.isTeamLinked,
+                  {
+                    labelDetail: classification.labelDetail,
+                    teamConnectionPath: classification.isTeamLinked
+                      ? `${classification.label} -> ${address}`
+                      : undefined,
+                    labelConfidence: classification.labelConfidence,
+                    labelEvidence: classification.evidence,
+                    teamConnectionScore: classification.teamConnectionScore,
+                  },
+                ),
               );
-              return;
-            }
-
-            const classification = await this.classifyContract(
-              rpcUrl,
-              address,
-              chain,
-            );
-            if (classification.controller) {
-              contractControllers.set(address, classification.controller);
-            }
-
-            classifications.set(
-              address,
-              this.makeResult(
+            } catch (err: unknown) {
+              this.logger.warn(
+                `Failed to classify ${address}; using fallback: ${this.getErrorMessage(err)}`,
+              );
+              classifications.set(
                 address,
-                classification.label,
-                false,
-                classification.isTeamLinked,
-                classification.labelDetail,
-                classification.isTeamLinked
-                  ? `${classification.label} -> ${address}`
-                  : undefined,
-              ),
-            );
+                this.makeFallbackResult(address, 'eoa', true, false),
+              );
+            }
           }),
         );
 
@@ -651,48 +714,113 @@ export class TokenIntelligenceService {
     tokenMetadata: TokenMetadata,
   ): HolderFilterResult | null {
     if (TokenIntelligenceService.BURN_ADDRESSES.has(address)) {
-      return this.makeResult(address, 'burn', false, false, 'Burn Address');
+      return this.makeResult(address, 'burn', false, false, {
+        labelDetail: 'Burn Address',
+        labelConfidence: 99,
+        labelEvidence: [
+          {
+            type: 'static_lookup',
+            detail: 'Address matches "Burn Address" in known burn list',
+            weight: 1.0,
+          },
+        ],
+        teamConnectionScore: 0,
+      });
     }
 
     const exchangeName = TokenIntelligenceService.KNOWN_EXCHANGES.get(address);
     if (exchangeName) {
-      return this.makeResult(address, 'exchange', false, false, exchangeName);
+      return this.makeResult(address, 'exchange', false, false, {
+        labelDetail: exchangeName,
+        labelConfidence: 99,
+        labelEvidence: [
+          {
+            type: 'static_lookup',
+            detail: `Address matches "${exchangeName}" in known exchange list`,
+            weight: 1.0,
+          },
+        ],
+        teamConnectionScore: 0,
+      });
     }
 
     const dexRouter = TokenIntelligenceService.KNOWN_DEX_ROUTERS.get(address);
     if (dexRouter) {
-      return this.makeResult(address, 'dex_router', false, false, dexRouter);
+      return this.makeResult(address, 'dex_router', false, false, {
+        labelDetail: dexRouter,
+        labelConfidence: 99,
+        labelEvidence: [
+          {
+            type: 'static_lookup',
+            detail: `Address matches "${dexRouter}" in known dex_router list`,
+            weight: 1.0,
+          },
+        ],
+        teamConnectionScore: 0,
+      });
     }
 
     const bridge = TokenIntelligenceService.KNOWN_BRIDGES.get(address);
     if (bridge) {
-      return this.makeResult(address, 'bridge', false, false, bridge);
+      return this.makeResult(address, 'bridge', false, false, {
+        labelDetail: bridge,
+        labelConfidence: 99,
+        labelEvidence: [
+          {
+            type: 'static_lookup',
+            detail: `Address matches "${bridge}" in known bridge list`,
+            weight: 1.0,
+          },
+        ],
+        teamConnectionScore: 0,
+      });
     }
 
     if (usdValue < 10) {
-      return this.makeResult(address, 'dust', false, false, 'Holding below $10');
+      return this.makeResult(address, 'dust', false, false, {
+        labelDetail: 'Holding below $10',
+        labelConfidence: 95,
+        labelEvidence: [
+          {
+            type: 'dust_threshold',
+            detail: `Holding value $${usdValue.toFixed(2)} is below $10 threshold`,
+            weight: 1.0,
+          },
+        ],
+        teamConnectionScore: 0,
+      });
     }
 
     if (tokenMetadata.deployer?.toLowerCase() === address) {
-      return this.makeResult(
-        address,
-        'deployer',
-        true,
-        true,
-        'Token deployer',
-        `deployer -> ${address}`,
-      );
+      return this.makeResult(address, 'deployer', true, true, {
+        labelDetail: 'Token deployer',
+        teamConnectionPath: `deployer -> ${address}`,
+        labelConfidence: 99,
+        labelEvidence: [
+          {
+            type: 'deployer_match',
+            detail: 'Address is the deployer of this token contract',
+            weight: 1.0,
+          },
+        ],
+        teamConnectionScore: 100,
+      });
     }
 
     if (tokenMetadata.owner?.toLowerCase() === address) {
-      return this.makeResult(
-        address,
-        'owner',
-        true,
-        true,
-        'Token owner',
-        `owner -> ${address}`,
-      );
+      return this.makeResult(address, 'owner', true, true, {
+        labelDetail: 'Token owner',
+        teamConnectionPath: `owner -> ${address}`,
+        labelConfidence: 99,
+        labelEvidence: [
+          {
+            type: 'owner_match',
+            detail: 'Address is the current owner() of this token contract',
+            weight: 1.0,
+          },
+        ],
+        teamConnectionScore: 95,
+      });
     }
 
     return null;
@@ -718,39 +846,138 @@ export class TokenIntelligenceService {
     address: string,
     chain: string,
   ): Promise<ContractClassification> {
-    const [code, token0Result, ownerResult, contractName] = await Promise.all([
-      this.getCode(rpcUrl, address),
-      this.ethCall(rpcUrl, address, '0x0dfe1681'),
-      this.ethCall(rpcUrl, address, '0x8da5cb5b'),
-      this.getContractName(address, chain),
-    ]);
-    const controller = this.parseAddressResult(ownerResult);
+    try {
+      const [code, token0Result, ownerResult, contractName] = await Promise.all([
+        this.getCode(rpcUrl, address),
+        this.ethCall(rpcUrl, address, '0x0dfe1681'),
+        this.ethCall(rpcUrl, address, '0x8da5cb5b'),
+        this.getContractName(address, chain),
+      ]);
+      const controller = this.parseAddressResult(ownerResult);
+      const token0Address = this.parseAddressResult(token0Result);
+      const contractNameLookupAvailable = this.canUseContractNameLookup(chain);
+      const evidence: LabelEvidence[] = [
+        {
+          type: 'bytecode_check',
+          detail: 'Address contains contract bytecode',
+          weight: 0.5,
+        },
+      ];
 
-    if (this.isLikelyDexPool(code, token0Result, contractName)) {
-      return {
-        label: 'dex_pool',
-        labelDetail: contractName ?? 'DEX pool contract',
-        isTeamLinked: false,
-        controller,
-      };
-    }
+      if (contractName) {
+        evidence.push({
+          type: 'etherscan_name',
+          detail: `Resolved contract name "${contractName}" from source lookup`,
+          weight: 0.4,
+        });
+      }
 
-    const keywordLabel = this.classifyContractName(contractName);
-    if (keywordLabel) {
+      if (token0Address) {
+        evidence.push({
+          type: 'token0_call_success',
+          detail: 'Contract responds to token0() - likely LP pair',
+          weight: 0.9,
+        });
+      }
+
+      if (this.isLikelyDexPool(code, token0Result, contractName)) {
+        if (!token0Address) {
+          evidence.push({
+            type: 'lp_function_detected',
+            detail:
+              'Contract bytecode/name indicates LP pool behavior even without token0() proof',
+            weight: 0.7,
+          });
+        }
+
+        return {
+          label: 'dex_pool',
+          labelDetail: contractName ?? 'DEX pool contract',
+          isTeamLinked: false,
+          labelConfidence: token0Address ? 90 : 80,
+          evidence,
+          teamConnectionScore: 0,
+          controller,
+        };
+      }
+
+      const keywordLabel = this.classifyContractName(contractName);
+      if (keywordLabel === 'vesting') {
+        evidence.push({
+          type: 'vesting_keyword',
+          detail: `Contract name "${contractName}" matches vesting pattern`,
+          weight: 0.8,
+        });
+        return {
+          label: keywordLabel,
+          labelDetail: contractName ?? undefined,
+          isTeamLinked: true,
+          labelConfidence: 85,
+          evidence,
+          teamConnectionScore: 60,
+          controller,
+        };
+      }
+
+      if (keywordLabel === 'treasury') {
+        evidence.push({
+          type: 'treasury_keyword',
+          detail: `Contract name "${contractName}" matches treasury pattern`,
+          weight: 0.8,
+        });
+        return {
+          label: keywordLabel,
+          labelDetail: contractName ?? undefined,
+          isTeamLinked: true,
+          labelConfidence: 85,
+          evidence,
+          teamConnectionScore: 70,
+          controller,
+        };
+      }
+
+      if (keywordLabel === 'staking') {
+        evidence.push({
+          type: 'staking_keyword',
+          detail: `Contract name "${contractName}" matches staking pattern`,
+          weight: 0.7,
+        });
+        return {
+          label: keywordLabel,
+          labelDetail: contractName ?? undefined,
+          isTeamLinked: false,
+          labelConfidence: 80,
+          evidence,
+          teamConnectionScore: 0,
+          controller,
+        };
+      }
+
+      const genericConfidence =
+        contractNameLookupAvailable && contractName ? 60 : 50;
       return {
-        label: keywordLabel,
+        label: 'generic_contract',
         labelDetail: contractName ?? undefined,
-        isTeamLinked: keywordLabel === 'vesting' || keywordLabel === 'treasury',
+        isTeamLinked: false,
+        labelConfidence: genericConfidence,
+        evidence,
+        teamConnectionScore: 0,
         controller,
       };
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Contract classification failed for ${address}: ${this.getErrorMessage(err)}`,
+      );
+      return {
+        label: 'generic_contract',
+        labelDetail: undefined,
+        isTeamLinked: false,
+        labelConfidence: 50,
+        evidence: [],
+        teamConnectionScore: 0,
+        controller: null,
+      };
     }
-
-    return {
-      label: 'generic_contract',
-      labelDetail: contractName ?? undefined,
-      isTeamLinked: false,
-      controller,
-    };
   }
 
   private async getContractName(
@@ -807,7 +1034,7 @@ export class TokenIntelligenceService {
     classifications: Map<string, HolderFilterResult>,
     holderByAddress: Map<string, HolderInput>,
     tokenMetadata: TokenMetadata,
-    contractControllers: Map<string, string>,
+    contractControllers: Map<string, { controller: string; label: HolderLabel }>,
     chain: string,
     rpcUrl: string | null,
   ): Promise<void> {
@@ -815,8 +1042,9 @@ export class TokenIntelligenceService {
     this.addSeed(seedAddresses, tokenMetadata.deployer, 'deployer');
     this.addSeed(seedAddresses, tokenMetadata.owner, 'owner');
 
-    for (const [contractAddress, controller] of contractControllers.entries()) {
+    for (const [contractAddress, controllerInfo] of contractControllers.entries()) {
       const contractClassification = classifications.get(contractAddress);
+      const controller = controllerInfo.controller;
       if (
         contractClassification?.isTeamLinked &&
         controller &&
@@ -824,18 +1052,38 @@ export class TokenIntelligenceService {
       ) {
         seedAddresses.set(controller, `${contractClassification.label}_controller`);
         const controllerClassification = classifications.get(controller);
-        if (controllerClassification?.label === 'eoa') {
-          classifications.set(
-            controller,
-            this.makeResult(
-              controller,
-              'team_connected',
-              true,
-              true,
-              'Team contract controller',
-              `${contractClassification.label} -> ${controller}`,
-            ),
+        if (!controllerClassification) {
+          continue;
+        }
+
+        if (contractClassification.label === 'treasury') {
+          const updatedController = this.applyTeamEvidenceToHolder(
+            controllerClassification,
+            [
+              {
+                type: 'treasury_controller',
+                detail: `Controls treasury contract ${contractAddress} via owner()`,
+                weight: 0.8,
+                counterparty: contractAddress,
+              },
+            ],
+            `${contractClassification.label} -> ${controller}`,
           );
+          classifications.set(controller, updatedController);
+        } else if (controllerClassification.label === 'eoa') {
+          const updatedController = this.applyTeamEvidenceToHolder(
+            controllerClassification,
+            [
+              {
+                type: 'contract_creation_link',
+                detail: `Controls ${contractClassification.label} contract ${contractAddress} via owner()`,
+                weight: 0.55,
+                counterparty: contractAddress,
+              },
+            ],
+            `${contractClassification.label} -> ${controller}`,
+          );
+          classifications.set(controller, updatedController);
         }
       }
     }
@@ -859,34 +1107,45 @@ export class TokenIntelligenceService {
     const topSeeds = [...seedAddresses.entries()].slice(0, 5);
     for (let i = 0; i < topSeeds.length; i += 1) {
       const [seedAddress, seedRole] = topSeeds[i];
-      const counterparties = await this.getRecentTokenTransferCounterparties(
-        seedAddress,
-        chain,
-      );
+      let counterparties = new Map<string, TeamCounterpartySignal>();
+      try {
+        counterparties = await this.getRecentTokenTransferSignals(seedAddress, chain);
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Failed to gather team transfer evidence for ${seedAddress}: ${this.getErrorMessage(err)}`,
+        );
+      }
 
-      for (const counterparty of counterparties) {
+      for (const [counterparty, signal] of counterparties.entries()) {
         if (!holderByAddress.has(counterparty)) {
           continue;
         }
 
         const current = classifications.get(counterparty);
-        if (
-          current &&
-          ['deployer', 'owner', 'team_connected'].includes(current.label)
-        ) {
+        if (current && ['deployer', 'owner'].includes(current.label)) {
           continue;
         }
 
+        const evidence = this.buildTeamSignalEvidence(
+          seedRole,
+          seedAddress,
+          signal,
+        );
+        if (evidence.length === 0) {
+          continue;
+        }
+
+        const baseCurrent =
+          current ?? this.makeFallbackResult(counterparty, 'eoa', true, false);
+        const updated = this.applyTeamEvidenceToHolder(
+          baseCurrent,
+          evidence,
+          `${seedRole} -> ${counterparty}`,
+        );
+
         classifications.set(
           counterparty,
-          this.makeResult(
-            counterparty,
-            'team_connected',
-            true,
-            true,
-            `Linked to ${seedRole}`,
-            `${seedRole} -> ${counterparty}`,
-          ),
+          updated,
         );
       }
 
@@ -896,11 +1155,11 @@ export class TokenIntelligenceService {
     }
   }
 
-  private async getRecentTokenTransferCounterparties(
+  private async getRecentTokenTransferSignals(
     seedAddress: string,
     chain: string,
-  ): Promise<Set<string>> {
-    const counterparties = new Set<string>();
+  ): Promise<Map<string, TeamCounterpartySignal>> {
+    const counterparties = new Map<string, TeamCounterpartySignal>();
     const chainId = this.getEtherscanChainId(chain);
 
     if (!chainId) {
@@ -908,7 +1167,7 @@ export class TokenIntelligenceService {
     }
 
     if (this.shouldSkipEtherscan(chainId)) {
-      return this.getRecentTokenTransferCounterpartiesFromAlchemy(seedAddress, chain);
+      return this.getRecentTokenTransferSignalsFromAlchemy(seedAddress, chain);
     }
 
     const apiKey = this.config.get<string>('ETHERSCAN_API_KEY') ?? '';
@@ -941,12 +1200,24 @@ export class TokenIntelligenceService {
       for (const transfer of payload.result) {
         const from = transfer.from?.toLowerCase();
         const to = transfer.to?.toLowerCase();
+        const txHash = transfer.hash;
 
-        if (from && from !== seed) {
-          counterparties.add(from);
+        if (from === seed && to && to !== seed) {
+          this.upsertTeamCounterpartySignal(
+            counterparties,
+            to,
+            true,
+            txHash,
+          );
+          continue;
         }
-        if (to && to !== seed) {
-          counterparties.add(to);
+        if (to === seed && from && from !== seed) {
+          this.upsertTeamCounterpartySignal(
+            counterparties,
+            from,
+            false,
+            txHash,
+          );
         }
       }
     } catch (err: unknown) {
@@ -956,11 +1227,11 @@ export class TokenIntelligenceService {
     return counterparties;
   }
 
-  private async getRecentTokenTransferCounterpartiesFromAlchemy(
+  private async getRecentTokenTransferSignalsFromAlchemy(
     seedAddress: string,
     chain: string,
-  ): Promise<Set<string>> {
-    const counterparties = new Set<string>();
+  ): Promise<Map<string, TeamCounterpartySignal>> {
+    const counterparties = new Map<string, TeamCounterpartySignal>();
     const rpcUrl = this.getRpcUrl(chain);
 
     if (!rpcUrl) {
@@ -1018,12 +1289,14 @@ export class TokenIntelligenceService {
     for (const transfer of [...outgoing, ...incoming]) {
       const from = transfer.from?.toLowerCase();
       const to = transfer.to?.toLowerCase();
+      const txHash = transfer.hash ?? transfer.transactionHash;
 
-      if (from && from !== seed) {
-        counterparties.add(from);
+      if (from === seed && to && to !== seed) {
+        this.upsertTeamCounterpartySignal(counterparties, to, true, txHash);
+        continue;
       }
-      if (to && to !== seed) {
-        counterparties.add(to);
+      if (to === seed && from && from !== seed) {
+        this.upsertTeamCounterpartySignal(counterparties, from, false, txHash);
       }
     }
 
@@ -1054,13 +1327,33 @@ export class TokenIntelligenceService {
         connectionPath: classification.teamConnectionPath ?? classification.label,
         balance: holder.balance,
         pctOfSupply: this.calculatePctOfSupply(holder.balance, effectiveSupply),
+        connectionScore: classification.teamConnectionScore,
+        evidence: classification.labelEvidence.filter((item) =>
+          this.isTeamEvidenceType(item),
+        ),
       });
     }
 
     const teamTotalPctOfSupply = this.roundPercent(
       teamWallets.reduce((total, wallet) => total + wallet.pctOfSupply, 0),
     );
-    const risk = this.getTeamRisk(teamTotalPctOfSupply);
+    const avgTeamConfidence =
+      teamWallets.length > 0
+        ? Math.round(
+            teamWallets.reduce((sum, wallet) => sum + wallet.connectionScore, 0) /
+              teamWallets.length,
+          )
+        : 0;
+    const highConfidenceTeamPct = this.roundPercent(
+      teamWallets
+        .filter((wallet) => wallet.connectionScore > 70)
+        .reduce((sum, wallet) => sum + wallet.pctOfSupply, 0),
+    );
+    const risk = this.getTeamRisk(
+      teamTotalPctOfSupply,
+      highConfidenceTeamPct,
+      avgTeamConfidence,
+    );
 
     return {
       deployerAddress: tokenMetadata.deployer,
@@ -1068,6 +1361,8 @@ export class TokenIntelligenceService {
       teamWallets,
       teamTotalPctOfSupply,
       teamWalletCount: teamWallets.length,
+      avgTeamConfidence,
+      highConfidenceTeamPct,
       riskLevel: risk.riskLevel,
       riskReason: risk.riskReason,
     };
@@ -1078,16 +1373,32 @@ export class TokenIntelligenceService {
     label: HolderLabel,
     shouldAnalyze: boolean,
     isTeamLinked: boolean,
-    labelDetail?: string,
-    teamConnectionPath?: string,
+    options: {
+      labelDetail?: string;
+      teamConnectionPath?: string;
+      labelConfidence?: number;
+      labelEvidence?: LabelEvidence[];
+      teamConnectionScore?: number;
+    } = {},
   ): HolderFilterResult {
+    const labelEvidence = this.sanitizeEvidence(options.labelEvidence ?? []);
+    const teamConnectionScore = this.normalizeScore(
+      options.teamConnectionScore ?? 0,
+    );
+    const labelConfidence = this.normalizeScore(options.labelConfidence ?? 50);
+
     return {
       address,
       label,
-      ...(labelDetail ? { labelDetail } : {}),
+      ...(options.labelDetail ? { labelDetail: options.labelDetail } : {}),
       shouldAnalyze,
       isTeamLinked,
-      ...(teamConnectionPath ? { teamConnectionPath } : {}),
+      ...(options.teamConnectionPath
+        ? { teamConnectionPath: options.teamConnectionPath }
+        : {}),
+      labelConfidence,
+      labelEvidence,
+      teamConnectionScore,
     };
   }
 
@@ -1323,33 +1634,286 @@ export class TokenIntelligenceService {
     return 'connected';
   }
 
-  private getTeamRisk(teamTotalPctOfSupply: number): {
+  private getTeamRisk(
+    teamTotalPctOfSupply: number,
+    highConfidenceTeamPct: number,
+    avgTeamConfidence: number,
+  ): {
     riskLevel: TeamDetectionResult['riskLevel'];
     riskReason: string;
   } {
-    if (teamTotalPctOfSupply > 40) {
+    if (highConfidenceTeamPct > 30) {
       return {
         riskLevel: 'critical',
-        riskReason: 'Team-connected wallets control over 40% of supply',
+        riskReason: `High-confidence team wallets (avg score ${avgTeamConfidence}) control ${highConfidenceTeamPct.toFixed(1)}% of supply`,
       };
     }
-    if (teamTotalPctOfSupply > 20) {
+    if (highConfidenceTeamPct > 15) {
       return {
         riskLevel: 'high',
-        riskReason: 'Team-connected wallets control over 20% of supply',
+        riskReason: `Team-connected wallets (avg confidence ${avgTeamConfidence}) hold ${teamTotalPctOfSupply.toFixed(1)}% of supply`,
+      };
+    }
+    if (teamTotalPctOfSupply > 20 && avgTeamConfidence < 50) {
+      return {
+        riskLevel: 'medium',
+        riskReason:
+          'Team-connected wallets hold significant supply, but links are weak (avg confidence: ' +
+          `${avgTeamConfidence})`,
       };
     }
     if (teamTotalPctOfSupply > 10) {
       return {
         riskLevel: 'medium',
-        riskReason: 'Team-connected wallets hold significant supply',
+        riskReason: `Team-connected wallets hold significant supply (avg confidence: ${avgTeamConfidence})`,
       };
     }
 
     return {
       riskLevel: 'low',
-      riskReason: 'Team wallet concentration within normal range',
+      riskReason: `Team wallet concentration within normal range (avg confidence: ${avgTeamConfidence})`,
     };
+  }
+
+  private canUseContractNameLookup(chain: string): boolean {
+    const apiKey = this.config.get<string>('ETHERSCAN_API_KEY') ?? '';
+    const chainId = this.getEtherscanChainId(chain);
+    return Boolean(
+      chainId && !this.shouldSkipEtherscan(chainId) && apiKey.trim().length > 0,
+    );
+  }
+
+  private makeFallbackResult(
+    address: string,
+    label: HolderLabel,
+    shouldAnalyze: boolean,
+    isTeamLinked: boolean,
+    labelDetail?: string,
+    teamConnectionPath?: string,
+  ): HolderFilterResult {
+    return this.makeResult(address, label, shouldAnalyze, isTeamLinked, {
+      labelDetail,
+      teamConnectionPath,
+      labelConfidence: 50,
+      labelEvidence: [],
+      teamConnectionScore: isTeamLinked ? 50 : 0,
+    });
+  }
+
+  private sanitizeEvidence(evidence: LabelEvidence[]): LabelEvidence[] {
+    return evidence
+      .filter(
+        (item): item is LabelEvidence =>
+          Boolean(
+            item &&
+              typeof item.type === 'string' &&
+              typeof item.detail === 'string',
+          ),
+      )
+      .map((item) => ({
+        ...item,
+        type: item.type.trim(),
+        detail: item.detail.trim(),
+        weight: this.normalizeWeight(item.weight),
+      }))
+      .filter((item) => item.type.length > 0 && item.detail.length > 0)
+      .slice(0, 10);
+  }
+
+  private normalizeScore(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+    return Math.max(0, Math.min(100, Math.round(value)));
+  }
+
+  private normalizeWeight(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+    const clamped = Math.max(0, Math.min(1, value));
+    return Math.round(clamped * 1000) / 1000;
+  }
+
+  private isTeamEvidenceType(evidence: LabelEvidence): boolean {
+    const normalizedType = evidence.type.toLowerCase();
+    return (
+      normalizedType.includes('deployer') ||
+      normalizedType.includes('owner') ||
+      normalizedType.includes('treasury') ||
+      normalizedType.includes('team') ||
+      normalizedType.includes('counterparty')
+    );
+  }
+
+  private computeTeamConnectionScore(evidence: LabelEvidence[]): number {
+    const weightedSignals = evidence
+      .filter((item) => this.isTeamEvidenceType(item))
+      .map((item) => this.normalizeWeight(item.weight));
+
+    if (weightedSignals.length === 0) {
+      return 0;
+    }
+
+    const maxWeight = Math.max(...weightedSignals);
+    const sumOfOtherWeights =
+      weightedSignals.reduce((sum, weight) => sum + weight, 0) - maxWeight;
+    const combinedWeight = Math.min(maxWeight + sumOfOtherWeights * 0.15, 1.0);
+    return Math.round(combinedWeight * 100);
+  }
+
+  private getTeamConnectedLabelConfidence(teamConnectionScore: number): number {
+    if (teamConnectionScore >= 80) {
+      return 90;
+    }
+    if (teamConnectionScore >= 50) {
+      return 70;
+    }
+    return 50;
+  }
+
+  private applyTeamEvidenceToHolder(
+    current: HolderFilterResult,
+    evidence: LabelEvidence[],
+    teamConnectionPath: string,
+  ): HolderFilterResult {
+    const combinedEvidence = this.sanitizeEvidence([
+      ...current.labelEvidence,
+      ...evidence,
+    ]);
+    const computedScore = this.computeTeamConnectionScore(combinedEvidence);
+    const priorScore = this.normalizeScore(current.teamConnectionScore);
+    const mergedScore = Math.max(priorScore, computedScore);
+    const shouldMarkTeam =
+      mergedScore >= 30 ||
+      ['deployer', 'owner'].includes(current.label) ||
+      (current.isTeamLinked && priorScore >= 30);
+
+    const nextLabel =
+      shouldMarkTeam && current.label === 'eoa' ? 'team_connected' : current.label;
+    const nextIsTeamLinked = shouldMarkTeam || current.isTeamLinked;
+
+    let labelConfidence = current.labelConfidence;
+    if (nextLabel === 'team_connected') {
+      labelConfidence = this.getTeamConnectedLabelConfidence(mergedScore);
+    } else if (nextIsTeamLinked) {
+      labelConfidence = Math.max(
+        current.labelConfidence,
+        this.getTeamConnectedLabelConfidence(mergedScore),
+      );
+    }
+
+    return this.makeResult(
+      current.address,
+      nextLabel,
+      current.shouldAnalyze,
+      nextIsTeamLinked,
+      {
+        labelDetail:
+          nextLabel === 'team_connected'
+            ? current.labelDetail ?? 'Linked to team wallet'
+            : current.labelDetail,
+        teamConnectionPath: nextIsTeamLinked
+          ? current.teamConnectionPath ?? teamConnectionPath
+          : current.teamConnectionPath,
+        labelConfidence,
+        labelEvidence: combinedEvidence,
+        teamConnectionScore: nextIsTeamLinked ? mergedScore : 0,
+      },
+    );
+  }
+
+  private buildTeamSignalEvidence(
+    seedRole: string,
+    seedAddress: string,
+    signal: TeamCounterpartySignal,
+  ): LabelEvidence[] {
+    const evidence: LabelEvidence[] = [];
+    const normalizedRole = seedRole.toLowerCase();
+
+    if (normalizedRole === 'deployer' && signal.receivedFromSeedTxCount > 0) {
+      evidence.push({
+        type: 'direct_transfer_from_deployer',
+        detail: `Received ${signal.receivedFromSeedTxCount} direct transfer(s) from deployer ${seedAddress}`,
+        weight: this.getDirectDeployerWeight(signal.receivedFromSeedTxCount),
+        txHash: signal.sampleTxHash,
+        txCount: signal.receivedFromSeedTxCount,
+        counterparty: seedAddress,
+      });
+    }
+
+    if (normalizedRole === 'owner' && signal.receivedFromSeedTxCount > 0) {
+      evidence.push({
+        type: 'direct_transfer_from_owner',
+        detail: `Received ${signal.receivedFromSeedTxCount} direct transfer(s) from owner ${seedAddress}`,
+        weight: this.getDirectOwnerWeight(signal.receivedFromSeedTxCount),
+        txHash: signal.sampleTxHash,
+        txCount: signal.receivedFromSeedTxCount,
+        counterparty: seedAddress,
+      });
+    }
+
+    if (evidence.length === 0 && signal.totalTxCount > 0) {
+      evidence.push({
+        type: 'counterparty_of_team_wallet',
+        detail: `${signal.totalTxCount} transaction(s) with team wallet ${seedAddress}`,
+        weight: this.getCounterpartyWeight(signal.totalTxCount),
+        txHash: signal.sampleTxHash,
+        txCount: signal.totalTxCount,
+        counterparty: seedAddress,
+      });
+    }
+
+    return evidence;
+  }
+
+  private getDirectDeployerWeight(txCount: number): number {
+    if (txCount >= 5) {
+      return 0.98;
+    }
+    if (txCount >= 3) {
+      return 0.95;
+    }
+    return 0.9;
+  }
+
+  private getDirectOwnerWeight(txCount: number): number {
+    if (txCount >= 3) {
+      return 0.92;
+    }
+    return 0.85;
+  }
+
+  private getCounterpartyWeight(txCount: number): number {
+    if (txCount >= 5) {
+      return 0.65;
+    }
+    if (txCount >= 3) {
+      return 0.55;
+    }
+    return 0.4;
+  }
+
+  private upsertTeamCounterpartySignal(
+    target: Map<string, TeamCounterpartySignal>,
+    address: string,
+    receivedFromSeed: boolean,
+    txHash?: string,
+  ): void {
+    const existing = target.get(address) ?? {
+      totalTxCount: 0,
+      receivedFromSeedTxCount: 0,
+    };
+
+    existing.totalTxCount += 1;
+    if (receivedFromSeed) {
+      existing.receivedFromSeedTxCount += 1;
+    }
+    if (txHash && !existing.sampleTxHash) {
+      existing.sampleTxHash = txHash;
+    }
+
+    target.set(address, existing);
   }
 
   private buildMetadataSource(
