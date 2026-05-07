@@ -1,5 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { LiteTransfer } from './lite-ingestion.service';
+import {
+  TokenCategorySlug,
+  classifyTokenCategory,
+} from '../constants/token-categories';
+import type {
+  CategoryAllocations,
+  HoldingsProfile,
+  PortfolioRiskSignal,
+} from './lite-portfolio.service';
 
 export interface SwapPair {
   txHash: string;
@@ -54,59 +63,13 @@ export interface LiteFeatureVector {
   // Portfolio diversity (from holdings passed in)
   totalHoldingTokens: number;
   holdingChainCount: number;
+
+  // Holdings-based features (filled when portfolio data is available)
+  trackedTokenWeight?: number;
+  portfolioDiversificationScore?: number;
+  holdingCategoryMix?: CategoryAllocations;
+  portfolioRiskSignal?: PortfolioRiskSignal;
 }
-
-// These are the same token categories from your existing shared constants.
-// For now, define inline. Later we can import from src/shared/constants/token-categories.ts
-const STABLECOINS = new Set([
-  'USDC',
-  'USDT',
-  'DAI',
-  'FRAX',
-  'LUSD',
-  'TUSD',
-  'BUSD',
-  'USDP',
-  'GUSD',
-  'USDD',
-]);
-
-const BLUE_CHIPS = new Set([
-  'ETH',
-  'WETH',
-  'WBTC',
-  'BTC',
-  'BNB',
-  'WBNB',
-  'MATIC',
-  'WMATIC',
-  'ARB',
-  'OP',
-  'AVAX',
-  'SOL',
-  'LINK',
-  'UNI',
-  'AAVE',
-  'MKR',
-  'CRV',
-  'LDO',
-]);
-
-const MEMECOINS = new Set([
-  'PEPE',
-  'DOGE',
-  'SHIB',
-  'FLOKI',
-  'BONK',
-  'WIF',
-  'MEME',
-  'TURBO',
-  'BABYDOGE',
-  'ELON',
-  'KISHU',
-  'SAFEMOON',
-  'WOJAK',
-]);
 
 @Injectable()
 export class LiteFeatureService {
@@ -114,11 +77,22 @@ export class LiteFeatureService {
     transfers: LiteTransfer[],
     walletAddress: string,
     chain: string,
-    holdingTokenCount: number = 0,
-    holdingChainCount: number = 1,
+    holdingTokenCount?: number,
+    holdingChainCount?: number,
+    holdingsProfile?: HoldingsProfile | null,
   ): LiteFeatureVector {
+    const resolvedHoldingTokenCount =
+      holdingsProfile?.holdingTokenCount ?? holdingTokenCount ?? 0;
+    const resolvedHoldingChainCount = holdingChainCount ?? 1;
+
     if (!transfers || transfers.length === 0) {
-      return this.emptyVector(walletAddress, chain);
+      return this.emptyVector(
+        walletAddress,
+        chain,
+        resolvedHoldingTokenCount,
+        resolvedHoldingChainCount,
+        holdingsProfile,
+      );
     }
 
     // 1. Detect swaps by grouping transfers by txHash
@@ -151,10 +125,13 @@ export class LiteFeatureService {
 
     // 7. Token category analysis
     const allTokenSymbols = transfers.map((t) => t.tokenSymbol.toUpperCase());
+    const tokenCategories = transfers.map((t) =>
+      classifyTokenCategory(t.tokenContract, t.tokenSymbol, chain),
+    );
     const uniqueTokens = new Set(allTokenSymbols).size;
-    const memecoinPercent = this.categoryPercent(allTokenSymbols, MEMECOINS);
-    const blueChipPercent = this.categoryPercent(allTokenSymbols, BLUE_CHIPS);
-    const stablecoinPercent = this.categoryPercent(allTokenSymbols, STABLECOINS);
+    const memecoinPercent = this.categoryPercent(tokenCategories, 'meme');
+    const blueChipPercent = this.categoryPercent(tokenCategories, 'bluechip');
+    const stablecoinPercent = this.categoryPercent(tokenCategories, 'stablecoin');
 
     return {
       address: walletAddress,
@@ -173,8 +150,12 @@ export class LiteFeatureService {
       memecoinPercent,
       blueChipPercent,
       stablecoinPercent,
-      totalHoldingTokens: holdingTokenCount,
-      holdingChainCount,
+      totalHoldingTokens: resolvedHoldingTokenCount,
+      holdingChainCount: resolvedHoldingChainCount,
+      trackedTokenWeight: holdingsProfile?.trackedTokenWeight,
+      portfolioDiversificationScore: holdingsProfile?.diversificationScore,
+      holdingCategoryMix: holdingsProfile?.categoryAllocations,
+      portfolioRiskSignal: holdingsProfile?.portfolioRiskSignal,
     };
   }
 
@@ -329,12 +310,15 @@ export class LiteFeatureService {
       : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
-  private categoryPercent(symbols: string[], categorySet: Set<string>): number {
-    if (symbols.length === 0) {
+  private categoryPercent(
+    categories: TokenCategorySlug[],
+    targetCategory: TokenCategorySlug,
+  ): number {
+    if (categories.length === 0) {
       return 0;
     }
-    const count = symbols.filter((symbol) => categorySet.has(symbol)).length;
-    return Math.round((count / symbols.length) * 100);
+    const count = categories.filter((category) => category === targetCategory).length;
+    return Math.round((count / categories.length) * 100);
   }
 
   private largestTransfer(transfers: LiteTransfer[]): LiteTransfer | null {
@@ -349,7 +333,13 @@ export class LiteFeatureService {
     )[0];
   }
 
-  private emptyVector(address: string, chain: string): LiteFeatureVector {
+  private emptyVector(
+    address: string,
+    chain: string,
+    holdingTokenCount: number,
+    holdingChainCount: number,
+    holdingsProfile?: HoldingsProfile | null,
+  ): LiteFeatureVector {
     return {
       address,
       chain,
@@ -372,8 +362,12 @@ export class LiteFeatureService {
       memecoinPercent: 0,
       blueChipPercent: 0,
       stablecoinPercent: 0,
-      totalHoldingTokens: 0,
-      holdingChainCount: 0,
+      totalHoldingTokens: holdingTokenCount,
+      holdingChainCount,
+      trackedTokenWeight: holdingsProfile?.trackedTokenWeight,
+      portfolioDiversificationScore: holdingsProfile?.diversificationScore,
+      holdingCategoryMix: holdingsProfile?.categoryAllocations,
+      portfolioRiskSignal: holdingsProfile?.portfolioRiskSignal,
     };
   }
 }
