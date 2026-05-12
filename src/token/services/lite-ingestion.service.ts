@@ -24,6 +24,12 @@ export interface LiteTokenBalance {
   name?: string | null;
 }
 
+// FAST_MODE B2B holder-intelligence cap.
+// We deliberately fetch only the most recent N ERC-20 transfers per wallet
+// (no pagination into older history) to keep classification latency low.
+// Historical completeness is reserved for the deep wallet-analysis mode.
+export const FAST_MODE_TRANSFER_LIMIT = 50;
+
 const ETHERSCAN_CHAIN_ID_MAP: Record<string, string> = {
   ethereum: '1',
   polygon: '137',
@@ -112,18 +118,43 @@ export class LiteIngestionService {
     walletAddress: string,
     chain: string,
     limit = 200,
+    fastMode = false,
   ): Promise<LiteTransfer[]> {
     const normalizedChain = chain.toLowerCase();
 
+    // FAST_MODE: hard-cap to the most recent FAST_MODE_TRANSFER_LIMIT transfers and
+    // never paginate beyond that. This is the B2B holder-intelligence path.
+    const effectiveLimit = fastMode
+      ? Math.min(limit, FAST_MODE_TRANSFER_LIMIT)
+      : limit;
+
+    const started = Date.now();
+    let transfers: LiteTransfer[];
+
     if (ETHERSCAN_CHAIN_ID_MAP[normalizedChain]) {
-      return this.fetchFromEtherscan(walletAddress, normalizedChain, limit);
+      transfers = await this.fetchFromEtherscan(
+        walletAddress,
+        normalizedChain,
+        effectiveLimit,
+      );
+    } else if (ALCHEMY_RPC_MAP[normalizedChain]) {
+      transfers = await this.fetchFromAlchemy(
+        walletAddress,
+        normalizedChain,
+        effectiveLimit,
+      );
+    } else {
+      throw new Error(`Unsupported chain for lite ingestion: ${chain}`);
     }
 
-    if (ALCHEMY_RPC_MAP[normalizedChain]) {
-      return this.fetchFromAlchemy(walletAddress, normalizedChain, limit);
-    }
+    const elapsedMs = Date.now() - started;
+    this.logger.debug(
+      `[timing] transfers walletAddress=${walletAddress} chain=${normalizedChain} ` +
+        `fastMode=${fastMode} limit=${effectiveLimit} count=${transfers.length} ` +
+        `duration_ms=${elapsedMs}`,
+    );
 
-    throw new Error(`Unsupported chain for lite ingestion: ${chain}`);
+    return transfers;
   }
 
   async getTokenBalances(
