@@ -350,9 +350,10 @@ Returns:
 
 ## 5. Data model and migrations
 
-Migration file:
+Migration files:
 
 - migrations/202605060001_create_token_tables.sql
+- migrations/202605060003_add_token_name_symbol.sql (idempotent guard for token_name / token_symbol columns; widens token_symbol to VARCHAR(32) on legacy DBs)
 
 Created tables:
 
@@ -512,6 +513,7 @@ File: src/token/services/lite-portfolio.service.ts
 - uses centralized src/token/constants/token-categories.ts for classification
 - HoldingsProfile is fetched BEFORE feature extraction for top 50 holders so portfolio signals feed into classification and scoring
 - only runs for top 50 holders for API cost management
+- native gas-token balances (ETH on ethereum/base, BNB on bsc, POL on polygon) are now resolved via LiteIngestionService.getNativeBalance and priced via LitePricingService using known native-token proxy addresses; the native bag participates in totalPortfolioUsd, trackedTokenWeight, categoryAllocations (bluechip), topHoldings, diversificationScore, and portfolioRiskSignal. Native pricing failures degrade silently (holding is skipped, the rest of the profile still builds)
 
 ### LiteFeatureService
 
