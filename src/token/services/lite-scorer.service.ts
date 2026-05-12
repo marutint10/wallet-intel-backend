@@ -30,7 +30,8 @@ export class LiteScorerService {
     features: LiteFeatureVector,
     pnlMetrics: WalletPnlMetrics | null = null,
   ): LiteScore {
-    // Gate: not enough data
+    // Gate: not enough data. matchedLotCount is no longer part of the gate so
+    // that FAST_MODE wallets (no FIFO) still get a real score.
     if (features.swapCount < 3) {
       return {
         score: 0,
@@ -54,6 +55,10 @@ export class LiteScorerService {
     const activity = this.scoreActivity(features);
     const profitability = this.scoreProfitability(pnlMetrics);
 
+    // Profitability is an OPTIONAL dimension. When PnL is unavailable we
+    // proportionally redistribute its weight across the remaining five
+    // dimensions so that a wallet with no historical pricing still hits the
+    // full 0-100 range. Final-score confidence is NOT reduced for missing PnL.
     const rawTotal =
       consistency + riskManagement + portfolioQuality + experience + activity;
     const maxRawTotal = features.holdingCategoryMix ? 165 : 90;
@@ -67,12 +72,16 @@ export class LiteScorerService {
       SCORE_BANDS.find((scoreBand) => clampedScore >= scoreBand.min)?.label ??
       'Weak / Risky';
 
+    // Confidence is driven by sample richness signals that are present even
+    // without FIFO matched lots: swap count, sample size, and wallet age.
     const confidence =
-      features.matchedLotCount < 5
-        ? 'low'
-        : features.matchedLotCount < 15
+      features.swapCount >= 10 ||
+      features.totalTransfers >= 25 ||
+      features.walletAgeDays >= 180
+        ? 'high'
+        : features.swapCount >= 5 || features.totalTransfers >= 10
           ? 'medium'
-          : 'high';
+          : 'low';
 
     return {
       score: clampedScore,
@@ -110,7 +119,9 @@ export class LiteScorerService {
   }
 
   // CONSISTENCY (max 20)
-  // Rewards wallets that trade steadily, not in panic bursts
+  // Rewards wallets that trade steadily, not in panic bursts.
+  // In FAST_MODE matchedLotCount is a round-trip proxy, not a true FIFO count,
+  // so we also consider raw swapCount as a completed-activity signal.
   private scoreConsistency(f: LiteFeatureVector): number {
     let score = 0;
 
@@ -125,12 +136,13 @@ export class LiteScorerService {
       score += 2;
     }
 
-    // Hold time consistency: having matched lots is good
-    if (f.matchedLotCount >= 20) {
+    // Completed-activity tier (whichever proxy is richer for this wallet).
+    const completedActivity = Math.max(f.matchedLotCount, f.swapCount);
+    if (completedActivity >= 20) {
       score += 10;
-    } else if (f.matchedLotCount >= 10) {
+    } else if (completedActivity >= 10) {
       score += 7;
-    } else if (f.matchedLotCount >= 5) {
+    } else if (completedActivity >= 5) {
       score += 4;
     } else {
       score += 1;
@@ -273,7 +285,9 @@ export class LiteScorerService {
   }
 
   // ACTIVITY (max 10)
-  // Rewards wallets that are actively trading, not just holding
+  // Rewards wallets that are actively trading, not just holding.
+  // Uses the richer of (matchedLotCount, swapCount/2) so FAST_MODE wallets
+  // without FIFO still earn an activity score from raw swap evidence.
   private scoreActivity(f: LiteFeatureVector): number {
     let score = 0;
 
@@ -284,12 +298,15 @@ export class LiteScorerService {
       score += 2;
     }
 
-    // Has completed trades (matched lots exist)
-    if (f.matchedLotCount >= 10) {
+    const completedProxy = Math.max(
+      f.matchedLotCount,
+      Math.floor(f.swapCount / 2),
+    );
+    if (completedProxy >= 10) {
       score += 5;
-    } else if (f.matchedLotCount >= 3) {
+    } else if (completedProxy >= 3) {
       score += 3;
-    } else if (f.matchedLotCount >= 1) {
+    } else if (completedProxy >= 1) {
       score += 1;
     }
 

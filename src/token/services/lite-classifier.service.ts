@@ -16,11 +16,10 @@ export class LiteClassifierService {
     features: LiteFeatureVector,
     pnlMetrics: WalletPnlMetrics | null = null,
   ): LiteClassification {
-    // Gate: not enough data to classify
-    if (
-      (features.swapCount < 3 || features.matchedLotCount < 2) &&
-      !this.hasUsablePnl(pnlMetrics)
-    ) {
+    // Gate: need at least some on-chain activity. PnL and FIFO matched lots are
+    // no longer required - FAST_MODE classification leans on cadence, category
+    // mix, and portfolio context instead of realized trade reconstruction.
+    if (features.swapCount < 3 && !this.hasUsablePnl(pnlMetrics)) {
       return {
         primaryType: 'Insufficient Data',
         confidence: 'low',
@@ -40,6 +39,8 @@ export class LiteClassifierService {
       Whale: this.scoreWhale(features),
     };
 
+    // PnL boosts are applied opportunistically and only when realized trades
+    // are available. They are never required for a classification.
     this.applyPnlSignals(scores, pnlMetrics);
 
     // Sort by score descending
@@ -47,10 +48,8 @@ export class LiteClassifierService {
     const [primaryType, primaryScore] = sorted[0];
     const [secondaryType, secondaryScore] = sorted[1];
 
-    // Confidence based on matchedLotCount + score gap
     const confidence = this.computeConfidence(
-      features.matchedLotCount,
-      features.swapCount,
+      features,
       primaryScore,
       secondaryScore,
     );
@@ -144,6 +143,11 @@ export class LiteClassifierService {
       ) {
         score += 5;
       }
+    }
+
+    // Long-tenured wallet still active = conviction signal even without FIFO.
+    if (f.walletAgeDays >= 365 && f.daysSinceLastActivity <= 60) {
+      score += 10;
     }
 
     return Math.min(score, 100);
@@ -269,6 +273,11 @@ export class LiteClassifierService {
       }
     }
 
+    // Extreme single-position concentration is a degen / yolo tell.
+    if (f.portfolioConcentrationScore > 70) {
+      score += 10;
+    }
+
     return Math.min(score, 100);
   }
 
@@ -292,6 +301,10 @@ export class LiteClassifierService {
     }
     // Very short holds
     if (f.medianHoldHours !== null && f.medianHoldHours < 0.5) {
+      score += 10;
+    }
+    // Mechanical cadence over a sustained span = automation tell.
+    if (f.activityConsistencyScore > 80 && f.tradesPerDay > 3) {
       score += 10;
     }
     return Math.min(score, 100);
@@ -353,15 +366,25 @@ export class LiteClassifierService {
   }
 
   private computeConfidence(
-    matchedLotCount: number,
-    swapCount: number,
+    features: LiteFeatureVector,
     topScore: number,
     secondScore: number,
   ): 'low' | 'medium' | 'high' {
-    if (matchedLotCount < 5 || swapCount < 5) {
+    // Confidence is now driven by data richness signals that are available in
+    // FAST_MODE: swap count, sample size, wallet age, and score separation.
+    // matchedLotCount is no longer required, which lets us classify wallets
+    // confidently even when FIFO is intentionally skipped.
+    const richSample =
+      features.swapCount >= 10 ||
+      features.totalTransfers >= 25 ||
+      features.walletAgeDays >= 180;
+    const minimalSample =
+      features.swapCount < 5 && features.totalTransfers < 10;
+
+    if (minimalSample) {
       return 'low';
     }
-    if (matchedLotCount < 15 || swapCount < 10) {
+    if (!richSample) {
       return 'medium';
     }
     if (topScore - secondScore < 15) {
