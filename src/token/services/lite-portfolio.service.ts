@@ -6,6 +6,16 @@ import {
   classifyTokenCategory,
 } from '../constants/token-categories';
 
+// Native gas-token pricing placeholders.
+// DexScreener and CoinGecko both recognise these well-known native-token
+// proxy addresses on their respective chains.
+const NATIVE_TOKEN_PRICE_ADDR: Record<string, string> = {
+  ethereum: '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+  base: '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+  bsc: '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c',
+  polygon: '0x0000000000000000000000000000000000001010',
+};
+
 export type PortfolioRiskSignal =
   | 'conservative'
   | 'balanced'
@@ -65,7 +75,17 @@ export class LitePortfolioService {
       const balances = await this.ingestion.getTokenBalances(walletAddress, chain);
       const normalizedTrackedToken = trackedTokenAddress.toLowerCase();
 
-      if (balances.length === 0) {
+      // Resolve native gas-token holding (ETH / BNB / POL). This must run AFTER
+      // ERC-20 balances are fetched and BEFORE we price the rest of the
+      // portfolio so the native bag participates in totals, weights, and the
+      // category mix downstream. Pricing failures are tolerated.
+      const nativeHolding = await this.resolveNativeHolding(walletAddress, chain);
+
+      // The legacy early-return path triggered when the Alchemy ERC-20 fetch
+      // returned empty (e.g. missing API key). We now extend that condition to
+      // also require zero native balance, so an ETH-only wallet no longer
+      // appears as an empty portfolio.
+      if (balances.length === 0 && !nativeHolding) {
         const trackedTokenUsd = this.roundUsd(trackedTokenUsdValue);
         const trackedTokenWeight = trackedTokenUsdValue > 0 ? 100 : 0;
         const categoryAllocations = this.emptyCategoryAllocations();
@@ -95,7 +115,13 @@ export class LitePortfolioService {
         balance: number;
         usdValue: number;
         category: TokenCategorySlug;
+        decimals?: number;
+        name?: string;
       }> = [];
+
+      if (nativeHolding) {
+        holdings.push(nativeHolding);
+      }
 
       for (const balance of balances) {
         const balanceNum = Number.parseFloat(balance.balance);
@@ -200,6 +226,68 @@ export class LitePortfolioService {
     } catch (err: unknown) {
       this.logger.warn(
         `Portfolio context failed for ${walletAddress}: ${this.getErrorMessage(err)}`,
+      );
+      return null;
+    }
+  }
+
+  // Returns a priced native-token holding (>= $1) or null. Never throws so
+  // portfolio generation degrades gracefully when pricing or RPC are flaky.
+  private async resolveNativeHolding(
+    walletAddress: string,
+    chain: string,
+  ): Promise<{
+    contractAddress: string;
+    symbol: string;
+    balance: number;
+    usdValue: number;
+    category: TokenCategorySlug;
+    decimals: number;
+    name: string;
+  } | null> {
+    try {
+      const native = await this.ingestion.getNativeBalance(walletAddress, chain);
+      if (!native.balanceFormatted || native.balanceFormatted <= 0) {
+        return null;
+      }
+
+      const priceAddress = NATIVE_TOKEN_PRICE_ADDR[chain.toLowerCase()];
+      if (!priceAddress) {
+        return null;
+      }
+
+      let priceUsd = 0;
+      try {
+        const priced = await this.pricing.getTokenPrice(priceAddress, chain);
+        priceUsd = priced.priceUsd ?? 0;
+      } catch (err: unknown) {
+        this.logger.debug(
+          `Native price fetch failed for ${walletAddress} on ${chain}: ${this.getErrorMessage(err)}`,
+        );
+        return null;
+      }
+
+      const usdValue = native.balanceFormatted * priceUsd;
+      if (!Number.isFinite(usdValue) || usdValue < 1) {
+        return null;
+      }
+
+      this.logger.debug(
+        `[portfolio] native holding added wallet=${walletAddress} symbol=${native.symbol} usdValue=${this.roundUsd(usdValue)}`,
+      );
+
+      return {
+        contractAddress: priceAddress,
+        symbol: native.symbol,
+        balance: native.balanceFormatted,
+        usdValue: this.roundUsd(usdValue),
+        category: 'bluechip',
+        decimals: 18,
+        name: 'Native Token',
+      };
+    } catch (err: unknown) {
+      this.logger.debug(
+        `Native holding resolution failed for ${walletAddress}: ${this.getErrorMessage(err)}`,
       );
       return null;
     }
