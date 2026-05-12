@@ -1,13 +1,39 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpException,
+  HttpStatus,
+  Logger,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ChainbaseService } from './services/chainbase.service';
+import {
+  DashboardSummaryResponse,
+  DashboardSummaryService,
+} from './services/dashboard-summary.service';
 import { LiteClassifierService } from './services/lite-classifier.service';
 import { LiteIngestionService } from './services/lite-ingestion.service';
 import { LiteFeatureService } from './services/lite-feature.service';
 import { LiteScorerService } from './services/lite-scorer.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
 
+// Lightweight response shape returned by GET /token/:address/dashboard when the
+// analysis row exists but has not yet completed. Frontend should keep polling
+// the same endpoint until status becomes 'done'.
+interface DashboardProcessingResponse {
+  status: string;
+  contractAddress: string;
+  chain: string;
+  updatedAt: Date;
+}
+
 @Controller('token')
 export class TokenController {
+  private readonly logger = new Logger(TokenController.name);
+
   constructor(
     private readonly chainbase: ChainbaseService,
     private readonly liteIngestion: LiteIngestionService,
@@ -15,6 +41,7 @@ export class TokenController {
     private readonly liteClassifier: LiteClassifierService,
     private readonly liteScorer: LiteScorerService,
     private readonly tokenAnalysis: TokenAnalysisService,
+    private readonly dashboardSummary: DashboardSummaryService,
   ) {}
 
   // GET /token/:address/holders?chain=ethereum
@@ -133,5 +160,60 @@ export class TokenController {
       };
     }
     return result;
+  }
+
+  // GET /token/:address/dashboard?chain=ethereum
+  // Presentation-layer endpoint. Reshapes the persisted analysis row into a
+  // frontend-ready dashboard payload via DashboardSummaryService. Never runs
+  // analytics or touches additional DB rows beyond the same getResult lookup
+  // used by GET /token/:address.
+  @Get(':address/dashboard')
+  async getTokenDashboard(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+  ): Promise<DashboardSummaryResponse | DashboardProcessingResponse> {
+    const result = await this.tokenAnalysis.getResult(address, chain);
+
+    if (!result) {
+      throw new HttpException(
+        {
+          status: 'not_found',
+          message: 'No analysis found for token',
+        },
+        HttpStatus.NOT_FOUND,
+      );
+    }
+
+    if (result.status !== 'done') {
+      return {
+        status: result.status,
+        contractAddress: result.contractAddress,
+        chain: result.chain,
+        updatedAt: result.updatedAt,
+      };
+    }
+
+    this.logger.debug(
+      `[token-dashboard] build contract=${result.contractAddress} chain=${result.chain}`,
+    );
+
+    try {
+      return this.dashboardSummary.buildDashboardSummary(result);
+    } catch (err: unknown) {
+      // DashboardSummaryService is designed to never throw, but if a bug or
+      // an unexpected JSONB shape ever causes one to escape, we surface a
+      // generic 500 and keep stack traces out of the response.
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `[token-dashboard] transformation_failed contract=${result.contractAddress} chain=${result.chain} error=${errorMessage}`,
+      );
+      throw new HttpException(
+        {
+          status: 'error',
+          message: 'Failed to build dashboard response',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
   }
 }
