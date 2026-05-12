@@ -41,13 +41,16 @@ export interface HolderPnlSummary {
 
 export interface HolderQualityMetrics {
   totalAnalyzed: number;
+  scoredHolderCount: number;
+  totalAnalyzedEOAs: number;
   avgScore: number;
   qualityLabel: string;
   breakdown: {
     convictionHolders: number;
     activeTraders: number;
     riskDegen: number;
-    botsUnknown: number;
+    bots: number;
+    unclassified: number;
     exchanges: number;
     contractsPools: number;
     teamConnected: number;
@@ -135,78 +138,60 @@ export class HolderAggregationService {
     const vestingLockedCount = holders.filter(
       (holder) => holder.walletLabel === 'vesting',
     ).length;
-    const analyzed = holders.filter(
-      (holder) => holder.classification !== null && holder.score !== null,
+    const analyzedEOAHolders = holders.filter(
+      (holder) => holder.walletLabel === 'eoa',
     );
-
-    if (analyzed.length === 0) {
-      return {
-        totalAnalyzed: 0,
-        avgScore: 0,
-        qualityLabel: 'No Data',
-        breakdown: {
-          convictionHolders: 0,
-          activeTraders: 0,
-          riskDegen: 0,
-          botsUnknown: 0,
-          exchanges:
-            totalHolders > 0
-              ? Math.round((exchangeCount / totalHolders) * 100)
-              : 0,
-          contractsPools:
-            totalHolders > 0
-              ? Math.round((contractPoolCount / totalHolders) * 100)
-              : 0,
-          teamConnected:
-            totalHolders > 0
-              ? Math.round((teamConnectedCount / totalHolders) * 100)
-              : 0,
-          burnDead:
-            totalHolders > 0
-              ? Math.round((burnDeadCount / totalHolders) * 100)
-              : 0,
-          vestingLocked:
-            totalHolders > 0
-              ? Math.round((vestingLockedCount / totalHolders) * 100)
-              : 0,
-        },
-        topHolderAvgScore: 0,
-        pnlAggregation: this.computePnlAggregation(holders),
-        categoryConcentration,
-      };
-    }
-
-    const totalAnalyzed = analyzed.length;
-    const scores = analyzed.map((holder) => holder.score!.score);
-    const avgScore = Math.round(
-      scores.reduce((total, value) => total + value, 0) / scores.length,
+    const totalAnalyzedEOAs = analyzedEOAHolders.length;
+    const scoredHolders = analyzedEOAHolders.filter(
+      (holder) => typeof holder.score?.score === 'number' && holder.score.score > 0,
     );
+    const scoredHolderCount = scoredHolders.length;
+    const avgScore =
+      scoredHolderCount > 0
+        ? Math.round(
+            scoredHolders.reduce((sum, holder) => sum + holder.score!.score, 0) /
+              scoredHolderCount,
+          )
+        : 0;
 
-    // Group archetypes into 4 display categories
+    // Group archetypes into display categories with explicit bot/unclassified split.
     let convictionCount = 0;
     let activeTraderCount = 0;
     let riskDegenCount = 0;
-    let botsUnknownCount = 0;
+    let confirmedBotCount = 0;
+    let unclassifiedCount = 0;
 
-    for (const holder of analyzed) {
-      const type = holder.classification!.primaryType;
+    for (const holder of analyzedEOAHolders) {
+      const type = holder.classification?.primaryType;
+
+      if (!type || type === 'Insufficient Data') {
+        unclassifiedCount += 1;
+        continue;
+      }
 
       if (['Diamond Hand', 'Accumulator'].includes(type)) {
         convictionCount += 1;
-      } else if (['Swing Trader', 'Day Trader'].includes(type)) {
-        activeTraderCount += 1;
-      } else if (['Degen'].includes(type)) {
-        riskDegenCount += 1;
-      } else {
-        botsUnknownCount += 1; // Bot, Insufficient Data, Whale
+        continue;
       }
+
+      if (['Degen', 'Paper Hand'].includes(type)) {
+        riskDegenCount += 1;
+        continue;
+      }
+
+      if (type === 'Bot / Automated') {
+        confirmedBotCount += 1;
+        continue;
+      }
+
+      activeTraderCount += 1;
     }
 
     const pct = (value: number): number =>
-      Math.round((value / totalAnalyzed) * 100);
+      totalAnalyzedEOAs > 0 ? Math.round((value / totalAnalyzedEOAs) * 100) : 0;
 
-    // Top 10 avg score
-    const top10 = [...analyzed]
+    // Top 10 avg score from holders that have a usable score.
+    const top10 = [...scoredHolders]
       .sort((left, right) => left.rank - right.rank)
       .slice(0, 10);
 
@@ -219,7 +204,7 @@ export class HolderAggregationService {
           )
         : 0;
 
-    const qualityLabel =
+    const baseQualityLabel =
       avgScore >= 70
         ? 'Strong Community'
         : avgScore >= 50
@@ -227,16 +212,25 @@ export class HolderAggregationService {
           : avgScore >= 30
             ? 'Developing Community'
             : 'Weak Community';
+    const qualityLabel =
+      scoredHolderCount === 0
+        ? 'Insufficient Trading Data'
+        : scoredHolderCount < 5
+          ? `Limited Data - ${baseQualityLabel}`
+          : baseQualityLabel;
 
     return {
-      totalAnalyzed,
+      totalAnalyzed: totalAnalyzedEOAs,
+      scoredHolderCount,
+      totalAnalyzedEOAs,
       avgScore,
       qualityLabel,
       breakdown: {
         convictionHolders: pct(convictionCount),
         activeTraders: pct(activeTraderCount),
         riskDegen: pct(riskDegenCount),
-        botsUnknown: pct(botsUnknownCount),
+        bots: pct(confirmedBotCount),
+        unclassified: pct(unclassifiedCount),
         exchanges:
           totalHolders > 0 ? Math.round((exchangeCount / totalHolders) * 100) : 0,
         contractsPools:
@@ -370,12 +364,68 @@ export class HolderAggregationService {
       });
     }
 
-    // Bot activity
-    if (quality.breakdown.botsUnknown > 20) {
+    const analyzedEOAHolders = holders.filter(
+      (holder) => holder.walletLabel === 'eoa',
+    );
+    const totalAnalyzedEOAs = analyzedEOAHolders.length;
+    const confirmedBotCount = analyzedEOAHolders.filter(
+      (holder) => holder.classification?.primaryType === 'Bot / Automated',
+    ).length;
+    const confirmedBotPct =
+      totalAnalyzedEOAs > 0
+        ? Math.round((confirmedBotCount / totalAnalyzedEOAs) * 100)
+        : 0;
+    const unclassifiedCount = analyzedEOAHolders.filter(
+      (holder) =>
+        holder.classification === null ||
+        holder.classification?.primaryType === 'Insufficient Data',
+    ).length;
+    const unclassifiedPct =
+      totalAnalyzedEOAs > 0
+        ? Math.round((unclassifiedCount / totalAnalyzedEOAs) * 100)
+        : 0;
+
+    // Confirmed bot activity only.
+    if (confirmedBotPct > 10) {
       callouts.push({
         type: 'warning',
         title: 'Bot Activity Detected',
-        description: `${quality.breakdown.botsUnknown}% of holders show automated or unclassifiable trading patterns.`,
+        description: `${confirmedBotPct}% of analyzed holders show confirmed automated trading patterns (24/7 activity, uniform timing).`,
+      });
+    }
+
+    if (unclassifiedPct > 50) {
+      callouts.push({
+        type: 'info',
+        title: 'Limited Trading Data Available',
+        description: `${unclassifiedPct}% of top holders have insufficient on-chain swap history for behavioral classification. These wallets likely acquired tokens via transfers, OTC, or exchange withdrawals rather than DEX trading.`,
+      });
+    }
+
+    const classifiedTraderHolders = analyzedEOAHolders.filter(
+      (holder) =>
+        Boolean(holder.classification?.primaryType) &&
+        holder.classification!.primaryType !== 'Insufficient Data',
+    );
+    const classifiedTraderCount = classifiedTraderHolders.length;
+
+    if (classifiedTraderCount >= 3) {
+      const typeBreakdown: Record<string, number> = {};
+
+      for (const holder of classifiedTraderHolders) {
+        const type = holder.classification!.primaryType;
+        typeBreakdown[type] = (typeBreakdown[type] ?? 0) + 1;
+      }
+
+      const typeList = Object.entries(typeBreakdown)
+        .sort((left, right) => right[1] - left[1])
+        .map(([type, count]) => `${count} ${type}(s)`)
+        .join(', ');
+
+      callouts.push({
+        type: 'positive',
+        title: 'Active Traders Identified',
+        description: `${classifiedTraderCount} holder(s) with classifiable trading behavior: ${typeList}.`,
       });
     }
 

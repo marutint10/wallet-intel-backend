@@ -5,7 +5,10 @@ import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity
 import { ConfigService } from '@nestjs/config';
 import { TokenAnalysisEntity } from '../entities/token-analysis.entity';
 import { ChainbaseService } from './chainbase.service';
-import { LiteIngestionService } from './lite-ingestion.service';
+import {
+  FAST_MODE_TRANSFER_LIMIT,
+  LiteIngestionService,
+} from './lite-ingestion.service';
 import { LiteFeatureService } from './lite-feature.service';
 import { LiteClassifierService } from './lite-classifier.service';
 import { LiteScorerService } from './lite-scorer.service';
@@ -13,11 +16,23 @@ import { LitePricingService } from './lite-pricing.service';
 import { LitePortfolioService } from './lite-portfolio.service';
 import type { HoldingsProfile } from './lite-portfolio.service';
 import { LitePnlService } from './lite-pnl.service';
+import type { WalletPnlMetrics } from './lite-pnl.service';
 import { TokenIntelligenceService } from './token-intelligence.service';
 import {
   HolderAggregationService,
   AnalyzedHolder,
+  HolderPnlSummary,
 } from './holder-aggregation.service';
+
+// FAST_MODE = true enables the B2B holder-intelligence path:
+//   * skip LitePnlService entirely (no realized PnL reconstruction)
+//   * skip historical pricing (LitePnlService is its only consumer)
+//   * truncate transfer history to FAST_MODE_TRANSFER_LIMIT per wallet
+//   * use lightweight hold-duration heuristics in LiteFeatureService
+// Set FAST_MODE = false to restore full historical analysis when we ship the
+// deep wallet-analysis mode. LitePnlService is intentionally still wired up so
+// flipping this flag is a one-line change.
+const FAST_MODE = true;
 
 @Injectable()
 export class TokenAnalysisService {
@@ -209,11 +224,17 @@ export class TokenAnalysisService {
           }
 
           try {
+            // Per-wallet timing instrumentation. Makes FAST_MODE latency
+            // measurable and easy to benchmark in production logs.
+            const transferLimit = FAST_MODE ? FAST_MODE_TRANSFER_LIMIT : 200;
+            const tTransfersStart = Date.now();
             const transfers = await this.ingestion.getRecentTransfers(
               holder.walletAddress,
               chain,
-              200,
+              transferLimit,
+              FAST_MODE,
             );
+            const tTransfers = Date.now() - tTransfersStart;
 
             let holdingsProfile: HoldingsProfile | null = null;
             if (holder.rank <= 50) {
@@ -231,6 +252,7 @@ export class TokenAnalysisService {
               }
             }
 
+            const tFeaturesStart = Date.now();
             const features = this.feature.extractFeatures(
               transfers,
               holder.walletAddress,
@@ -238,14 +260,35 @@ export class TokenAnalysisService {
               holdingsProfile?.holdingTokenCount,
               1,
               holdingsProfile,
+              FAST_MODE,
             );
-            const swaps = this.feature.extractSwaps(transfers, holder.walletAddress);
-            const pnlMetrics = await this.pnl.computePnl(swaps, chain);
+            const tFeatures = Date.now() - tFeaturesStart;
+
+            // FAST_MODE bypass: skip LitePnlService and historical pricing.
+            // LitePnlService remains wired up so non-fast-mode callers still
+            // work, but in FAST_MODE we always pass pnl = null downstream.
+            let pnlMetrics: WalletPnlMetrics | null = null;
+            if (!FAST_MODE) {
+              const swaps = this.feature.extractSwaps(
+                transfers,
+                holder.walletAddress,
+              );
+              pnlMetrics = await this.pnl.computePnl(swaps, chain);
+            }
+
+            const tClassifyStart = Date.now();
             const classification = this.classifier.classify(features, pnlMetrics);
             const score = this.scorer.score(features, pnlMetrics);
+            const tClassify = Date.now() - tClassifyStart;
 
-            const pnlSummary =
-              pnlMetrics.trades.length > 0
+            this.logger.debug(
+              `[timing] wallet=${holder.walletAddress} rank=${holder.rank} ` +
+                `transfers_ms=${tTransfers} features_ms=${tFeatures} ` +
+                `classify_ms=${tClassify} fastMode=${FAST_MODE}`,
+            );
+
+            const pnlSummary: HolderPnlSummary | null =
+              pnlMetrics && pnlMetrics.trades.length > 0
                 ? {
                     totalPnlUsd: pnlMetrics.totalRealizedPnlUsd,
                     winRate: pnlMetrics.winRate,
