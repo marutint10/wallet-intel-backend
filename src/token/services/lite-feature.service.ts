@@ -69,6 +69,15 @@ export interface LiteFeatureVector {
   portfolioDiversificationScore?: number;
   holdingCategoryMix?: CategoryAllocations;
   portfolioRiskSignal?: PortfolioRiskSignal;
+
+  // FAST_MODE derived features.
+  // These replace exact realized hold durations as the primary classification
+  // and scoring signals, so the pipeline stays meaningful without FIFO.
+  walletAgeDays: number;
+  daysSinceLastActivity: number;
+  activityConsistencyScore: number; // 0-100, higher = steadier cadence
+  portfolioConcentrationScore: number; // 0-100, higher = more concentrated
+  fastModeApplied: boolean;
 }
 
 @Injectable()
@@ -80,6 +89,7 @@ export class LiteFeatureService {
     holdingTokenCount?: number,
     holdingChainCount?: number,
     holdingsProfile?: HoldingsProfile | null,
+    fastMode = false,
   ): LiteFeatureVector {
     const resolvedHoldingTokenCount =
       holdingsProfile?.holdingTokenCount ?? holdingTokenCount ?? 0;
@@ -92,6 +102,7 @@ export class LiteFeatureService {
         resolvedHoldingTokenCount,
         resolvedHoldingChainCount,
         holdingsProfile,
+        fastMode,
       );
     }
 
@@ -118,8 +129,22 @@ export class LiteFeatureService {
     // 5. Burstiness coefficient (stddev / mean of gaps)
     const burstinessCoeff = this.computeBurstiness(gaps);
 
-    // 6. Hold time from FIFO matching of swap lots
-    const { holdTimes, matchedLotCount } = this.computeHoldTimes(swaps, walletAddress);
+    // 6. Hold time signals.
+    // FIFO swap-lot reconstruction is O(swaps * tokens) and only really pays off
+    // when we have a near-complete transfer history. In FAST_MODE we are working
+    // with a truncated recent slice (FAST_MODE_TRANSFER_LIMIT), so FIFO would be
+    // both expensive AND statistically biased. We swap it for a per-token
+    // first/last-seen span approximation that scales cleanly with truncation.
+    let holdTimes: number[];
+    let matchedLotCount: number;
+    if (fastMode) {
+      holdTimes = this.estimateLightweightHoldHours(transfers);
+      matchedLotCount = this.countRoundTripTokens(transfers);
+    } else {
+      const fifo = this.computeHoldTimes(swaps, walletAddress);
+      holdTimes = fifo.holdTimes;
+      matchedLotCount = fifo.matchedLotCount;
+    }
     const medianHoldHours = holdTimes.length > 0 ? this.median(holdTimes) : null;
     const holdBuckets = this.bucketHoldTimes(holdTimes);
 
@@ -132,6 +157,26 @@ export class LiteFeatureService {
     const memecoinPercent = this.categoryPercent(tokenCategories, 'meme');
     const blueChipPercent = this.categoryPercent(tokenCategories, 'bluechip');
     const stablecoinPercent = this.categoryPercent(tokenCategories, 'stablecoin');
+
+    // 8. FAST_MODE derived features.
+    // These are the primary signals classifier/scorer rely on when realized
+    // hold durations are not available.
+    const nowSeconds = Date.now() / 1000;
+    const oldestTimestamp = timestamps[0];
+    const newestTimestamp = timestamps[timestamps.length - 1];
+    const walletAgeDays = Math.max(0, (nowSeconds - oldestTimestamp) / 86400);
+    const daysSinceLastActivity = Math.max(
+      0,
+      (nowSeconds - newestTimestamp) / 86400,
+    );
+    const activityConsistencyScore = this.computeActivityConsistencyScore(
+      burstinessCoeff,
+      tradingSpanDays,
+      swaps.length,
+    );
+    const portfolioConcentrationScore = this.computePortfolioConcentrationScore(
+      holdingsProfile,
+    );
 
     return {
       address: walletAddress,
@@ -156,6 +201,11 @@ export class LiteFeatureService {
       portfolioDiversificationScore: holdingsProfile?.diversificationScore,
       holdingCategoryMix: holdingsProfile?.categoryAllocations,
       portfolioRiskSignal: holdingsProfile?.portfolioRiskSignal,
+      walletAgeDays: Math.round(walletAgeDays * 10) / 10,
+      daysSinceLastActivity: Math.round(daysSinceLastActivity * 10) / 10,
+      activityConsistencyScore,
+      portfolioConcentrationScore,
+      fastModeApplied: fastMode,
     };
   }
 
@@ -231,6 +281,86 @@ export class LiteFeatureService {
     }
 
     return swaps.sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  // FAST_MODE lightweight hold-duration estimator.
+  // Group all observed transfers per token contract and treat the span between
+  // the first and last observation as a proxy for how long the wallet was
+  // engaged with that token. This is O(N) and tolerates a truncated history.
+  private estimateLightweightHoldHours(transfers: LiteTransfer[]): number[] {
+    const byToken = new Map<string, number[]>();
+    for (const transfer of transfers) {
+      const key = transfer.tokenContract.toLowerCase();
+      if (!byToken.has(key)) {
+        byToken.set(key, []);
+      }
+      byToken.get(key)?.push(transfer.timestamp);
+    }
+
+    const spansHours: number[] = [];
+    for (const timestamps of byToken.values()) {
+      if (timestamps.length < 2) {
+        continue;
+      }
+      const minTs = Math.min(...timestamps);
+      const maxTs = Math.max(...timestamps);
+      const spanHours = (maxTs - minTs) / 3600;
+      if (spanHours > 0) {
+        spansHours.push(spanHours);
+      }
+    }
+
+    return spansHours;
+  }
+
+  // FAST_MODE round-trip proxy for matchedLotCount.
+  // Counts tokens for which the wallet has both an inbound and an outbound
+  // transfer in the observed window. This stands in for "completed positions"
+  // when full FIFO matching is unavailable.
+  private countRoundTripTokens(transfers: LiteTransfer[]): number {
+    const inTokens = new Set<string>();
+    const outTokens = new Set<string>();
+    for (const transfer of transfers) {
+      const key = transfer.tokenContract.toLowerCase();
+      if (transfer.direction === 'IN') {
+        inTokens.add(key);
+      } else {
+        outTokens.add(key);
+      }
+    }
+    let count = 0;
+    for (const key of inTokens) {
+      if (outTokens.has(key)) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  private computeActivityConsistencyScore(
+    burstinessCoeff: number,
+    tradingSpanDays: number,
+    swapCount: number,
+  ): number {
+    // burstiness 0 => perfectly even cadence, >2 => bursty / FOMO pattern.
+    const burstinessFactor = Math.max(0, Math.min(1, 1 - burstinessCoeff / 3));
+    const spanFactor =
+      swapCount > 0 ? Math.max(0, Math.min(1, tradingSpanDays / 180)) : 0;
+    return Math.round((burstinessFactor * 0.7 + spanFactor * 0.3) * 100);
+  }
+
+  private computePortfolioConcentrationScore(
+    holdingsProfile?: HoldingsProfile | null,
+  ): number {
+    if (!holdingsProfile) {
+      return 0;
+    }
+    const tracked = holdingsProfile.trackedTokenWeight ?? 0;
+    const topHoldingMax = (holdingsProfile.topHoldings ?? []).reduce(
+      (acc, holding) => Math.max(acc, holding.weight ?? 0),
+      0,
+    );
+    return Math.round(Math.max(tracked, topHoldingMax));
   }
 
   // For each token: match OUT swaps to the earliest IN swap (FIFO).
@@ -339,6 +469,7 @@ export class LiteFeatureService {
     holdingTokenCount: number,
     holdingChainCount: number,
     holdingsProfile?: HoldingsProfile | null,
+    fastMode = false,
   ): LiteFeatureVector {
     return {
       address,
@@ -368,6 +499,13 @@ export class LiteFeatureService {
       portfolioDiversificationScore: holdingsProfile?.diversificationScore,
       holdingCategoryMix: holdingsProfile?.categoryAllocations,
       portfolioRiskSignal: holdingsProfile?.portfolioRiskSignal,
+      walletAgeDays: 0,
+      daysSinceLastActivity: 0,
+      activityConsistencyScore: 0,
+      portfolioConcentrationScore: this.computePortfolioConcentrationScore(
+        holdingsProfile,
+      ),
+      fastModeApplied: fastMode,
     };
   }
 }
