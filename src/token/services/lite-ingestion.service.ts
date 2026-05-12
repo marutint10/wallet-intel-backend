@@ -24,6 +24,20 @@ export interface LiteTokenBalance {
   name?: string | null;
 }
 
+export interface NativeBalanceResult {
+  balanceWei: string;
+  balanceFormatted: number;
+  symbol: string;
+}
+
+// Native token symbol per chain. Used by getNativeBalance to label the result.
+const NATIVE_CHAIN_SYMBOL: Record<string, string> = {
+  ethereum: 'ETH',
+  base: 'ETH',
+  bsc: 'BNB',
+  polygon: 'POL',
+};
+
 // FAST_MODE B2B holder-intelligence cap.
 // We deliberately fetch only the most recent N ERC-20 transfers per wallet
 // (no pagination into older history) to keep classification latency low.
@@ -269,6 +283,114 @@ export class LiteIngestionService {
         `Portfolio fetch failed for ${walletAddress}: ${this.getErrorMessage(err)}`,
       );
       return [];
+    }
+  }
+
+  // Fetch the wallet's native gas-token balance (ETH / BNB / POL) via the
+  // existing Alchemy RPC endpoint. This is a pure read; the method MUST NEVER
+  // throw. Any failure (missing key, unsupported chain, network error, parse
+  // error) returns a safe zero-balance result so portfolio generation always
+  // proceeds.
+  async getNativeBalance(
+    walletAddress: string,
+    chain: string,
+  ): Promise<NativeBalanceResult> {
+    const normalizedChain = chain.toLowerCase();
+    const symbol = NATIVE_CHAIN_SYMBOL[normalizedChain] ?? 'NATIVE';
+    const zero: NativeBalanceResult = {
+      balanceWei: '0',
+      balanceFormatted: 0,
+      symbol,
+    };
+
+    const apiKey = this.configService.get<string>('ALCHEMY_API_KEY') ?? '';
+    if (!apiKey) {
+      this.logger.warn(
+        'ALCHEMY_API_KEY is missing; skipping native balance fetch',
+      );
+      return zero;
+    }
+
+    const network = ALCHEMY_NETWORK_MAP[normalizedChain];
+    if (!network) {
+      return zero;
+    }
+
+    const url = `https://${network}.g.alchemy.com/v2/${apiKey}`;
+    const started = Date.now();
+    let result: NativeBalanceResult = zero;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_getBalance',
+          params: [walletAddress, 'latest'],
+          id: 1,
+        }),
+      });
+
+      if (!response.ok) {
+        this.logger.warn(
+          `eth_getBalance failed for ${walletAddress} on ${normalizedChain}: HTTP ${response.status}`,
+        );
+      } else {
+        const data = (await response.json()) as { result?: string };
+        result = this.parseNativeBalanceResult(data.result, symbol);
+      }
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Native balance fetch failed for ${walletAddress}: ${this.getErrorMessage(err)}`,
+      );
+    } finally {
+      this.logger.debug(
+        `[timing] native_balance wallet=${walletAddress} chain=${normalizedChain} ` +
+          `duration_ms=${Date.now() - started}`,
+      );
+    }
+
+    return result;
+  }
+
+  private parseNativeBalanceResult(
+    hexWei: string | undefined,
+    symbol: string,
+  ): NativeBalanceResult {
+    const zero: NativeBalanceResult = {
+      balanceWei: '0',
+      balanceFormatted: 0,
+      symbol,
+    };
+
+    if (!hexWei) {
+      return zero;
+    }
+
+    try {
+      const wei = BigInt(hexWei);
+      if (wei <= 0n) {
+        return zero;
+      }
+
+      const divisor = 10n ** 18n;
+      const whole = wei / divisor;
+      const fraction = wei % divisor;
+      const fractionPadded = fraction.toString().padStart(18, '0').slice(0, 6);
+      const humanString = `${whole.toString()}.${fractionPadded}`;
+      const human = Number.parseFloat(humanString);
+      const balanceFormatted = Number.isFinite(human)
+        ? Math.round(human * 1_000_000) / 1_000_000
+        : 0;
+
+      return {
+        balanceWei: wei.toString(),
+        balanceFormatted,
+        symbol,
+      };
+    } catch {
+      return zero;
     }
   }
 
