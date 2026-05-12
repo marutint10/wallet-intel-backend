@@ -280,6 +280,83 @@ Output families:
 - riskCallouts
 - categoryConcentration (inside qualityMetrics)
 
+### DashboardSummaryService
+
+File: src/token/services/dashboard-summary.service.ts
+
+Layer: PRESENTATION ONLY. Sits on top of TokenAnalysisService output. Does NOT run analytics, does NOT touch the database, does NOT mutate analysis payloads, and does NOT change any existing API response shapes.
+
+Purpose:
+
+- transform a persisted `TokenAnalysisEntity` into a frontend-friendly DTO that powers the V1 B2B token intelligence dashboard
+- give the frontend a single payload it can render without re-deriving anything (avgScore formatting, sentiment, holder-table shortening, breakdown percentages)
+- keep dashboard concerns (formatting, sentiment, summary cards) out of the analytics engine so each layer evolves independently
+
+Boundary rules:
+
+- never throws on missing / partial / null analytics fields - degrades to `0`, `null`, `'Unknown'`, or empty arrays
+- never re-computes analytics (no Gini, no PnL, no classification) - only re-shapes what is already in `qualityMetrics`, `distribution`, `holdersData`, and `riskCallouts`
+- never persists anything - pure function over the entity
+
+Public API:
+
+- `buildDashboardSummary(analysis: TokenAnalysisEntity): DashboardSummaryResponse` - the single entry point
+
+DashboardSummaryResponse shape (high level):
+
+- `token` - contract, chain, token name/symbol/price (best-effort, may be null)
+- `summaryCards` - 6 dashboard cards: Avg Holder Score, Smart Money Wallets, Top 10 Concentration, Decentralization Score, Team Allocation, Exchange Allocation. Each card has title, value, optional subtitle, optional sentiment (`positive` / `neutral` / `warning`)
+- `holderQuality` - flat numeric summary (avgScore, qualityLabel, smartMoneyPct, convictionPct, activeTraderPct, degenPct, botPct)
+- `holderQualityBreakdown` - per-archetype percentages of analyzed EOAs (diamondHands, accumulators, swingTraders, dayTraders, degens, bots, unclassified), all rounded to whole numbers
+- `distribution` - flattened distribution summary (decentralizationScore, giniCoefficient, top10Pct, top50Pct, top100Pct)
+- `holderTable` - `{ total, rows }` with ALL analyzed holders sorted by rank ascending. No 100-holder cap. Frontend pagination, filtering, and sorting are expected to run client-side
+- `riskCallouts` - the existing `RiskCallout[]` from analytics, surfaced as-is
+
+Sentiment rules (summary cards):
+
+- positive: avgScore >= 75, decentralizationScore >= 70, smartMoneyPct >= 25
+- warning: top10Pct >= 50, team allocation >= 25, exchange allocation >= 40, botPct >= 15
+- otherwise: neutral
+
+Smart money percentage:
+
+- PRIMARY: when `qualityMetrics.pnlAggregation.smartMoneyCount > 0`, returns `round(smartMoneyCount / totalAnalyzedEOAs * 100)`
+- FALLBACK: when no PnL data is available (FAST_MODE), returns `round(eoaHoldersWithScore>=75 / totalAnalyzedEOAs * 100)`
+
+Holder table row mapping:
+
+- `shortAddress`: 0x1234...cdef format via `shortenAddress`
+- `balanceUsd`: `holder.usdValue ?? 0`
+- `percentSupply`: derived from `holder.balance / qualityMetrics.totalSupply` when both are parseable, otherwise `0`
+- `classification` / `confidence`: from `holder.classification` with null-safety
+- `score`: `holder.score?.score ?? null`
+- `portfolioRisk`: `holder.portfolio?.portfolioRiskSignal ?? null`
+- `lastActiveDays`: `holder.features?.daysSinceLastActivity ?? null` (currently always null because features are not persisted on holder rows; included as forward-compatible)
+
+Pure helper functions (all exported and unit-test friendly):
+
+- `shortenAddress(address)`
+- `formatPercent(value, digits = 1)`
+- `safeNumber(value, fallback = 0)`
+- `safeNumberOrNull(value)`
+- `buildSummaryCards(...)`
+- `computeHolderQualityBreakdown(...)`
+- `buildDistributionSummary(...)`
+- `formatUsd(value)`
+
+Defensive contract:
+
+- tolerates missing `qualityMetrics`, missing `distribution`, missing `pnlAggregation`, missing `teamDetection`, missing `holdersData`, missing `riskCallouts`
+- tolerates partial holder rows (no classification, no score, no portfolio, no features)
+- tolerates JSONB type-coerced values (numeric strings, null fields)
+- defaults: `0` for numbers, `null` for nullable numbers, `'Unknown'` for missing labels, `[]` for missing collections
+
+Wiring:
+
+- registered in `TokenModule` providers
+- no controller endpoints exposed yet (intentionally - this is plumbing for a future `/token/:address/dashboard` endpoint)
+- does not import analytics services at runtime; only depends on the `TokenAnalysisEntity` shape and the existing `RiskCallout` type, so it carries no circular-dependency risk
+
 ### TokenModule wiring
 
 File: src/token/token.module.ts
@@ -298,6 +375,7 @@ Registered providers:
 - HolderAggregationService
 - TokenAnalysisService
 - TokenIntelligenceService
+- DashboardSummaryService
 
 Registered entities:
 
