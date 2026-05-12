@@ -408,22 +408,41 @@ export class TokenAnalysisService {
         Record<string, unknown> | null
       >;
 
-    // Step 4: Save to database
-    await this.tokenRepo.update(
-      { contractAddress: address, chain },
-      {
-        tokenName: tokenMetadata.name,
-        tokenSymbol: tokenMetadata.symbol,
-        totalHolders: enrichedHolders.length,
-        holdersData: analyzedHolders,
-        qualityMetrics,
-        distribution: distributionMetrics,
-        riskCallouts: callouts,
-        status: 'done',
-        errorMessage: null,
-        updatedAt: new Date(),
-      },
+    // Step 4: Save to database.
+    // Token metadata is always persisted as nullable strings so a partial
+    // metadata response never blocks the analysis from completing. This
+    // covers initial insert, re-analysis, and the processing -> done lifecycle.
+    const persistedTokenName = tokenMetadata?.name ?? null;
+    const persistedTokenSymbol = tokenMetadata?.symbol ?? null;
+
+    this.logger.debug(
+      `[token-analysis] persist metadata symbol=${persistedTokenSymbol ?? 'null'} name=${persistedTokenName ?? 'null'}`,
     );
+
+    try {
+      await this.tokenRepo.update(
+        { contractAddress: address, chain },
+        {
+          tokenName: persistedTokenName,
+          tokenSymbol: persistedTokenSymbol,
+          totalHolders: enrichedHolders.length,
+          holdersData: analyzedHolders,
+          qualityMetrics,
+          distribution: distributionMetrics,
+          riskCallouts: callouts,
+          status: 'done',
+          errorMessage: null,
+          updatedAt: new Date(),
+        },
+      );
+    } catch (err: unknown) {
+      // Persisting must not abort the pipeline silently. We log and rethrow so
+      // the outer runAnalysis() catch sets status=error with the message.
+      this.logger.error(
+        `[token-analysis] persistence failed for ${address}: ${this.getErrorMessage(err)}`,
+      );
+      throw err;
+    }
 
     this.logger.log(`Analysis complete for ${contractAddress}. Saved to DB.`);
   }
