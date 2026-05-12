@@ -493,6 +493,36 @@ Returns:
 - not_found response when no row exists
 - token_analyses row when present (processing/done/error)
 
+### GET /token/:address/dashboard?chain=ethereum
+
+Purpose:
+
+- frontend-ready dashboard payload
+- transforms the persisted `TokenAnalysisEntity` into a `DashboardSummaryResponse` via `DashboardSummaryService`
+- intended for V1 B2B dashboard UI consumption
+- intentionally avoids exposing raw analytics internals (no `holdersData` blob, no `qualityMetrics` blob) to frontend consumers
+
+Implementation:
+
+- reuses the same `TokenAnalysisService.getResult(address, chain)` lookup as `GET /token/:address` (no extra DB queries)
+- the controller does NOT run analytics; transformation lives entirely in `DashboardSummaryService`
+- emits structured debug log `[token-dashboard] build contract=... chain=...` immediately before transformation
+- emits structured error log `[token-dashboard] transformation_failed contract=... chain=... error=...` on any unexpected throw from the summary service; the HTTP response never includes the underlying message
+
+Response behavior:
+
+- HTTP 404 with `{ status: 'not_found', message: 'No analysis found for token' }` when no analysis row exists for `(contractAddress, chain)`
+- HTTP 200 with a lightweight processing payload when the row exists but `status !== 'done'`:
+  - `{ status, contractAddress, chain, updatedAt }`
+  - no dashboard transformation is attempted
+  - frontend should poll the same endpoint until status becomes `done`
+- HTTP 200 with the full `DashboardSummaryResponse` when `status === 'done'`
+- HTTP 500 with `{ status: 'error', message: 'Failed to build dashboard response' }` if the summary service unexpectedly throws (defensive; in practice `DashboardSummaryService` is built to never throw)
+
+Pagination / filtering / sorting:
+
+- not implemented server-side. `holderTable` always returns every analyzed holder. Client-side handles pagination, sorting, and filtering.
+
 ## 5. Data model and migrations
 
 Migration files:
