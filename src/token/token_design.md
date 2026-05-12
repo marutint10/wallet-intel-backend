@@ -17,16 +17,19 @@ Current capabilities:
 - fetch top token holders from Chainbase
 - fetch wallet ERC-20 transfer history from Etherscan (ethereum, polygon)
 - fetch wallet ERC-20 transfer history from Alchemy (base, bsc)
+- fetch wallet native gas-token balance (ETH / BNB / POL) via Alchemy eth_getBalance
 - normalize transfer direction and amounts into one lite transfer format
 - detect swap-like behavior from transfer groups inside the same transaction hash
 - compute behavioral features from transfers (hold times, burstiness, category exposure, activity)
-- classify wallet behavior into lite archetypes
-- score wallet quality on a fixed 0-100 scale with confidence and band
+- in FAST_MODE: skip FIFO matching in favor of an O(N) per-token hold-duration estimator plus four derived features (walletAgeDays, daysSinceLastActivity, activityConsistencyScore, portfolioConcentrationScore)
+- classify wallet behavior into lite archetypes with cadence + portfolio-mix signals (PnL boost is opportunistic, never required)
+- score wallet quality on a fixed 0-100 scale with confidence and band; profitability dimension is optional and weights redistribute when PnL is absent
 - aggregate analyzed holder results into token-level quality/distribution/risk callouts
 - attach current USD price and per-holder usdValue to holder rows
-- compute portfolio context for top holders via Alchemy balances and batch pricing
-- compute lite realized PnL from detected swaps and feed profitability into classification/scoring
-- run full token analysis asynchronously and persist output in Postgres
+- compute portfolio context for top holders via Alchemy balances + native balance + batch pricing
+- batch price portfolio holdings via DefiLlama (primary) with CoinGecko fallback only for misses; every batch fetch has a 10s AbortController timeout and structured error logging
+- compute lite realized PnL from detected swaps and feed profitability into classification/scoring (active only when FAST_MODE is disabled)
+- run full token analysis asynchronously and persist output in Postgres with reliably populated tokenName / tokenSymbol metadata
 - expose polling endpoints to fetch analysis status and final result
 - provide an advanced token intelligence service for holder labeling, team-link detection, and richer token metadata collection
 
@@ -61,15 +64,28 @@ Responsibilities:
 - fetch top holders for the token
 - fetch current token price once per analysis
 - analyze holders in batches with delays (rate-limit friendly)
-- enrich holder rows with usdValue, top-holder portfolio context, and lite PnL summaries
+- enrich holder rows with usdValue, top-holder portfolio context, and (when not FAST_MODE) lite PnL summaries
 - aggregate holder-level analytics into token-level metrics
-- persist status done/error and payload into token_analyses
+- persist status done/error and payload into token_analyses, including defensively-nullable tokenName / tokenSymbol
+
+FAST_MODE constant:
+
+- declared at the top of the file as `const FAST_MODE = true`
+- when true, the orchestrator passes FAST_MODE_TRANSFER_LIMIT (50) to the ingestion service, sets `fastMode = true` on LiteFeatureService, bypasses LitePnlService and historical pricing entirely, and emits `pnl: null` on every holder row
+- flipping to `false` restores the full historical analysis path; LitePnlService remains wired up so no other code changes are needed
+- emits per-wallet timing line: `[timing] wallet=... transfers_ms=... features_ms=... classify_ms=... fastMode=...`
+
+Metadata persistence:
+
+- computes `persistedTokenName = tokenMetadata?.name ?? null` and `persistedTokenSymbol = tokenMetadata?.symbol ?? null` before the final update
+- emits `[token-analysis] persist metadata symbol=... name=...` debug log immediately before save
+- final `tokenRepo.update` is wrapped in try/catch; persistence errors are logged at error level and rethrown so the outer catch sets status=error with errorMessage
 
 Status lifecycle:
 
 - processing: set immediately when analysis starts
 - done: set after successful pipeline completion and save
-- error: set when any uncaught pipeline failure occurs
+- error: set when any uncaught pipeline failure occurs (including persistence failure)
 
 ### ChainbaseService
 
@@ -98,11 +114,24 @@ Responsibilities:
 - normalize provider payloads into LiteTransfer shape
 - compute direction IN/OUT based on target wallet
 - fetch ERC-20 token balances for portfolio context via Alchemy getTokenBalances
+- fetch native gas-token balance via Alchemy eth_getBalance (`getNativeBalance` method); returns `{ balanceWei, balanceFormatted, symbol }` and NEVER throws
+
+Public API:
+
+- `getRecentTransfers(walletAddress, chain, limit = 200, fastMode = false)` - when `fastMode` is true, the limit is capped to `FAST_MODE_TRANSFER_LIMIT` (50) and no pagination into older history occurs
+- `getTokenBalances(walletAddress, chain)` - ERC-20 balances via Alchemy
+- `getNativeBalance(walletAddress, chain)` - returns `{ balanceWei: string, balanceFormatted: number, symbol: string }`, chain->symbol map: ethereum/base->ETH, bsc->BNB, polygon->POL
+
+Constants:
+
+- `FAST_MODE_TRANSFER_LIMIT = 50` (exported) - the B2B holder-intelligence transfer cap
 
 Notes:
 
 - if provider API key is missing, returns empty transfer list and logs warning
-- unsupported chain throws an error
+- unsupported chain throws an error from `getRecentTransfers` but `getNativeBalance` returns a zero-balance result instead so portfolio generation never breaks
+- emits `[timing] transfers walletAddress=... chain=... fastMode=... limit=... count=... duration_ms=...` debug log per `getRecentTransfers`
+- emits `[timing] native_balance wallet=... chain=... duration_ms=...` debug log per `getNativeBalance` from a finally block so failure paths are still measured
 
 ### LiteFeatureService
 
@@ -113,16 +142,34 @@ Responsibilities:
 - detect swaps by grouping transfers per txHash
 - expose normalized swap rows for PnL reconstruction
 - require both IN and OUT legs, and different token contracts, to mark as swap
-- estimate hold times using FIFO lot matching
 - compute behavior metrics:
   - activity (swap count, span, trades/day, avg gaps, burstiness)
   - hold-time stats (median + buckets)
   - token preference mix (memecoin/bluechip/stablecoin)
   - portfolio diversity placeholders (holding token count, chain count)
 
+Public API:
+
+- `extractFeatures(transfers, walletAddress, chain, holdingTokenCount?, holdingChainCount?, holdingsProfile?, fastMode = false)`
+- `extractSwaps(transfers, walletAddress)` - unchanged, used only when FAST_MODE is disabled (for PnL input)
+
+Hold-time strategy depends on fastMode:
+
+- `fastMode = false` (default): full FIFO lot matching via `computeHoldTimes` over detected swap pairs - produces accurate per-position hold durations and `matchedLotCount`
+- `fastMode = true`: O(N) per-token first/last-seen span estimator (`estimateLightweightHoldHours`) plus a round-trip-token proxy for `matchedLotCount` (`countRoundTripTokens`) - tolerates truncated transfer history and avoids the O(swaps * tokens) FIFO work
+
+Derived features (always populated when transfers exist):
+
+- `walletAgeDays` - seconds since oldest observed transfer, in days
+- `daysSinceLastActivity` - seconds since newest observed transfer, in days
+- `activityConsistencyScore` (0-100) - derived from burstiness + sustained-span signals; higher means steadier cadence
+- `portfolioConcentrationScore` (0-100) - derived from max weight across trackedTokenWeight + topHoldings
+- `fastModeApplied` - boolean flag echoed on the feature vector so downstream consumers can detect which path produced the row
+
 Notes:
 
 - token categories now come from src/token/constants/token-categories.ts via classifyTokenCategory(contractAddress, symbol)
+- existing feature vector fields are preserved; the additions above are additive only
 
 ### Token Category Constants
 
@@ -155,13 +202,20 @@ Responsibilities:
   - Whale
 - return primary/secondary type, confidence, and human-readable reasoning
 - portfolio-aware classification signals when HoldingsProfile data is available
-- Degen is boosted by high meme allocation and extreme tracked-token concentration
-- Diamond Hand and Accumulator are boosted by bluechip-heavy, diversified portfolios
+- Degen is boosted by high meme allocation, extreme tracked-token concentration, and high portfolioConcentrationScore
+- Diamond Hand and Accumulator are boosted by bluechip-heavy, diversified portfolios; Diamond Hand also boosted by walletAgeDays >= 365 with daysSinceLastActivity <= 60
+- Bot / Automated is boosted by high activityConsistencyScore combined with tradesPerDay > 3
+- PnL boosts (Smart Money, Paper Hand) apply opportunistically only when realized trades are available; they are NEVER required for a classification
 - all portfolio signals are optional and skipped gracefully when holdings data is unavailable
 
 Gating:
 
-- returns Insufficient Data when swapCount < 3 or matchedLotCount < 2
+- returns Insufficient Data only when `swapCount < 3` and no usable PnL is available (matchedLotCount is no longer part of the gate so FAST_MODE wallets without FIFO still classify)
+
+Confidence:
+
+- driven by `swapCount`, `totalTransfers`, and `walletAgeDays` plus the score gap between primary and secondary archetype
+- matchedLotCount is no longer required for high confidence
 
 ### LiteScorerService
 
@@ -175,11 +229,17 @@ Responsibilities:
   - portfolioQuality
   - experience
   - activity
-  - profitability (when PnL data is available)
+  - profitability (OPTIONAL - only contributes when PnL data is available)
 - return score band and confidence
-- portfolioQuality now uses real holdings data when available: diversification score, category quality (bluechip+defi+infrastructure allocation), stablecoin reserve bonus, token-count balance, and concentration penalty
+- portfolioQuality uses real holdings data when available: diversification score, category quality (bluechip+defi+infrastructure allocation), stablecoin reserve bonus, token-count balance, and concentration penalty
 - riskManagement includes a small portfolio risk signal adjustment (conservative/balanced bonus, degen penalty)
+- consistency and activity dimensions use `Math.max(matchedLotCount, swapCount)` (or `swapCount/2` for activity) so FAST_MODE wallets without FIFO still earn full points from raw swap evidence
 - falls back to placeholder-based scoring when holdings data is unavailable (typically rank 51-100)
+
+Profitability redistribution (no-PnL path):
+
+- when pnl is null, the profitability dimension contributes 0 and the formula `(rawTotal / maxRawTotal) * 100` redistributes the missing 30 points proportionally across consistency / riskManagement / portfolioQuality / experience / activity
+- final score still spans the full 0-100 range
 
 Bands:
 
@@ -191,7 +251,11 @@ Bands:
 
 Gating:
 
-- returns Insufficient Data when swapCount < 3
+- returns Insufficient Data when swapCount < 3 (matchedLotCount is no longer in the gate)
+
+Confidence:
+
+- driven by `swapCount`, `totalTransfers`, and `walletAgeDays`; NEVER reduced because PnL is missing
 
 ### HolderAggregationService
 
@@ -264,15 +328,18 @@ Exposed by:
 2. service upserts token_analyses row as processing
 3. background run starts:
    - fetch top holders (target 100)
-   - process holders in batches (default size 5, delay 1500ms)
-   - for each holder: transfers -> features -> classification -> score
+   - TokenIntelligenceService labels every holder + runs team-detection
+   - process EOA holders in batches (default size 5, delay 1500ms)
+   - for each holder (FAST_MODE on): recent transfers (capped at 50) -> portfolio context including native bag -> features -> classification -> score, with `pnl = null`
+   - for each holder (FAST_MODE off): recent transfers -> portfolio context -> features -> swaps -> realized PnL -> classification -> score, with full pnl summary
    - aggregate holder outputs into quality/distribution/callouts
-   - upsert final analysis row with status=done
+   - upsert final analysis row with `tokenName` / `tokenSymbol` and status=done
 4. client polls GET /token/:address?chain=... until done/error
 
-Current runtime note:
+Current runtime notes:
 
-- production orchestrator uses TokenIntelligenceService for holder classification, team detection, and token metadata before running lite analysis on EOA holders
+- production orchestrator uses TokenIntelligenceService for holder labeling, team detection, and token metadata before running lite analysis on EOA holders
+- non-EOA holders (exchanges, contracts, burn, etc.) skip transfer fetch and classification but still appear in `holders_data` with labels and label evidence
 
 Failure behavior:
 
@@ -382,8 +449,8 @@ Current usage status:
 Current required keys for token pipeline:
 
 - CHAINBASE_API_KEY
-- ETHERSCAN_API_KEY (ethereum, polygon transfer ingestion)
-- ALCHEMY_API_KEY (base, bsc transfer ingestion)
+- ETHERSCAN_API_KEY (ethereum, polygon transfer ingestion + token-intelligence contract lookups)
+- ALCHEMY_API_KEY (base/bsc transfer ingestion + ERC-20 balances + native gas-token balance via eth_getBalance on all four chains)
 - DATABASE_URL
 
 Optional tuning keys:
@@ -399,16 +466,24 @@ Current .env.example already includes:
 
 Manual note:
 
-- add ALCHEMY_API_KEY to your local env for base/bsc support in lite ingestion
+- add ALCHEMY_API_KEY to your local env; without it ERC-20 balances and native balances both fall back to safe-empty results, and base/bsc transfer ingestion is disabled
 
 ## 7. How analysis persistence works
 
-The orchestrator saves output into token_analyses JSONB columns:
+The orchestrator saves output into token_analyses JSONB and scalar columns:
 
+- token_name / token_symbol: nullable scalar columns, written defensively (`tokenMetadata?.name ?? null` / `tokenMetadata?.symbol ?? null`) so partial metadata responses never block status=done
+- total_holders: count of holders that were enriched
 - holders_data: per-holder analyzed rows (classification + score)
 - quality_metrics: aggregated holder quality metrics plus tokenPriceUsd, priceSource, and PnL aggregation
 - distribution: concentration/distribution metrics
 - risk_callouts: generated token-level insights
+
+Defensive write path:
+
+- emits `[token-analysis] persist metadata symbol=... name=...` debug log immediately before the final `tokenRepo.update`
+- the `update` call is wrapped in try/catch; on failure the orchestrator logs at error level and rethrows so the outer `runAnalysis` catch sets status=error with errorMessage
+- the schema is verified by `scripts/verify-token-metadata-schema.js` which prints column info and the latest 10 rows
 
 TypeORM note:
 
@@ -465,14 +540,23 @@ LitePnlService is intentionally still registered in TokenModule and untouched in
 - only first two Chainbase pages are currently fetched
 - wallet-level holdingTokenCount and holdingChainCount in features are placeholders unless provided by caller
 - tracked token scheduling and whale alert execution logic is not implemented yet
+- portfolio holdings are capped at the top 50 holders for API-cost control
+- ERC-20 transfers truncated to FAST_MODE_TRANSFER_LIMIT (50) most recent per wallet while FAST_MODE is enabled (this is a deliberate B2B trade-off, not a defect - see section 8a)
+- LitePnlService is bypassed while FAST_MODE is enabled (deliberate, not a defect; flipping `FAST_MODE = false` restores it without any other changes)
+- native gas-token balance is fetched per chain only (no cross-chain aggregation); native pricing failures cause the native bag to be skipped silently
 
 ## 10. How to run and verify
 
-### Apply migration
+### Apply migrations
 
-Example:
+Run in order:
 
-- node scripts/run-sql-migration.js migrations/202605060001_create_token_tables.sql
+- `node scripts/run-sql-migration.js migrations/202605060001_create_token_tables.sql`
+- `node scripts/run-sql-migration.js migrations/202605060003_add_token_name_symbol.sql`
+
+### Verify schema
+
+- `node scripts/verify-token-metadata-schema.js` prints `token_name` / `token_symbol` column info plus the latest 10 token_analyses rows
 
 ### Start analysis
 
@@ -487,40 +571,79 @@ Example:
 4. GET /token/wallet/:address/classify
 5. GET /token/wallet/:address/score
 
+### Inspect pricing / FAST_MODE log lines
+
+Watch the dev-server console while an analysis runs for these structured log prefixes:
+
+- `[defillama-batch] request requestedCount=... url=...` and matching `[defillama-batch] response requestedCount=... returnedCount=... elapsed_ms=...`
+- `[defillama-batch] timeout | network_error | http_error | parse_error ...` on failures (HTTP errors include `status=` and `bodyPreview=...`)
+- `[coingecko-batch] http_error | timeout | network_error url=... ...` only for tokens DefiLlama did not price
+- `[dexscreener] request url=... timeout_ms=...` and `[dexscreener] response url=... status=... ok=... elapsed_ms=...`
+- `[dexscreener] timeout | network_error | http_error | parse_error | no_matching_pairs | invalid_price ...` on failures
+- `[timing] transfers walletAddress=... duration_ms=...` per ingestion call
+- `[timing] native_balance wallet=... chain=... duration_ms=...` per native balance call
+- `[timing] wallet=... transfers_ms=... features_ms=... classify_ms=... fastMode=...` per analyzed holder
+- `[token-analysis] persist metadata symbol=... name=...` immediately before the final DB save
+- `[portfolio] native holding added wallet=... symbol=... usdValue=...` when a native bag clears the $1 minimum
+
 ## 11. Pipeline Upgrades (Post-MVP)
 
 ### LitePricingService
 
 File: src/token/services/lite-pricing.service.ts
 
+Single-price path (`getTokenPrice`):
+
 - DexScreener primary, CoinGecko fallback
-- 5-minute in-memory cache
-- batch pricing for portfolio valuation
-- historical price fetching via DefiLlama (primary) with CoinGecko range fallback
-- hour-rounded in-memory cache for historical prices (permanent, prices do not change)
+- DexScreener call has a 10s `AbortController` timeout and emits structured log lines on every outcome: `[dexscreener] request | response | timeout | network_error | http_error | parse_error | no_matching_pairs | invalid_price | success`
+- HTTP errors include `status=`, `statusText=`, and `bodyPreview=` (first 200 chars, single-line)
+- 5-minute in-memory `priceCache`
+
+Batch-price path (`getBatchPrices`):
+
+- PRIMARY: DefiLlama batch current prices at `https://coins.llama.fi/prices/current/<chain:address,...>`; supports cross-chain in one call, chunked at 50 entries per request
+- chain prefix map for DefiLlama: ethereum, polygon, bsc, base (each is its own prefix)
+- FALLBACK: CoinGecko per-chain chunks of 100 with 2s inter-chunk sleep, called ONLY for addresses DefiLlama did not price
+- every batch fetch (DefiLlama and CoinGecko) wraps in its own 10s `AbortController` timeout, with `clearTimeout` in `finally`
+- DefiLlama calls go through `waitForDefiLlamaSlot` (150ms minimum spacing) so they cooperate with `getHistoricalPrice` rate limiting
+- DefiLlama hits are cached with `source: 'defillama'`; CoinGecko hits remain `source: 'coingecko'`
+- structured log prefixes: `[defillama-batch] request | response | timeout | network_error | http_error | parse_error`, `[coingecko-batch] http_error | timeout | network_error`
+
+Historical-price path (`getHistoricalPrice`):
+
+- DefiLlama historical primary, CoinGecko market_chart/range fallback
+- hour-rounded permanent in-memory `historicalPriceCache`
 - 150ms minimum spacing between DefiLlama calls
-- used by LitePnlService for accurate swap-time valuation
-- used by: orchestrator holder USD values, portfolio service, PnL service
+- used by LitePnlService for swap-time valuation (only when FAST_MODE is disabled)
+
+TokenPriceResult.source union:
+
+- `'dexscreener' | 'coingecko' | 'defillama' | 'fallback'` - the `'defillama'` value was added so batch hits cache with accurate provenance
+
+Used by: orchestrator holder USD values, portfolio service (including native-token pricing), PnL service
 
 ### LitePortfolioService
 
 File: src/token/services/lite-portfolio.service.ts
 
-- fetches full token balances via Alchemy getTokenBalances
-- prices holdings via batch CoinGecko
-- now produces a formalized HoldingsProfile with categoryAllocations (bluechip/defi/meme/ai/gaming/infrastructure/stablecoin/rwa/other), portfolioRiskSignal, and per-holding category labels
+- fetches full ERC-20 balances via Alchemy `getTokenBalances`
+- prices holdings via `LitePricingService.getBatchPrices` (DefiLlama-primary, CoinGecko-fallback)
+- produces a formalized HoldingsProfile with categoryAllocations (bluechip/defi/meme/ai/gaming/infrastructure/stablecoin/rwa/other), portfolioRiskSignal, and per-holding category labels
 - computes: totalPortfolioUsd, trackedTokenWeight, diversificationScore
 - uses centralized src/token/constants/token-categories.ts for classification
 - HoldingsProfile is fetched BEFORE feature extraction for top 50 holders so portfolio signals feed into classification and scoring
 - only runs for top 50 holders for API cost management
-- native gas-token balances (ETH on ethereum/base, BNB on bsc, POL on polygon) are now resolved via LiteIngestionService.getNativeBalance and priced via LitePricingService using known native-token proxy addresses; the native bag participates in totalPortfolioUsd, trackedTokenWeight, categoryAllocations (bluechip), topHoldings, diversificationScore, and portfolioRiskSignal. Native pricing failures degrade silently (holding is skipped, the rest of the profile still builds)
+- native gas-token balances (ETH on ethereum/base, BNB on bsc, POL on polygon) are resolved via `LiteIngestionService.getNativeBalance` and priced via `LitePricingService.getTokenPrice` using known native-token proxy addresses (`0xeee...eee` for ETH, `0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c` for BNB, `0x0000000000000000000000000000000000001010` for POL). The native bag is pushed into `holdings` BEFORE the ERC-20 loop so it automatically participates in totalPortfolioUsd, trackedTokenWeight, categoryAllocations (bluechip), topHoldings, diversificationScore, and portfolioRiskSignal
+- native pricing failures degrade silently (holding is skipped, the rest of the profile still builds); the legacy empty-balances early-return now also requires `!nativeHolding` so ETH-only wallets are no longer reported as empty portfolios
+- emits `[portfolio] native holding added wallet=... symbol=... usdValue=...` debug log when a native bag clears the $1 minimum
 
 ### LiteFeatureService
 
 File: src/token/services/lite-feature.service.ts
 
-- feature vector now includes optional holdings-based fields: trackedTokenWeight, portfolioDiversificationScore, holdingCategoryMix, portfolioRiskSignal
-- these fields are populated when HoldingsProfile is available (top 50 holders)
+- feature vector includes optional holdings-based fields: `trackedTokenWeight`, `portfolioDiversificationScore`, `holdingCategoryMix`, `portfolioRiskSignal` (populated when HoldingsProfile is available, i.e. top 50 holders)
+- feature vector also includes FAST_MODE-derived fields: `walletAgeDays`, `daysSinceLastActivity`, `activityConsistencyScore`, `portfolioConcentrationScore`, `fastModeApplied`
+- see section 2 LiteFeatureService for the full public API + hold-time strategy details
 
 ### LitePnlService
 
@@ -529,8 +652,9 @@ File: src/token/services/lite-pnl.service.ts
 - FIFO position lot reconstruction from detected swaps
 - swap valuation priority: stablecoin-side first, DefiLlama historical second, CoinGecko historical third, current price last resort
 - outputs: realized PnL, win rate, profit factor, ROI, largest win/loss
-- feeds into classifier Smart Money/Paper Hand/Degen/Bot signals and scorer profitability dimension
+- feeds into classifier Smart Money/Paper Hand boosts (opportunistic) and the scorer profitability dimension (additive 0-30 points) when active
 - matches wallet module's DefiLlama-first historical pricing strategy
+- currently bypassed at runtime because `FAST_MODE = true` in TokenAnalysisService; the service stays wired in TokenModule so flipping FAST_MODE re-engages it without code changes
 
 ### WalletFilterService
 
