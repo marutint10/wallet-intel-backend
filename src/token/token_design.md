@@ -204,6 +204,10 @@ Responsibilities:
 - compute category-split concentration metrics for eoaHolders, teamLinked, exchanges, contractsAndPools, vestingLocked, burnDead, and dust
 - generate risk/positive/info callouts
 - add callouts for low retail holder concentration and high-confidence team detection
+- breakdown now separates bots (confirmed Bot / Automated classification) from unclassified (insufficient swap data for behavioral classification)
+- Bot Activity Detected callout only fires for confirmed automated trading patterns, not wallets with insufficient data
+- Limited Trading Data Available info callout fires when more than 50% of analyzed EOA holders lack swap history (common for transfer-heavy tokens)
+- avgScore and qualityLabel are computed from scored holders only (score > 0), excluding Insufficient Data wallets from score averaging
 
 Output families:
 
@@ -421,6 +425,39 @@ Resilience behavior:
 - missing API keys return safe empty lists where appropriate
 - individual holder failures do not abort full token analysis
 - terminal failures are captured in errorMessage
+
+## 8a. FAST_MODE (B2B holder-intelligence path)
+
+Status: enabled by default. Set `FAST_MODE = false` in `src/token/services/token-analysis.service.ts` to restore the full historical analysis path.
+
+When FAST_MODE is true:
+
+- transfer history is capped at `FAST_MODE_TRANSFER_LIMIT` (50) most-recent ERC-20 transfers per wallet, no pagination into older history
+- LitePnlService is bypassed entirely and `pnl` is `null` on every holder row
+- no historical pricing calls are made (LitePnlService is the only consumer of historical prices)
+- LiteFeatureService swaps the O(swaps * tokens) FIFO matcher for an O(N) per-token first/last-seen span estimator (`estimateLightweightHoldHours`) and a round-trip-token proxy for `matchedLotCount` (`countRoundTripTokens`)
+- LiteFeatureService also populates four derived features: `walletAgeDays`, `daysSinceLastActivity`, `activityConsistencyScore` (0-100), `portfolioConcentrationScore` (0-100), plus a `fastModeApplied: true` flag
+
+Classifier and scorer behavior under FAST_MODE:
+
+- classification gate is now `swapCount < 3` only (matchedLotCount is no longer required)
+- classifier consumes cadence, category mix, tracked-token concentration, diversification score, portfolio risk signal, and the new derived features
+- classifier and scorer confidence are now driven by `swapCount`, `totalTransfers`, and `walletAgeDays` instead of `matchedLotCount`
+- profitability dimension is optional: when `pnl` is null the weight redistributes proportionally across consistency/risk/portfolio/experience/activity so scores still span the full 0-100 range
+- final-score confidence is NOT downgraded just because PnL is missing
+
+Response shape is preserved:
+
+- `AnalyzedHolder.pnl` may now be `null` for all holders; HolderAggregationService already tolerates this (callouts depending on PnL aggregation simply do not fire)
+- `LiteFeatureVector` gains 4 new fields plus `fastModeApplied`; existing fields are unchanged
+
+Per-wallet timing instrumentation:
+
+- LiteIngestionService logs `[timing] transfers ... duration_ms=...` per `getRecentTransfers` call
+- TokenAnalysisService logs `[timing] wallet=... transfers_ms=... features_ms=... classify_ms=...` per holder
+- log level is debug
+
+LitePnlService is intentionally still registered in TokenModule and untouched in code; flipping FAST_MODE is a single-constant change.
 
 ## 9. Current limitations and known gaps
 
