@@ -8,6 +8,7 @@ import {
   WhaleAlertEntity,
 } from './entities';
 import { ChainbaseService } from './services/chainbase.service';
+import { DashboardSummaryService } from './services/dashboard-summary.service';
 import { HolderAggregationService } from './services/holder-aggregation.service';
 import { LiteClassifierService } from './services/lite-classifier.service';
 import { LiteFeatureService } from './services/lite-feature.service';
@@ -45,6 +46,7 @@ import { TokenController } from './token.controller';
     HolderAggregationService,
     TokenAnalysisService,
     TokenIntelligenceService,
+    DashboardSummaryService,
   ],
 })
 export class TokenModule {}
