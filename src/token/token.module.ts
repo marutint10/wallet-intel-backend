@@ -20,6 +20,7 @@ import { LitePortfolioService } from './services/lite-portfolio.service';
 import { LitePricingService } from './services/lite-pricing.service';
 import { LiteScorerService } from './services/lite-scorer.service';
 import { TokenAiSummaryService } from './services/token-ai-summary.service';
+import { TokenChartService } from './services/token-chart.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
 import { TokenDeepAnalysisService } from './services/token-deep-analysis.service';
 import { TokenIntelligenceService } from './services/token-intelligence.service';
@@ -54,6 +55,7 @@ import { TokenController } from './token.controller';
     TokenIntelligenceService,
     DashboardSummaryService,
     TokenAiSummaryService,
+    TokenChartService,
     TokenDeepAnalysisService,
   ],
 })
