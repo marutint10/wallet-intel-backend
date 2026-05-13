@@ -8,6 +8,7 @@ import {
   WhaleSnapshotEntity,
   WhaleAlertEntity,
 } from './entities';
+import { TokenDeepAnalysisEntity } from './entities/token-deep-analysis.entity';
 import { ChainbaseService } from './services/chainbase.service';
 import { DashboardSummaryService } from './services/dashboard-summary.service';
 import { HolderAggregationService } from './services/holder-aggregation.service';
@@ -20,6 +21,7 @@ import { LitePricingService } from './services/lite-pricing.service';
 import { LiteScorerService } from './services/lite-scorer.service';
 import { TokenAiSummaryService } from './services/token-ai-summary.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
+import { TokenDeepAnalysisService } from './services/token-deep-analysis.service';
 import { TokenIntelligenceService } from './services/token-intelligence.service';
 import { WalletFilterService } from './services/wallet-filter.service';
 import { TokenController } from './token.controller';
@@ -30,6 +32,7 @@ import { TokenController } from './token.controller';
     CacheModule.register(),
     TypeOrmModule.forFeature([
       TokenAnalysisEntity,
+      TokenDeepAnalysisEntity,
       TrackedTokenEntity,
       WhaleSnapshotEntity,
       WhaleAlertEntity,
@@ -51,6 +54,7 @@ import { TokenController } from './token.controller';
     TokenIntelligenceService,
     DashboardSummaryService,
     TokenAiSummaryService,
+    TokenDeepAnalysisService,
   ],
 })
 export class TokenModule {}
