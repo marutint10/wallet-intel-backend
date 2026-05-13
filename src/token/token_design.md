@@ -854,6 +854,45 @@ TokenPriceResult.source union:
 
 Used by: orchestrator holder USD values, portfolio service (including native-token pricing), PnL service
 
+### TokenChartService
+
+File: src/token/services/token-chart.service.ts
+
+Responsibilities:
+
+- expose `GET /token/:address/chart` for token contract chart data and choose the best available third-party source
+- return `TokenChartResponse` with `contractAddress`, `chain`, `currency`, `timeframe`, `dataSource`, `dataPoints`, and `fetchedAt`
+- support `dataSource` values: `coingecko`, `geckoterminal`, or `unavailable`
+
+Current flow:
+
+- try CoinGecko contract chart first via `/coins/{platform}/contract/{address}/market_chart`
+- if CoinGecko is unavailable or returns invalid data, fall back to GeckoTerminal
+
+GeckoTerminal design update:
+
+- GeckoTerminal OHLCV data is pool-based, not token-based
+- the service now performs a two-step lookup:
+  1. resolve the token contract to a pool address via `/networks/{network}/tokens/{contractAddress}/pools?page=1`
+  2. request OHLCV for that pool via `/networks/{network}/pools/{poolAddress}/ohlcv/{resolution}?aggregate={aggregate}&limit={limit}&currency=usd`
+- this is necessary because GeckoTerminal requires a pool address for OHLCV lookup and will reject direct token contract OHLCV requests
+- if the pool lookup fails or returns no pool, the chart service logs a warning and returns `unavailable`
+
+Timeframe mapping:
+
+- `24h`: `hour`, aggregate 1, limit 24
+- `7d`: `hour`, aggregate 4, limit 42
+- `30d`: `hour`, aggregate 12, limit 60
+- `90d`: `day`, aggregate 1, limit 90
+- `1y`: `day`, aggregate 1, limit 365
+- `all`: `day`, aggregate 1, limit 1000
+
+Notes:
+
+- CoinGecko contract lookup is still unreliable for tokens not fully indexed by contract address; GeckoTerminal with pool lookup is the more robust source for this release
+- returned chart points are normalized to `{ timestamp, price, volume }` and sorted ascending by timestamp
+- the chart service uses a 10s `AbortController` timeout for all external HTTP calls
+
 ### LitePortfolioService
 
 File: src/token/services/lite-portfolio.service.ts
