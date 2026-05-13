@@ -1,3 +1,4 @@
+import { CacheModule } from '@nestjs/cache-manager';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
@@ -17,6 +18,7 @@ import { LitePnlService } from './services/lite-pnl.service';
 import { LitePortfolioService } from './services/lite-portfolio.service';
 import { LitePricingService } from './services/lite-pricing.service';
 import { LiteScorerService } from './services/lite-scorer.service';
+import { TokenAiSummaryService } from './services/token-ai-summary.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
 import { TokenIntelligenceService } from './services/token-intelligence.service';
 import { WalletFilterService } from './services/wallet-filter.service';
@@ -25,6 +27,7 @@ import { TokenController } from './token.controller';
 @Module({
   imports: [
     ConfigModule,
+    CacheModule.register(),
     TypeOrmModule.forFeature([
       TokenAnalysisEntity,
       TrackedTokenEntity,
@@ -47,6 +50,7 @@ import { TokenController } from './token.controller';
     TokenAnalysisService,
     TokenIntelligenceService,
     DashboardSummaryService,
+    TokenAiSummaryService,
   ],
 })
 export class TokenModule {}
