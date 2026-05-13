@@ -7,10 +7,12 @@ If token behavior changes, this file should be updated in the same task.
 
 ## 1. What we built so far
 
-The token module currently has two layers:
+The token module currently has four cooperating layers:
 
-1. wallet-level lite analytics (transfers -> features -> classification -> score)
-2. token-level holder intelligence (top holders -> holder analytics -> aggregate token report)
+1. wallet-level lite analytics (transfers → features → classification → score)
+2. token-level holder intelligence (top holders → holder analytics → aggregate token report)
+3. dashboard presentation (pure reshape of `TokenAnalysisEntity` → `DashboardSummaryResponse`, plus optional Gemini short summary)
+4. optional token deep analysis (Tavily web search + Claude structured JSON, persisted in `token_deep_analyses`, separate from the core analysis pipeline)
 
 Current capabilities:
 
@@ -32,6 +34,8 @@ Current capabilities:
 - run full token analysis asynchronously and persist output in Postgres with reliably populated tokenName / tokenSymbol metadata
 - expose polling endpoints to fetch analysis status and final result
 - provide an advanced token intelligence service for holder labeling, team-link detection, and richer token metadata collection
+- expose `GET /token/:address/dashboard` for a frontend-ready dashboard DTO, including an `aiSummary` plain-text line produced by Gemini (cached via `@nestjs/cache-manager`, deterministic fallback when the key is missing or the model fails)
+- expose async token **deep analysis**: trigger + poll endpoints backed by `token_deep_analyses` (parallel Tavily searches, Claude Sonnet JSON report, 48-hour freshness cache on completed rows; never blocks or breaks the main token analysis pipeline)
 
 Important boundary:
 
@@ -50,6 +54,8 @@ Responsibilities:
 - expose debug and verification endpoints for each lite stage
 - expose production async analysis start endpoint
 - expose polling endpoint for persisted analysis results
+- expose `GET /token/:address/dashboard` (dashboard DTO + AI summary) when analysis is `done`
+- expose `POST /token/:address/deep-analysis/trigger` and `GET /token/:address/deep-analysis` for optional deep research (EVM `0x` + 40 hex validation on these routes)
 
 ### TokenAnalysisService (orchestrator)
 
@@ -284,27 +290,29 @@ Output families:
 
 File: src/token/services/dashboard-summary.service.ts
 
-Layer: PRESENTATION ONLY. Sits on top of TokenAnalysisService output. Does NOT run analytics, does NOT touch the database, does NOT mutate analysis payloads, and does NOT change any existing API response shapes.
+Layer: PRESENTATION ONLY for the structured dashboard fields. Sits on top of TokenAnalysisService output. Does NOT run analytics, does NOT touch the database, does NOT mutate analysis payloads. The HTTP response also includes `aiSummary`, which is merged in `TokenController` after this service returns (see TokenAiSummaryService).
 
 Purpose:
 
 - transform a persisted `TokenAnalysisEntity` into a frontend-friendly DTO that powers the V1 B2B token intelligence dashboard
 - give the frontend a single payload it can render without re-deriving anything (avgScore formatting, sentiment, holder-table shortening, breakdown percentages)
 - keep dashboard concerns (formatting, sentiment, summary cards) out of the analytics engine so each layer evolves independently
+- export small pure helpers reused by AI layers: `RawHolder`, `safeNumber`, `safeNumberOrNull`, `safeString`, `computeSmartMoneyPct`, `computeHolderQualityBreakdown`, `buildDistributionSummary`, etc.
 
 Boundary rules:
 
 - never throws on missing / partial / null analytics fields - degrades to `0`, `null`, `'Unknown'`, or empty arrays
 - never re-computes analytics (no Gini, no PnL, no classification) - only re-shapes what is already in `qualityMetrics`, `distribution`, `holdersData`, and `riskCallouts`
-- never persists anything - pure function over the entity
+- never persists anything - pure function over the entity (Gemini summary caching is handled elsewhere)
 
 Public API:
 
-- `buildDashboardSummary(analysis: TokenAnalysisEntity): DashboardSummaryResponse` - the single entry point
+- `buildDashboardSummary(analysis: TokenAnalysisEntity): DashboardSummaryResponse` - the single entry point for cards/tables/metrics. Sets `aiSummary: null`; the controller overwrites `aiSummary` with `TokenAiSummaryService.generateSummary(analysis)`.
 
 DashboardSummaryResponse shape (high level):
 
 - `token` - contract, chain, token name/symbol/price (best-effort, may be null)
+- `aiSummary` - plain-text holder-health summary (`string | null`). Populated by the controller in parallel with `buildDashboardSummary` when analysis status is `done`
 - `summaryCards` - 6 dashboard cards: Avg Holder Score, Smart Money Wallets, Top 10 Concentration, Decentralization Score, Team Allocation, Exchange Allocation. Each card has title, value, optional subtitle, optional sentiment (`positive` / `neutral` / `warning`)
 - `holderQuality` - flat numeric summary (avgScore, qualityLabel, smartMoneyPct, convictionPct, activeTraderPct, degenPct, botPct)
 - `holderQualityBreakdown` - per-archetype percentages of analyzed EOAs (diamondHands, accumulators, swingTraders, dayTraders, degens, bots, unclassified), all rounded to whole numbers
@@ -339,10 +347,13 @@ Pure helper functions (all exported and unit-test friendly):
 - `formatPercent(value, digits = 1)`
 - `safeNumber(value, fallback = 0)`
 - `safeNumberOrNull(value)`
+- `safeString(value, fallback)`
 - `buildSummaryCards(...)`
 - `computeHolderQualityBreakdown(...)`
+- `computeSmartMoneyPct(...)`
 - `buildDistributionSummary(...)`
 - `formatUsd(value)`
+- exported `RawHolder` interface (lenient holder JSONB shape for breakdown / smart-money helpers)
 
 Defensive contract:
 
@@ -354,12 +365,48 @@ Defensive contract:
 Wiring:
 
 - registered in `TokenModule` providers
-- no controller endpoints exposed yet (intentionally - this is plumbing for a future `/token/:address/dashboard` endpoint)
+- consumed by `GET /token/:address/dashboard` via `TokenController` (together with `TokenAiSummaryService`)
 - does not import analytics services at runtime; only depends on the `TokenAnalysisEntity` shape and the existing `RiskCallout` type, so it carries no circular-dependency risk
+
+### TokenAiSummaryService
+
+File: src/token/services/token-ai-summary.service.ts
+
+Purpose:
+
+- produce a short professional **plain-text** analyst blurb (4–5 sentences) from a minimal `TokenSummaryInput` derived from the same fields as the dashboard (holder quality, composition %, distribution, allocations, risk/positive signal titles)
+- never break the dashboard: on Gemini failure or missing `GEMINI_API_KEY`, returns a deterministic fallback string
+
+Implementation notes:
+
+- uses `@google/generative-ai` with primary model `gemini-2.5-flash` and a lite fallback model; retry + minimum-length / sentence heuristics similar in spirit to `WalletAiService`
+- caches responses with `@nestjs/cache-manager` under key `token:summary:{chain}:{contractAddress}` (24h TTL for successful summaries, shorter TTL for fallbacks)
+- reads API key from `GEMINI_API_KEY` or `gemini.apiKey` via `ConfigService`
+
+### TokenDeepAnalysisService
+
+File: src/token/services/token-deep-analysis.service.ts
+
+Purpose:
+
+- optional **investment-style** narrative structured as JSON (`DeepAnalysisResult`): executive verdict, themed sections (overview, team, market, competitors, community, on-chain vs off-chain alignment, risks, structural signals), plus a fixed disclaimer
+- combines on-chain summary input (logic duplicated from `TokenAiSummaryService` private `buildInput`, via `buildSummaryInput` in this service) with **Tavily** web search snippets, then calls **Anthropic Claude** (`claude-sonnet-4-5-20251001`, `max_tokens` 4000, `temperature` 0) with a short `system` instruction (JSON only) and a long user prompt containing on-chain block, web block, and required JSON schema
+- persists run state and output in `token_deep_analyses` (`TokenDeepAnalysisEntity`), independent of `token_analyses`
+
+Behavior:
+
+- `triggerDeepAnalysis(address, chain)`: normalizes address to lowercase; if a row exists with `status=done` and `updatedAt` within **48 hours**, returns `{ status: 'cached' }`; otherwise upserts `pending` and **fire-and-forgets** `runDeepAnalysis` (errors logged, never thrown to caller); returns `{ status: 'queued' }` (or `{ status: 'error' }` only if the upsert path fails internally)
+- `getDeepAnalysis(address, chain)`: returns `not_started` | `pending` | `processing` | `error` | `done` (+ `result`, `generatedAt` when done)
+- `runDeepAnalysis`: sets `processing`, requires an existing `token_analyses` row with `status=done` (otherwise error), runs up to **7 Tavily queries in parallel** via `Promise.allSettled` (10s timeout per request, first hit per query, content capped at 500 chars), stores `queries` + `results` into `tavily_queries` JSONB on success, then calls Claude; malformed JSON or missing `overallVerdict` / `sections` → row `error` with message
+- missing `TAVILY_API_KEY`: logs warning, continues with empty web results; missing `ANTHROPIC_API_KEY`: row `error` with `ANTHROPIC_API_KEY not configured`
 
 ### TokenModule wiring
 
 File: src/token/token.module.ts
+
+Imports:
+
+- `CacheModule.register()` (shared in-memory cache store for token AI summary; can be pointed at Redis later via Nest cache config without changing callers)
 
 Registered providers:
 
@@ -376,10 +423,13 @@ Registered providers:
 - TokenAnalysisService
 - TokenIntelligenceService
 - DashboardSummaryService
+- TokenAiSummaryService
+- TokenDeepAnalysisService
 
 Registered entities:
 
 - TokenAnalysisEntity
+- TokenDeepAnalysisEntity (mapped in module via `./entities/token-deep-analysis.entity`; barrel `entities/index.ts` may omit it)
 - TrackedTokenEntity
 - WhaleSnapshotEntity
 - WhaleAlertEntity
@@ -413,6 +463,16 @@ Exposed by:
    - aggregate holder outputs into quality/distribution/callouts
    - upsert final analysis row with `tokenName` / `tokenSymbol` and status=done
 4. client polls GET /token/:address?chain=... until done/error
+
+### C) Token deep analysis (optional path)
+
+1. client completes token analysis (`token_analyses.status=done`) for `(contractAddress, chain)`
+2. client calls `POST /token/:address/deep-analysis/trigger?chain=...` (EVM `0x` + 40 hex validation on `address`)
+3. service returns `{ status: 'cached' }` if a fresh (`updatedAt` within 48h) `done` row already exists in `token_deep_analyses`, otherwise `{ status: 'queued' }` after upserting `pending`
+4. background job sets `processing`, runs parallel Tavily searches + Claude, then writes `done` + `result` + `tavily_queries`, or `error` + `error_message`
+5. client polls `GET /token/:address/deep-analysis?chain=...` until `done`, `error`, or `not_started`
+
+Boundary: deep analysis never mutates `token_analyses`; failures stay in `token_deep_analyses`.
 
 Current runtime notes:
 
@@ -505,9 +565,10 @@ Purpose:
 Implementation:
 
 - reuses the same `TokenAnalysisService.getResult(address, chain)` lookup as `GET /token/:address` (no extra DB queries)
-- the controller does NOT run analytics; transformation lives entirely in `DashboardSummaryService`
+- the controller does NOT run analytics; structured fields come from `DashboardSummaryService.buildDashboardSummary`
+- in parallel (same request), `TokenAiSummaryService.generateSummary(result)` produces `aiSummary` (plain `string`; deterministic fallback when Gemini is unavailable); failures there do not fail the HTTP request
 - emits structured debug log `[token-dashboard] build contract=... chain=...` immediately before transformation
-- emits structured error log `[token-dashboard] transformation_failed contract=... chain=... error=...` on any unexpected throw from the summary service; the HTTP response never includes the underlying message
+- emits structured error log `[token-dashboard] transformation_failed contract=... chain=... error=...` on any unexpected throw from the summary path; the HTTP response never includes the underlying message
 
 Response behavior:
 
@@ -516,12 +577,42 @@ Response behavior:
   - `{ status, contractAddress, chain, updatedAt }`
   - no dashboard transformation is attempted
   - frontend should poll the same endpoint until status becomes `done`
-- HTTP 200 with the full `DashboardSummaryResponse` when `status === 'done'`
-- HTTP 500 with `{ status: 'error', message: 'Failed to build dashboard response' }` if the summary service unexpectedly throws (defensive; in practice `DashboardSummaryService` is built to never throw)
+- HTTP 200 with the full `DashboardSummaryResponse` when `status === 'done'` (includes `aiSummary` from Gemini or fallback)
+- HTTP 500 with `{ status: 'error', message: 'Failed to build dashboard response' }` if the dashboard path unexpectedly throws (defensive; `DashboardSummaryService` is built to never throw)
 
 Pagination / filtering / sorting:
 
 - not implemented server-side. `holderTable` always returns every analyzed holder. Client-side handles pagination, sorting, and filtering.
+
+### POST /token/:address/deep-analysis/trigger?chain=ethereum
+
+Purpose:
+
+- enqueue (or short-circuit cache) async token deep analysis backed by `token_deep_analyses`
+
+Validation:
+
+- `address` must match `^0x[0-9a-fA-F]{40}$` after trim; otherwise HTTP 400
+
+Returns:
+
+- `{ status: 'cached' }` when a `done` row exists and is newer than 48 hours
+- `{ status: 'queued' }` after upserting `pending` and starting background processing
+- `{ status: 'error' }` only if the trigger path cannot persist the queue row (internal catch; does not throw)
+
+### GET /token/:address/deep-analysis?chain=ethereum
+
+Purpose:
+
+- poll deep analysis status and final JSON payload
+
+Validation:
+
+- same EVM contract regex as trigger
+
+Returns:
+
+- `DeepAnalysisStatusResponse`: `not_started` | `pending` | `processing` | `error` | `done` (with `result` + `generatedAt` when `done`)
 
 ## 5. Data model and migrations
 
@@ -529,6 +620,7 @@ Migration files:
 
 - migrations/202605060001_create_token_tables.sql
 - migrations/202605060003_add_token_name_symbol.sql (idempotent guard for token_name / token_symbol columns; widens token_symbol to VARCHAR(32) on legacy DBs)
+- migrations/202605_create_token_deep_analyses.sql (`token_deep_analyses` for async deep analysis)
 
 Created tables:
 
@@ -536,14 +628,20 @@ Created tables:
 - tracked_tokens
 - whale_snapshots
 - whale_alerts
+- token_deep_analyses (status, JSON `result`, JSON `tavily_queries`, unique `(contract_address, chain)`)
 
 Primary runtime table today:
 
 - token_analyses (used by TokenAnalysisService)
 
+Secondary table:
+
+- token_deep_analyses (used only by TokenDeepAnalysisService; independent lifecycle)
+
 Entity files:
 
 - src/token/entities/token-analysis.entity.ts
+- src/token/entities/token-deep-analysis.entity.ts
 - src/token/entities/tracked-token.entity.ts
 - src/token/entities/whale-snapshot.entity.ts
 - src/token/entities/whale-alert.entity.ts
@@ -551,6 +649,7 @@ Entity files:
 Current usage status:
 
 - tracked_tokens, whale_snapshots, whale_alerts are scaffolded and mapped but not yet actively written by current endpoints
+- token_deep_analyses is written by `POST /token/:address/deep-analysis/trigger` and background `TokenDeepAnalysisService`
 
 ## 6. Configuration
 
@@ -560,6 +659,12 @@ Current required keys for token pipeline:
 - ETHERSCAN_API_KEY (ethereum, polygon transfer ingestion + token-intelligence contract lookups)
 - ALCHEMY_API_KEY (base/bsc transfer ingestion + ERC-20 balances + native gas-token balance via eth_getBalance on all four chains)
 - DATABASE_URL
+
+Optional keys (feature-gated):
+
+- `GEMINI_API_KEY` (or `gemini.apiKey`) — short dashboard `aiSummary` via `TokenAiSummaryService` (fallback text when absent)
+- `TAVILY_API_KEY` (or `tavily.apiKey`) — web snippets for token deep analysis (degraded on-chain-only prompt when absent)
+- `ANTHROPIC_API_KEY` (or `anthropic.apiKey`) — required for deep analysis Claude call; missing key yields `token_deep_analyses.status=error` with message `ANTHROPIC_API_KEY not configured`
 
 Optional tuning keys:
 
@@ -571,10 +676,12 @@ Current .env.example already includes:
 - CHAINBASE_API_KEY
 - ETHERSCAN_API_KEY
 - DATABASE_URL
+- TAVILY_API_KEY (commented stub for Tavily)
 
 Manual note:
 
 - add ALCHEMY_API_KEY to your local env; without it ERC-20 balances and native balances both fall back to safe-empty results, and base/bsc transfer ingestion is disabled
+- add GEMINI_API_KEY for live Gemini summaries on the dashboard; add ANTHROPIC_API_KEY + TAVILY_API_KEY for full deep analysis quality
 
 ## 7. How analysis persistence works
 
@@ -586,6 +693,10 @@ The orchestrator saves output into token_analyses JSONB and scalar columns:
 - quality_metrics: aggregated holder quality metrics plus tokenPriceUsd, priceSource, and PnL aggregation
 - distribution: concentration/distribution metrics
 - risk_callouts: generated token-level insights
+
+Deep analysis persistence (separate table):
+
+- `token_deep_analyses` stores `status`, optional JSON `result` (Claude-shaped report), optional JSON `tavily_queries` (queries + snippets), and `error_message`; it is never written by `TokenAnalysisService`
 
 Defensive write path:
 
@@ -652,6 +763,8 @@ LitePnlService is intentionally still registered in TokenModule and untouched in
 - ERC-20 transfers truncated to FAST_MODE_TRANSFER_LIMIT (50) most recent per wallet while FAST_MODE is enabled (this is a deliberate B2B trade-off, not a defect - see section 8a)
 - LitePnlService is bypassed while FAST_MODE is enabled (deliberate, not a defect; flipping `FAST_MODE = false` restores it without any other changes)
 - native gas-token balance is fetched per chain only (no cross-chain aggregation); native pricing failures cause the native bag to be skipped silently
+- token deep analysis requires a completed `token_analyses` row (`status=done`) for the same `(contract_address, chain)`; it does not run holder analytics itself
+- dashboard `aiSummary` and deep analysis depend on third-party APIs (Gemini, Tavily, Anthropic) and degrade or error independently per feature rules above
 
 ## 10. How to run and verify
 
@@ -661,6 +774,7 @@ Run in order:
 
 - `node scripts/run-sql-migration.js migrations/202605060001_create_token_tables.sql`
 - `node scripts/run-sql-migration.js migrations/202605060003_add_token_name_symbol.sql`
+- `node scripts/run-sql-migration.js migrations/202605_create_token_deep_analyses.sql`
 
 ### Verify schema
 
@@ -670,6 +784,16 @@ Run in order:
 
 1. POST /token/analyze with contractAddress and optional chain
 2. poll GET /token/:address?chain=... until status is done or error
+
+### Inspect dashboard + AI summary
+
+1. Complete analysis for a contract (POST /token/analyze, poll GET /token/:address)
+2. GET /token/:address/dashboard?chain=... — includes `aiSummary` when status is `done`
+
+### Inspect deep analysis
+
+1. POST /token/:address/deep-analysis/trigger?chain=... (after step 1)
+2. Poll GET /token/:address/deep-analysis?chain=... until `done` or `error`
 
 ### Debug each stage quickly
 
