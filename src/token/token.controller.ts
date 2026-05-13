@@ -19,6 +19,10 @@ import { LiteIngestionService } from './services/lite-ingestion.service';
 import { LiteFeatureService } from './services/lite-feature.service';
 import { LiteScorerService } from './services/lite-scorer.service';
 import { TokenAiSummaryService } from './services/token-ai-summary.service';
+import {
+  type ChartTimeframe,
+  TokenChartService,
+} from './services/token-chart.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
 import { TokenDeepAnalysisService } from './services/token-deep-analysis.service';
 
@@ -50,6 +54,7 @@ export class TokenController {
     private readonly dashboardSummary: DashboardSummaryService,
     private readonly tokenAiSummary: TokenAiSummaryService,
     private readonly tokenDeepAnalysis: TokenDeepAnalysisService,
+    private readonly tokenChart: TokenChartService,
   ) {}
 
   // GET /token/:address/holders?chain=ethereum
@@ -181,6 +186,20 @@ export class TokenController {
       );
     }
     return this.tokenDeepAnalysis.getDeepAnalysis(address, chain);
+  }
+
+  // GET /token/:address/chart?chain=ethereum&timeframe=7d
+  @Get(':address/chart')
+  async getTokenChart(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+    @Query('timeframe') timeframe: string = '7d',
+  ) {
+    const allowed: ChartTimeframe[] = ['24h', '7d', '30d', '90d', '1y', 'all'];
+    const chartTf: ChartTimeframe = allowed.includes(timeframe as ChartTimeframe)
+      ? (timeframe as ChartTimeframe)
+      : '7d';
+    return this.tokenChart.getChart(address, chain, chartTf);
   }
 
   // GET /token/:address?chain=ethereum
