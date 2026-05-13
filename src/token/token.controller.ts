@@ -20,6 +20,7 @@ import { LiteFeatureService } from './services/lite-feature.service';
 import { LiteScorerService } from './services/lite-scorer.service';
 import { TokenAiSummaryService } from './services/token-ai-summary.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
+import { TokenDeepAnalysisService } from './services/token-deep-analysis.service';
 
 // Lightweight response shape returned by GET /token/:address/dashboard when the
 // analysis row exists but has not yet completed. Frontend should keep polling
@@ -35,6 +36,10 @@ interface DashboardProcessingResponse {
 export class TokenController {
   private readonly logger = new Logger(TokenController.name);
 
+  private isEvmContractAddress(address: string): boolean {
+    return /^0x[a-fA-F0-9]{40}$/i.test(address.trim());
+  }
+
   constructor(
     private readonly chainbase: ChainbaseService,
     private readonly liteIngestion: LiteIngestionService,
@@ -44,6 +49,7 @@ export class TokenController {
     private readonly tokenAnalysis: TokenAnalysisService,
     private readonly dashboardSummary: DashboardSummaryService,
     private readonly tokenAiSummary: TokenAiSummaryService,
+    private readonly tokenDeepAnalysis: TokenDeepAnalysisService,
   ) {}
 
   // GET /token/:address/holders?chain=ethereum
@@ -145,6 +151,36 @@ export class TokenController {
       status: entity.status,
       message: 'Analysis started. Poll GET /token/:address for results.',
     };
+  }
+
+  // POST /token/:address/deep-analysis/trigger?chain=ethereum
+  @Post(':address/deep-analysis/trigger')
+  async triggerTokenDeepAnalysis(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+  ) {
+    if (!this.isEvmContractAddress(address)) {
+      throw new HttpException(
+        { message: 'Invalid contract address' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    return this.tokenDeepAnalysis.triggerDeepAnalysis(address, chain);
+  }
+
+  // GET /token/:address/deep-analysis?chain=ethereum
+  @Get(':address/deep-analysis')
+  async getTokenDeepAnalysis(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+  ) {
+    if (!this.isEvmContractAddress(address)) {
+      throw new HttpException(
+        { message: 'Invalid contract address' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    return this.tokenDeepAnalysis.getDeepAnalysis(address, chain);
   }
 
   // GET /token/:address?chain=ethereum
