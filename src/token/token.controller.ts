@@ -18,6 +18,7 @@ import { LiteClassifierService } from './services/lite-classifier.service';
 import { LiteIngestionService } from './services/lite-ingestion.service';
 import { LiteFeatureService } from './services/lite-feature.service';
 import { LiteScorerService } from './services/lite-scorer.service';
+import { TokenAiSummaryService } from './services/token-ai-summary.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
 
 // Lightweight response shape returned by GET /token/:address/dashboard when the
@@ -42,6 +43,7 @@ export class TokenController {
     private readonly liteScorer: LiteScorerService,
     private readonly tokenAnalysis: TokenAnalysisService,
     private readonly dashboardSummary: DashboardSummaryService,
+    private readonly tokenAiSummary: TokenAiSummaryService,
   ) {}
 
   // GET /token/:address/holders?chain=ethereum
@@ -198,7 +200,11 @@ export class TokenController {
     );
 
     try {
-      return this.dashboardSummary.buildDashboardSummary(result);
+      const [dashboard, aiSummary] = await Promise.all([
+        Promise.resolve(this.dashboardSummary.buildDashboardSummary(result)),
+        this.tokenAiSummary.generateSummary(result),
+      ]);
+      return { ...dashboard, aiSummary };
     } catch (err: unknown) {
       // DashboardSummaryService is designed to never throw, but if a bug or
       // an unexpected JSONB shape ever causes one to escape, we surface a
