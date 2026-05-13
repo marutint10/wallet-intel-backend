@@ -73,6 +73,9 @@ export interface DashboardSummaryResponse {
     tokenPriceUsd?: number | null;
   };
 
+  /** Plain-text analyst summary from Gemini, or null if generation was skipped or failed without fallback. */
+  aiSummary: string | null;
+
   summaryCards: SummaryCard[];
 
   holderQuality: {
@@ -104,7 +107,7 @@ export interface DashboardSummaryResponse {
 // stores `holdersData` as `unknown[]`. Re-asserting on a narrowed lenient
 // shape keeps this layer decoupled from analytics evolution.
 
-interface RawHolder {
+export interface RawHolder {
   rank?: unknown;
   walletAddress?: unknown;
   balance?: unknown;
@@ -201,6 +204,7 @@ export class DashboardSummaryService {
         tokenSymbol: analysis.tokenSymbol ?? null,
         tokenPriceUsd,
       },
+      aiSummary: null,
       summaryCards,
       holderQuality: {
         avgScore: avgScoreRaw,
@@ -278,7 +282,7 @@ export function safeNumberOrNull(value: unknown): number | null {
   return null;
 }
 
-function safeString(value: unknown, fallback: string): string {
+export function safeString(value: unknown, fallback: string): string {
   if (typeof value === 'string' && value.length > 0) {
     return value;
   }
@@ -606,7 +610,7 @@ function buildHolderTableRow(
 // Smart money percentage
 // -----------------------------
 
-function computeSmartMoneyPct(
+export function computeSmartMoneyPct(
   smartMoneyCount: number,
   totalAnalyzedEOAs: number,
   holders: RawHolder[],
