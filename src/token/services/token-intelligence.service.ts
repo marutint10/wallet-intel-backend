@@ -31,6 +31,9 @@ export interface HolderFilterResult {
   address: string;
   label: HolderLabel;
   labelDetail?: string;
+  // Etherscan-resolved contract name. Populated only for `generic_contract`
+  // wallets; null/undefined for every other label.
+  knownLabel?: string | null;
   shouldAnalyze: boolean;
   isTeamLinked: boolean;
   teamConnectionPath?: string;
@@ -152,6 +155,7 @@ type HolderInput = {
 type ContractClassification = {
   label: HolderLabel;
   labelDetail?: string;
+  knownLabel?: string | null;
   isTeamLinked: boolean;
   labelConfidence: number;
   evidence: LabelEvidence[];
@@ -183,6 +187,7 @@ export class TokenIntelligenceService {
     ['0x503828976d22510aad0201ac7ec88293211d23da', 'Coinbase'],
     ['0x5a52e96bacdabb82fd05763e25335261b270efcb', 'OKX'],
     ['0x6cc5f688a315f3dc28a7781717a9a798a59fda7b', 'OKX'],
+    ['0x1884c178a6542f288ebc8780d04c72514284fb84', 'OKX 2'],
     ['0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0', 'Kraken'],
     ['0xae2d4617c862309a3d75a0ffb358c7a5009c673f', 'Kraken'],
     ['0x1ab4973a48dc892cd9971ece8e01dcc7688f8f23', 'Gate.io'],
@@ -428,6 +433,7 @@ export class TokenIntelligenceService {
                   classification.isTeamLinked,
                   {
                     labelDetail: classification.labelDetail,
+                    knownLabel: classification.knownLabel ?? null,
                     teamConnectionPath: classification.isTeamLinked
                       ? `${classification.label} -> ${address}`
                       : undefined,
@@ -953,11 +959,34 @@ export class TokenIntelligenceService {
         };
       }
 
+      // CHANGE 1: log knownLabel enrichment outcome for generic_contract wallets.
+      // The getsourcecode call already happened above via getContractName() (cached
+      // in contractNameCache), so this is observability around the existing
+      // enrichment - no extra Etherscan call is issued and no extra rate-limit
+      // pacing is needed beyond the 200ms batch gap already present in
+      // classifyHolders.
+      const trimmedContractName = contractName?.trim();
+      const knownLabel =
+        trimmedContractName && trimmedContractName.length > 0
+          ? trimmedContractName
+          : null;
+
+      if (knownLabel) {
+        this.logger.log(
+          `[token-intelligence] contract_name_enriched address=${address} name=${knownLabel}`,
+        );
+      } else {
+        this.logger.log(
+          `[token-intelligence] contract_name_not_found address=${address}`,
+        );
+      }
+
       const genericConfidence =
-        contractNameLookupAvailable && contractName ? 60 : 50;
+        contractNameLookupAvailable && knownLabel ? 60 : 50;
       return {
         label: 'generic_contract',
-        labelDetail: contractName ?? undefined,
+        labelDetail: knownLabel ?? undefined,
+        knownLabel,
         isTeamLinked: false,
         labelConfidence: genericConfidence,
         evidence,
@@ -967,6 +996,12 @@ export class TokenIntelligenceService {
     } catch (err: unknown) {
       this.logger.warn(
         `Contract classification failed for ${address}: ${this.getErrorMessage(err)}`,
+      );
+      // CHANGE 1: classification threw before we could resolve a contract name,
+      // so emit the not_found log to keep observability symmetric with the
+      // happy path above.
+      this.logger.log(
+        `[token-intelligence] contract_name_not_found address=${address}`,
       );
       return {
         label: 'generic_contract',
@@ -1375,6 +1410,7 @@ export class TokenIntelligenceService {
     isTeamLinked: boolean,
     options: {
       labelDetail?: string;
+      knownLabel?: string | null;
       teamConnectionPath?: string;
       labelConfidence?: number;
       labelEvidence?: LabelEvidence[];
@@ -1386,11 +1422,16 @@ export class TokenIntelligenceService {
       options.teamConnectionScore ?? 0,
     );
     const labelConfidence = this.normalizeScore(options.labelConfidence ?? 50);
+    const knownLabel =
+      typeof options.knownLabel === 'string' && options.knownLabel.length > 0
+        ? options.knownLabel
+        : null;
 
     return {
       address,
       label,
       ...(options.labelDetail ? { labelDetail: options.labelDetail } : {}),
+      knownLabel,
       shouldAnalyze,
       isTeamLinked,
       ...(options.teamConnectionPath
@@ -1813,6 +1854,7 @@ export class TokenIntelligenceService {
           nextLabel === 'team_connected'
             ? current.labelDetail ?? 'Linked to team wallet'
             : current.labelDetail,
+        knownLabel: current.knownLabel ?? null,
         teamConnectionPath: nextIsTeamLinked
           ? current.teamConnectionPath ?? teamConnectionPath
           : current.teamConnectionPath,
