@@ -41,6 +41,9 @@ export interface HolderQualityBreakdown {
   unclassified: number;
 }
 
+// FIX 1: dropped `lastActiveDays` (always null in practice) and surfaced wallet-level
+// portfolio context (`portfolioUsd`, `trackedTokenWeight`) that LitePortfolioService
+// already computes for top-50 holders but was not being passed through to the dashboard.
 export interface HolderTableRow {
   rank: number;
   walletAddress: string;
@@ -53,7 +56,8 @@ export interface HolderTableRow {
   walletLabel: string | null;
   teamLinked: boolean;
   portfolioRisk: string | null;
-  lastActiveDays: number | null;
+  portfolioUsd: number | null;
+  trackedTokenWeight: number | null;
 }
 
 export interface DistributionSummary {
@@ -118,8 +122,12 @@ export interface RawHolder {
     primaryType?: unknown;
     confidence?: unknown;
   } | null;
-  score?: { score?: unknown } | null;
-  portfolio?: { portfolioRiskSignal?: unknown } | null;
+  score?: { score?: unknown; band?: unknown } | null;
+  portfolio?: {
+    portfolioRiskSignal?: unknown;
+    totalPortfolioUsd?: unknown;
+    trackedTokenWeight?: unknown;
+  } | null;
   features?: { daysSinceLastActivity?: unknown } | null;
 }
 
@@ -567,10 +575,14 @@ function buildHolderTableRow(
       ? (holder.classification.confidence as string)
       : null;
 
+  // FIX 2: gated wallets (band === 'Insufficient Data') surface as null instead of 0
+  // so the dashboard does not misrepresent "we lacked data" as "scored zero points".
   const score =
-    holder?.score && typeof holder.score.score === 'number'
-      ? holder.score.score
-      : null;
+    holder?.score && holder.score.band === 'Insufficient Data'
+      ? null
+      : holder?.score && typeof holder.score.score === 'number'
+        ? holder.score.score
+        : null;
 
   const walletLabel =
     typeof holder?.walletLabel === 'string' ? holder.walletLabel : null;
@@ -583,11 +595,20 @@ function buildHolderTableRow(
       ? (holder.portfolio.portfolioRiskSignal as string)
       : null;
 
-  const lastActiveDays =
-    holder?.features &&
-    typeof holder.features.daysSinceLastActivity === 'number' &&
-    Number.isFinite(holder.features.daysSinceLastActivity)
-      ? (holder.features.daysSinceLastActivity as number)
+  // FIX 1: surface the wallet-level portfolio context already computed by
+  // LitePortfolioService for top-50 holders; null for ranks 51-100 by design.
+  const portfolioUsd =
+    holder?.portfolio &&
+    typeof holder.portfolio.totalPortfolioUsd === 'number' &&
+    Number.isFinite(holder.portfolio.totalPortfolioUsd)
+      ? (holder.portfolio.totalPortfolioUsd as number)
+      : null;
+
+  const trackedTokenWeight =
+    holder?.portfolio &&
+    typeof holder.portfolio.trackedTokenWeight === 'number' &&
+    Number.isFinite(holder.portfolio.trackedTokenWeight)
+      ? (holder.portfolio.trackedTokenWeight as number)
       : null;
 
   return {
@@ -602,7 +623,8 @@ function buildHolderTableRow(
     walletLabel,
     teamLinked,
     portfolioRisk,
-    lastActiveDays,
+    portfolioUsd,
+    trackedTokenWeight,
   };
 }
 
