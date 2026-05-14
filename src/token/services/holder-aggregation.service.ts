@@ -17,6 +17,9 @@ export interface AnalyzedHolder {
   tokenPrice: number;
   walletLabel: HolderLabel;
   walletLabelDetail?: string | null;
+  // Etherscan-resolved contract name surfaced for `generic_contract` holders
+  // (e.g. "GnosisSafeProxy", "ERC1967Proxy"). Null for every other label.
+  knownLabel: string | null;
   isTeamLinked: boolean;
   teamConnectionPath?: string | null;
   labelConfidence: number;
