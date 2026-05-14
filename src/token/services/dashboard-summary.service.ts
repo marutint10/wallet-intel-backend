@@ -44,6 +44,9 @@ export interface HolderQualityBreakdown {
 // FIX 1: dropped `lastActiveDays` (always null in practice) and surfaced wallet-level
 // portfolio context (`portfolioUsd`, `trackedTokenWeight`) that LitePortfolioService
 // already computes for top-50 holders but was not being passed through to the dashboard.
+// CHANGE 2: added `knownLabel` to expose the Etherscan-resolved contract name for
+// `generic_contract` rows so the UI can show "GnosisSafeProxy" / "ERC1967Proxy"
+// instead of an opaque "generic_contract" cell.
 export interface HolderTableRow {
   rank: number;
   walletAddress: string;
@@ -58,6 +61,7 @@ export interface HolderTableRow {
   portfolioRisk: string | null;
   portfolioUsd: number | null;
   trackedTokenWeight: number | null;
+  knownLabel: string | null;
 }
 
 export interface DistributionSummary {
@@ -117,6 +121,8 @@ export interface RawHolder {
   balance?: unknown;
   usdValue?: unknown;
   walletLabel?: unknown;
+  walletLabelDetail?: unknown;
+  knownLabel?: unknown;
   isTeamLinked?: unknown;
   classification?: {
     primaryType?: unknown;
@@ -611,6 +617,19 @@ function buildHolderTableRow(
       ? (holder.portfolio.trackedTokenWeight as number)
       : null;
 
+  // CHANGE 2: surface the Etherscan-resolved contract name only for
+  // `generic_contract` rows. Prefer a dedicated `knownLabel` field on the
+  // raw holder if it ever gets persisted (forward-compatible), otherwise
+  // fall back to `walletLabelDetail` which is where TokenIntelligenceService
+  // currently writes the resolved name for generic_contract wallets. Other
+  // labels keep `knownLabel: null` so we never conflate it with exchange /
+  // router / vesting detail strings.
+  const knownLabel =
+    walletLabel === 'generic_contract'
+      ? coerceContractName(holder?.knownLabel) ??
+        coerceContractName(holder?.walletLabelDetail)
+      : null;
+
   return {
     rank,
     walletAddress,
@@ -625,7 +644,17 @@ function buildHolderTableRow(
     portfolioRisk,
     portfolioUsd,
     trackedTokenWeight,
+    knownLabel,
   };
+}
+
+function coerceContractName(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 // -----------------------------
