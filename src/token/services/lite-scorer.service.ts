@@ -30,8 +30,11 @@ export class LiteScorerService {
     features: LiteFeatureVector,
     pnlMetrics: WalletPnlMetrics | null = null,
   ): LiteScore {
-    // Gate: not enough data. matchedLotCount is no longer part of the gate so
-    // that FAST_MODE wallets (no FIFO) still get a real score.
+    // FIX 2: gated wallets keep `score: 0` internally to preserve the
+    // `LiteScore.score: number` contract that HolderAggregationService relies on,
+    // but `band: 'Insufficient Data'` is the canonical "not scored" signal that
+    // DashboardSummaryService translates into `null` in the API response.
+    // Treat 0 here as a sentinel, not a real score.
     if (features.swapCount < 3) {
       return {
         score: 0,
@@ -55,17 +58,35 @@ export class LiteScorerService {
     const activity = this.scoreActivity(features);
     const profitability = this.scoreProfitability(pnlMetrics);
 
-    // Profitability is an OPTIONAL dimension. When PnL is unavailable we
-    // proportionally redistribute its weight across the remaining five
-    // dimensions so that a wallet with no historical pricing still hits the
-    // full 0-100 range. Final-score confidence is NOT reduced for missing PnL.
-    const rawTotal =
-      consistency + riskManagement + portfolioQuality + experience + activity;
-    const maxRawTotal = features.holdingCategoryMix ? 165 : 90;
-    const score =
-      profitability > 0
-        ? Math.round((rawTotal / maxRawTotal) * 70 + profitability)
-        : Math.round((rawTotal / maxRawTotal) * 100);
+    // FIX 3: when profitability is unavailable (FAST_MODE / no PnL) we boost
+    // experience (1.5x) and portfolioQuality (1.3x) so that long-tenured,
+    // bluechip-holding conviction wallets like Diamond Hands score in the
+    // 55-70 range instead of ~21 under the old flat redistribution. With
+    // profitability present we keep the original 70/30 split unchanged.
+    let score: number;
+    if (profitability > 0) {
+      const rawTotal =
+        consistency + riskManagement + portfolioQuality + experience + activity;
+      const maxRawTotal = features.holdingCategoryMix ? 165 : 90;
+      score = Math.round((rawTotal / maxRawTotal) * 70 + profitability);
+    } else {
+      const boostedExperience = experience * 1.5;
+      const boostedPortfolioQuality = portfolioQuality * 1.3;
+      const rawTotal =
+        consistency +
+        riskManagement +
+        boostedPortfolioQuality +
+        boostedExperience +
+        activity;
+      const maxPortfolioQuality = features.holdingCategoryMix ? 100 : 25;
+      const maxRawTotal =
+        20 /* consistency */ +
+        20 /* riskManagement */ +
+        maxPortfolioQuality * 1.3 +
+        15 * 1.5 /* experience */ +
+        10 /* activity */;
+      score = Math.round((rawTotal / maxRawTotal) * 100);
+    }
     const clampedScore = Math.min(100, Math.max(0, score));
 
     const band =
