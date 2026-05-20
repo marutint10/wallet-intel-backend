@@ -51,6 +51,22 @@ export interface HolderQualityBreakdown {
   dormant: number;
 }
 
+/** Raw EOA archetype counts from persisted qualityMetrics. */
+export interface BehavioralBreakdownCounts {
+  convictionHolders: number;
+  diamondHands: number;
+  activeTraders: number;
+  riskDegen: number;
+  bots: number;
+  dormant: number;
+}
+
+/** Behavioral % and counts resolved from qualityMetrics (supports legacy rows). */
+export interface ResolvedQualityBreakdown {
+  pct: BehavioralBreakdownCounts;
+  counts: BehavioralBreakdownCounts;
+}
+
 // FIX 1: dropped `lastActiveDays` (always null in practice) and surfaced wallet-level
 // portfolio context (`portfolioUsd`, `trackedTokenWeight`) that LitePortfolioService
 // already computes for top-50 holders but was not being passed through to the dashboard.
@@ -178,7 +194,7 @@ export class DashboardSummaryService {
     const holderQualityBreakdown = computeHolderQualityBreakdown(rawHolders);
     const distributionSummary = buildDistributionSummary(distribution);
 
-    const breakdown = (quality.breakdown ?? {}) as Record<string, unknown>;
+    const resolvedBreakdown = resolveQualityBreakdown(quality);
     const pnlAggregation = (quality.pnlAggregation ?? {}) as Record<
       string,
       unknown
@@ -211,9 +227,9 @@ export class DashboardSummaryService {
       holderQualityBreakdown.convictionHolders +
       holderQualityBreakdown.diamondHands +
       holderQualityBreakdown.accumulators;
-    const activeTraderPct = safeNumber(breakdown.activeTraders);
-    const degenPct = safeNumber(breakdown.riskDegen);
-    const botPct = safeNumber(breakdown.bots);
+    const activeTraderPct = resolvedBreakdown.pct.activeTraders;
+    const degenPct = resolvedBreakdown.pct.riskDegen;
+    const botPct = resolvedBreakdown.pct.bots;
 
     const teamPctOfSupply = safeNumber(
       (teamDetection ?? {}).teamTotalPctOfSupply,
@@ -339,6 +355,72 @@ function parseTotalSupply(value: unknown): number | null {
 
 function parseSupplyString(value: unknown): number | null {
   return safeNumberOrNull(value);
+}
+
+const BEHAVIORAL_BREAKDOWN_KEYS = [
+  'convictionHolders',
+  'diamondHands',
+  'activeTraders',
+  'riskDegen',
+  'bots',
+  'dormant',
+] as const;
+
+function readBehavioralBreakdownRecord(
+  source: Record<string, unknown> | null | undefined,
+): BehavioralBreakdownCounts {
+  const safe = source ?? {};
+  return {
+    convictionHolders: safeNumber(safe.convictionHolders),
+    diamondHands: safeNumber(safe.diamondHands),
+    activeTraders: safeNumber(safe.activeTraders),
+    riskDegen: safeNumber(safe.riskDegen),
+    bots: safeNumber(safe.bots),
+    dormant: safeNumber(safe.dormant),
+  };
+}
+
+/**
+ * qualityMetrics.breakdown behavioral keys are percentages; breakdown.counts are raw EOA counts.
+ * Legacy rows may only expose top-level breakdown (treated as %) or a deprecated breakdownCounts field.
+ */
+export function resolveQualityBreakdown(
+  quality: Record<string, unknown>,
+): ResolvedQualityBreakdown {
+  const breakdown = (quality.breakdown ?? {}) as Record<string, unknown>;
+  const legacyCounts = (quality.breakdownCounts ?? {}) as Record<string, unknown>;
+  const nestedCounts = (breakdown.counts ?? {}) as Record<string, unknown>;
+
+  const counts = readBehavioralBreakdownRecord(
+    Object.keys(nestedCounts).length > 0 ? nestedCounts : legacyCounts,
+  );
+
+  const pct = readBehavioralBreakdownRecord(breakdown);
+  const countsTotal =
+    counts.convictionHolders +
+    counts.diamondHands +
+    counts.activeTraders +
+    counts.riskDegen +
+    counts.bots +
+    counts.dormant;
+
+  // Legacy cached rows stored counts at the top level of breakdown (values sum to ~78, not 100).
+  const pctLooksLikeCounts =
+    countsTotal > 0 &&
+    BEHAVIORAL_BREAKDOWN_KEYS.every((key) => pct[key] <= countsTotal);
+
+  const resolvedPct = pctLooksLikeCounts
+    ? {
+        convictionHolders: Math.round((counts.convictionHolders / countsTotal) * 100),
+        diamondHands: Math.round((counts.diamondHands / countsTotal) * 100),
+        activeTraders: Math.round((counts.activeTraders / countsTotal) * 100),
+        riskDegen: Math.round((counts.riskDegen / countsTotal) * 100),
+        bots: Math.round((counts.bots / countsTotal) * 100),
+        dormant: Math.round((counts.dormant / countsTotal) * 100),
+      }
+    : pct;
+
+  return { pct: resolvedPct, counts };
 }
 
 export interface SupplyForPercent {
