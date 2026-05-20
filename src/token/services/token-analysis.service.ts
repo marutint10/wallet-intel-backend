@@ -191,6 +191,17 @@ export class TokenAnalysisService {
         `Risk: ${teamDetection.riskLevel}`,
     );
 
+    const stakingRelatedContracts = this.detectStakingRelatedContracts(
+      enrichedHolders,
+      classifications,
+      tokenMetadata.symbol,
+    );
+    if (stakingRelatedContracts.size > 0) {
+      this.logger.log(
+        `Staking-related contracts detected for ${tokenMetadata.symbol ?? 'token'}: ${stakingRelatedContracts.size}`,
+      );
+    }
+
     // ========== PHASE 3: Batch Analysis Loop ==========
     const analyzedHolders: AnalyzedHolder[] = [];
 
@@ -207,6 +218,8 @@ export class TokenAnalysisService {
             holder.usdValue,
             chain,
             filter?.label,
+            stakingRelatedContracts,
+            tokenMetadata.symbol,
           );
 
           if (filter && !filter.shouldAnalyze) {
@@ -447,6 +460,39 @@ export class TokenAnalysisService {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  private detectStakingRelatedContracts(
+    holders: Array<{ walletAddress: string }>,
+    classifications: Awaited<
+      ReturnType<TokenIntelligenceService['classifyHolders']>
+    >['classifications'],
+    tokenSymbol: string | null | undefined,
+  ): Set<string> {
+    const stakingRelatedContracts = new Set<string>();
+    const symbolLower = (tokenSymbol ?? '').trim().toLowerCase();
+    if (!symbolLower) {
+      return stakingRelatedContracts;
+    }
+
+    for (const holder of holders) {
+      const filter = classifications.get(holder.walletAddress.toLowerCase());
+      if (filter?.label !== 'generic_contract') {
+        continue;
+      }
+
+      const knownLabel = (filter.knownLabel ?? '').toLowerCase();
+      if (
+        knownLabel.includes(symbolLower) ||
+        knownLabel.includes('stake') ||
+        knownLabel.includes('silo') ||
+        knownLabel.includes('vault')
+      ) {
+        stakingRelatedContracts.add(holder.walletAddress.toLowerCase());
+      }
+    }
+
+    return stakingRelatedContracts;
+  }
+
   private async fetchHolderPortfolioContext(
     walletAddress: string,
     rank: number,
@@ -454,6 +500,8 @@ export class TokenAnalysisService {
     trackedTokenUsdValue: number,
     chain: string,
     holderLabel?: string,
+    stakingRelatedContracts: ReadonlySet<string> = new Set(),
+    trackedTokenSymbol?: string | null,
   ): Promise<HoldingsProfile | null> {
     if (holderLabel === 'exchange' || holderLabel === 'cex_deposit') {
       return null;
@@ -469,6 +517,8 @@ export class TokenAnalysisService {
         trackedTokenAddress,
         trackedTokenUsdValue,
         chain,
+        stakingRelatedContracts,
+        trackedTokenSymbol,
       );
     } catch (err: unknown) {
       this.logger.warn(

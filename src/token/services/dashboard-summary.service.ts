@@ -47,7 +47,8 @@ export interface HolderQualityBreakdown {
   dayTraders: number;
   degens: number;
   bots: number;
-  unclassified: number;
+  convictionHolders: number;
+  dormant: number;
 }
 
 // FIX 1: dropped `lastActiveDays` (always null in practice) and surfaced wallet-level
@@ -62,6 +63,7 @@ export interface HolderTableRow {
   shortAddress: string;
   balanceUsd: number;
   percentSupply: number;
+  percentSupplyBasis: 'circulating' | 'total';
   classification: string | null;
   confidence: string | null;
   score: number | null;
@@ -88,6 +90,7 @@ export interface DashboardSummaryResponse {
     tokenName?: string | null;
     tokenSymbol?: string | null;
     tokenPriceUsd?: number | null;
+    circulatingSupply?: string | null;
   };
 
   /** Plain-text analyst summary from Gemini, or null if generation was skipped or failed without fallback. */
@@ -164,9 +167,14 @@ export class DashboardSummaryService {
       : [];
 
     const tokenPriceUsd = safeNumberOrNull(quality.tokenPriceUsd);
+    const circulatingSupply = parseSupplyString(quality.circulatingSupply);
     const totalSupplyFormatted = parseTotalSupply(quality.totalSupply);
+    const supplyForPercent = resolveSupplyForPercent(
+      circulatingSupply,
+      totalSupplyFormatted,
+    );
 
-    const holderTableRows = buildHolderTableRows(rawHolders, totalSupplyFormatted);
+    const holderTableRows = buildHolderTableRows(rawHolders, supplyForPercent);
     const holderQualityBreakdown = computeHolderQualityBreakdown(rawHolders);
     const distributionSummary = buildDistributionSummary(distribution);
 
@@ -186,8 +194,12 @@ export class DashboardSummaryService {
 
     const totalAnalyzedEOAs = safeNumber(quality.totalAnalyzedEOAs);
     const smartMoneyCount = safeNumber(pnlAggregation.smartMoneyCount);
+    const portfolioSmartMoneyCount = safeNumber(
+      pnlAggregation.portfolioSmartMoneyCount,
+    );
     const smartMoneyPct = computeSmartMoneyPct(
       smartMoneyCount,
+      portfolioSmartMoneyCount,
       totalAnalyzedEOAs,
       rawHolders,
     );
@@ -195,7 +207,10 @@ export class DashboardSummaryService {
     const avgScoreRaw = safeNumberOrNull(quality.avgScore);
     const qualityLabel = safeString(quality.qualityLabel, 'Unknown');
 
-    const convictionPct = safeNumber(breakdown.convictionHolders);
+    const convictionPct =
+      holderQualityBreakdown.convictionHolders +
+      holderQualityBreakdown.diamondHands +
+      holderQualityBreakdown.accumulators;
     const activeTraderPct = safeNumber(breakdown.activeTraders);
     const degenPct = safeNumber(breakdown.riskDegen);
     const botPct = safeNumber(breakdown.bots);
@@ -226,6 +241,7 @@ export class DashboardSummaryService {
         tokenName: analysis.tokenName ?? null,
         tokenSymbol: analysis.tokenSymbol ?? null,
         tokenPriceUsd,
+        circulatingSupply: circulatingSupply !== null ? String(circulatingSupply) : null,
       },
       aiSummary: null,
       summaryCards,
@@ -318,11 +334,31 @@ function roundTo(value: number, digits: number): number {
 }
 
 function parseTotalSupply(value: unknown): number | null {
-  // qualityMetrics.totalSupply may be a decimal-formatted string ("1234.567")
-  // or null. We deliberately do not parse scientific-notation BigInt strings
-  // here; if the value cannot be coerced cleanly we fall back to null and
-  // percentSupply degrades to 0 on the table rows.
+  return parseSupplyString(value);
+}
+
+function parseSupplyString(value: unknown): number | null {
   return safeNumberOrNull(value);
+}
+
+export interface SupplyForPercent {
+  supply: number | null;
+  basis: 'circulating' | 'total';
+}
+
+export function resolveSupplyForPercent(
+  circulatingSupply: number | null,
+  totalSupply: number | null,
+): SupplyForPercent {
+  if (circulatingSupply !== null && circulatingSupply > 0) {
+    return { supply: circulatingSupply, basis: 'circulating' };
+  }
+
+  if (totalSupply !== null && totalSupply > 0) {
+    return { supply: totalSupply, basis: 'total' };
+  }
+
+  return { supply: null, basis: 'total' };
 }
 
 function formatUsd(value: number): string {
@@ -442,18 +478,19 @@ export function computeHolderQualityBreakdown(
     dayTraders: 0,
     degens: 0,
     bots: 0,
-    unclassified: 0,
+    convictionHolders: 0,
+    dormant: 0,
   };
 
   if (!Array.isArray(holders) || holders.length === 0) {
     return empty;
   }
 
-  // Mirror HolderAggregationService: only EOA wallets are eligible for
-  // behavioral classification. Non-EOAs (exchanges, contracts, burn) are
-  // excluded so the breakdown reflects actual retail behavior.
+  // Mirror HolderAggregationService: only behavioral EOAs are eligible.
   const eoaHolders = holders.filter(
-    (holder) => holder && holder.walletLabel === 'eoa',
+    (holder) =>
+      holder &&
+      (holder.walletLabel === 'eoa' || holder.walletLabel === 'team_connected'),
   );
 
   if (eoaHolders.length === 0) {
@@ -467,7 +504,8 @@ export function computeHolderQualityBreakdown(
     dayTraders: 0,
     degens: 0,
     bots: 0,
-    unclassified: 0,
+    convictionHolders: 0,
+    dormant: 0,
   };
 
   for (const holder of eoaHolders) {
@@ -475,11 +513,6 @@ export function computeHolderQualityBreakdown(
       holder?.classification && typeof holder.classification.primaryType === 'string'
         ? (holder.classification.primaryType as string)
         : null;
-
-    if (isUnclassifiedHolderType(primaryType)) {
-      buckets.unclassified += 1;
-      continue;
-    }
 
     switch (primaryType) {
       case 'Diamond Hand':
@@ -501,23 +534,97 @@ export function computeHolderQualityBreakdown(
       case 'Bot / Automated':
         buckets.bots += 1;
         break;
+      case 'Conviction Holder':
+      case 'Diversified Whale':
+      case 'Strategic Allocator':
+        buckets.convictionHolders += 1;
+        break;
+      case 'Dormant Wallet':
+        buckets.dormant += 1;
+        break;
       default:
-        buckets.unclassified += 1;
+        buckets.dormant += 1;
         break;
     }
   }
 
   const total = eoaHolders.length;
-  const pct = (n: number): number => Math.round((n / total) * 100);
+  const rawPct = {
+    diamondHands: buckets.diamondHands,
+    accumulators: buckets.accumulators,
+    swingTraders: buckets.swingTraders,
+    dayTraders: buckets.dayTraders,
+    degens: buckets.degens,
+    bots: buckets.bots,
+    convictionHolders: buckets.convictionHolders,
+    dormant: buckets.dormant,
+  };
+
+  return distributeDashboardBreakdownPercentages(rawPct, total);
+}
+
+function distributeDashboardBreakdownPercentages(
+  counts: {
+    diamondHands: number;
+    accumulators: number;
+    swingTraders: number;
+    dayTraders: number;
+    degens: number;
+    bots: number;
+    convictionHolders: number;
+    dormant: number;
+  },
+  total: number,
+): HolderQualityBreakdown {
+  if (total <= 0) {
+    return {
+      diamondHands: 0,
+      accumulators: 0,
+      swingTraders: 0,
+      dayTraders: 0,
+      degens: 0,
+      bots: 0,
+      convictionHolders: 0,
+      dormant: 0,
+    };
+  }
+
+  const keys = [
+    'diamondHands',
+    'accumulators',
+    'swingTraders',
+    'dayTraders',
+    'degens',
+    'bots',
+    'convictionHolders',
+    'dormant',
+  ] as const;
+
+  const allocated = keys.map((key) => {
+    const exact = (counts[key] / total) * 100;
+    return {
+      key,
+      pct: Math.floor(exact),
+      remainder: exact - Math.floor(exact),
+    };
+  });
+
+  let leftover = 100 - allocated.reduce((sum, entry) => sum + entry.pct, 0);
+  allocated.sort((left, right) => right.remainder - left.remainder);
+  for (let index = 0; leftover > 0; index += 1) {
+    allocated[index % allocated.length].pct += 1;
+    leftover -= 1;
+  }
 
   return {
-    diamondHands: pct(buckets.diamondHands),
-    accumulators: pct(buckets.accumulators),
-    swingTraders: pct(buckets.swingTraders),
-    dayTraders: pct(buckets.dayTraders),
-    degens: pct(buckets.degens),
-    bots: pct(buckets.bots),
-    unclassified: pct(buckets.unclassified),
+    diamondHands: allocated.find((entry) => entry.key === 'diamondHands')!.pct,
+    accumulators: allocated.find((entry) => entry.key === 'accumulators')!.pct,
+    swingTraders: allocated.find((entry) => entry.key === 'swingTraders')!.pct,
+    dayTraders: allocated.find((entry) => entry.key === 'dayTraders')!.pct,
+    degens: allocated.find((entry) => entry.key === 'degens')!.pct,
+    bots: allocated.find((entry) => entry.key === 'bots')!.pct,
+    convictionHolders: allocated.find((entry) => entry.key === 'convictionHolders')!.pct,
+    dormant: allocated.find((entry) => entry.key === 'dormant')!.pct,
   };
 }
 
@@ -549,7 +656,7 @@ export function buildDistributionSummary(
 
 function buildHolderTableRows(
   holders: RawHolder[],
-  totalSupplyFormatted: number | null,
+  supplyForPercent: SupplyForPercent,
 ): HolderTableRow[] {
   if (!Array.isArray(holders) || holders.length === 0) {
     return [];
@@ -558,7 +665,7 @@ function buildHolderTableRows(
   // Frontend pagination handles rendering. We intentionally include ALL
   // analyzed holders here - no hardcoded 100-holder cap.
   const rows: HolderTableRow[] = holders.map((holder) =>
-    buildHolderTableRow(holder, totalSupplyFormatted),
+    buildHolderTableRow(holder, supplyForPercent),
   );
 
   rows.sort((a, b) => a.rank - b.rank);
@@ -567,7 +674,7 @@ function buildHolderTableRows(
 
 function buildHolderTableRow(
   holder: RawHolder,
-  totalSupplyFormatted: number | null,
+  supplyForPercent: SupplyForPercent,
 ): HolderTableRow {
   const walletAddress =
     typeof holder?.walletAddress === 'string' ? holder.walletAddress : '';
@@ -575,9 +682,10 @@ function buildHolderTableRow(
   const balanceUsd = safeNumber(holder?.usdValue, 0);
   const balanceNum = safeNumber(holder?.balance, 0);
 
+  const supply = supplyForPercent.supply;
   const percentSupply =
-    totalSupplyFormatted !== null && totalSupplyFormatted > 0 && balanceNum > 0
-      ? roundTo((balanceNum / totalSupplyFormatted) * 100, 4)
+    supply !== null && supply > 0 && balanceNum > 0
+      ? roundTo((balanceNum / supply) * 100, 4)
       : 0;
 
   const classification =
@@ -647,6 +755,7 @@ function buildHolderTableRow(
     shortAddress: shortenAddress(walletAddress),
     balanceUsd,
     percentSupply,
+    percentSupplyBasis: supplyForPercent.basis,
     classification,
     confidence,
     score,
@@ -674,11 +783,16 @@ function coerceContractName(value: unknown): string | null {
 
 export function computeSmartMoneyPct(
   smartMoneyCount: number,
+  portfolioSmartMoneyCount: number,
   totalAnalyzedEOAs: number,
   holders: RawHolder[],
 ): number {
   if (smartMoneyCount > 0 && totalAnalyzedEOAs > 0) {
     return Math.round((smartMoneyCount / totalAnalyzedEOAs) * 100);
+  }
+
+  if (portfolioSmartMoneyCount > 0 && totalAnalyzedEOAs > 0) {
+    return Math.round((portfolioSmartMoneyCount / totalAnalyzedEOAs) * 100);
   }
 
   // FAST_MODE fallback: no PnL data is computed, so smart money is derived

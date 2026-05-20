@@ -30,7 +30,8 @@ export interface TokenSummaryInput {
   activeTraderPct: number;
   degenPct: number;
   botPct: number;
-  unclassifiedPct: number;
+  dormantPct: number;
+  convictionHolderArchetypePct: number;
 
   decentralizationScore: number;
   giniCoefficient: number;
@@ -386,8 +387,12 @@ export class TokenDeepAnalysisService {
 
     const totalAnalyzedEOAs = safeNumber(quality.totalAnalyzedEOAs);
     const smartMoneyCount = safeNumber(pnlAggregation.smartMoneyCount);
+    const portfolioSmartMoneyCount = safeNumber(
+      pnlAggregation.portfolioSmartMoneyCount,
+    );
     const smartMoneyPct = computeSmartMoneyPct(
       smartMoneyCount,
+      portfolioSmartMoneyCount,
       totalAnalyzedEOAs,
       rawHolders,
     );
@@ -417,11 +422,15 @@ export class TokenDeepAnalysisService {
       avgHolderScore,
       qualityLabel: safeString(quality.qualityLabel, 'Unknown'),
       totalAnalyzedHolders,
-      convictionPct: safeNumber(breakdown.convictionHolders),
+      convictionPct:
+        holderQualityBreakdown.convictionHolders +
+        holderQualityBreakdown.diamondHands +
+        holderQualityBreakdown.accumulators,
       activeTraderPct: safeNumber(breakdown.activeTraders),
       degenPct: safeNumber(breakdown.riskDegen),
       botPct: safeNumber(breakdown.bots),
-      unclassifiedPct: holderQualityBreakdown.unclassified,
+      dormantPct: holderQualityBreakdown.dormant,
+      convictionHolderArchetypePct: holderQualityBreakdown.convictionHolders,
       decentralizationScore: distributionSummary.decentralizationScore,
       giniCoefficient: distributionSummary.giniCoefficient,
       top10Pct: distributionSummary.top10Pct,
@@ -550,7 +559,8 @@ Smart Money Wallets: ${input.smartMoneyPct}%
 Conviction Holders (Diamond Hands/HODLers): ${input.convictionPct}%
 Active Traders (Swing/Day): ${input.activeTraderPct}%
 Degen/High-Risk Holders: ${input.degenPct}%
-Unclassified Holders: ${input.unclassifiedPct}%
+Passive Conviction Holders: ${input.convictionHolderArchetypePct}%
+Dormant / No Profile Holders: ${input.dormantPct}%
 Risk Signals: ${input.riskSignals.join(', ') || 'None detected'}
 Positive Signals: ${input.positiveSignals.join(', ') || 'None detected'}
 

@@ -28,7 +28,8 @@ export interface TokenSummaryInput {
   activeTraderPct: number;
   degenPct: number;
   botPct: number;
-  unclassifiedPct: number;
+  dormantPct: number;
+  convictionHolderArchetypePct: number;
 
   decentralizationScore: number;
   giniCoefficient: number;
@@ -184,8 +185,12 @@ export class TokenAiSummaryService {
 
     const totalAnalyzedEOAs = safeNumber(quality.totalAnalyzedEOAs);
     const smartMoneyCount = safeNumber(pnlAggregation.smartMoneyCount);
+    const portfolioSmartMoneyCount = safeNumber(
+      pnlAggregation.portfolioSmartMoneyCount,
+    );
     const smartMoneyPct = computeSmartMoneyPct(
       smartMoneyCount,
+      portfolioSmartMoneyCount,
       totalAnalyzedEOAs,
       rawHolders,
     );
@@ -214,11 +219,15 @@ export class TokenAiSummaryService {
       avgHolderScore,
       qualityLabel: safeString(quality.qualityLabel, 'Unknown'),
       totalAnalyzedHolders,
-      convictionPct: safeNumber(breakdown.convictionHolders),
+      convictionPct:
+        holderQualityBreakdown.convictionHolders +
+        holderQualityBreakdown.diamondHands +
+        holderQualityBreakdown.accumulators,
       activeTraderPct: safeNumber(breakdown.activeTraders),
       degenPct: safeNumber(breakdown.riskDegen),
       botPct: safeNumber(breakdown.bots),
-      unclassifiedPct: holderQualityBreakdown.unclassified,
+      dormantPct: holderQualityBreakdown.dormant,
+      convictionHolderArchetypePct: holderQualityBreakdown.convictionHolders,
       decentralizationScore: distributionSummary.decentralizationScore,
       giniCoefficient: distributionSummary.giniCoefficient,
       top10Pct: distributionSummary.top10Pct,
@@ -274,7 +283,8 @@ COMMUNITY COMPOSITION
 - Active Traders (Swing / Day): ${input.activeTraderPct}%
 - Degen / High-Risk: ${input.degenPct}%
 - Bots / Automated: ${input.botPct}%
-- Unclassified (insufficient swap history): ${input.unclassifiedPct}%
+- Passive conviction holders (Conviction Holder / Whale / Allocator): ${input.convictionHolderArchetypePct}%
+- Dormant / no profile (insufficient swap history): ${input.dormantPct}%
 
 SUPPLY DISTRIBUTION
 - Decentralization Score: ${input.decentralizationScore}/100

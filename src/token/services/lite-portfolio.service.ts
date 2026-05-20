@@ -73,6 +73,8 @@ export class LitePortfolioService {
     trackedTokenAddress: string,
     trackedTokenUsdValue: number,
     chain: string,
+    stakingRelatedContracts: ReadonlySet<string> = new Set(),
+    trackedTokenSymbol?: string | null,
   ): Promise<PortfolioContext | null> {
     try {
       const balances = await this.ingestion.getTokenBalances(walletAddress, chain);
@@ -183,13 +185,21 @@ export class LitePortfolioService {
         });
       }
 
+      const trackedTokenEcosystemUsd = this.computeTrackedTokenEcosystemUsd(
+        holdings,
+        normalizedTrackedToken,
+        trackedTokenUsdValue,
+        trackedTokenSymbol,
+        stakingRelatedContracts,
+      );
+
       const otherTotal = holdings
         .filter((holding) => holding.contractAddress !== normalizedTrackedToken)
         .reduce((sum, holding) => sum + holding.usdValue, 0);
       const totalPortfolioUsd = otherTotal + trackedTokenUsdValue;
       const trackedTokenWeight =
         totalPortfolioUsd > 0
-          ? Math.round((trackedTokenUsdValue / totalPortfolioUsd) * 10000) / 100
+          ? Math.round((trackedTokenEcosystemUsd / totalPortfolioUsd) * 10000) / 100
           : 0;
 
       const categoryTotals = this.emptyCategoryAllocations();
@@ -232,7 +242,7 @@ export class LitePortfolioService {
 
       return {
         totalPortfolioUsd: this.roundUsd(totalPortfolioUsd),
-        trackedTokenUsd: this.roundUsd(trackedTokenUsdValue),
+        trackedTokenUsd: this.roundUsd(trackedTokenEcosystemUsd),
         trackedTokenWeight,
         diversificationScore,
         holdingTokenCount,
@@ -312,6 +322,63 @@ export class LitePortfolioService {
       );
       return null;
     }
+  }
+
+  private computeTrackedTokenEcosystemUsd(
+    holdings: Array<{
+      contractAddress: string;
+      symbol: string;
+      usdValue: number;
+    }>,
+    normalizedTrackedToken: string,
+    trackedTokenUsdValue: number,
+    trackedTokenSymbol: string | null | undefined,
+    stakingRelatedContracts: ReadonlySet<string>,
+  ): number {
+    const symbolLower = (trackedTokenSymbol ?? '').trim().toLowerCase();
+    let ecosystemUsd = 0;
+    let hasDirectTrackedHolding = false;
+
+    for (const holding of holdings) {
+      const address = holding.contractAddress.toLowerCase();
+      const isDirectTracked = address === normalizedTrackedToken;
+      const isStakingContract = stakingRelatedContracts.has(address);
+      const isDerivative =
+        symbolLower.length > 0 &&
+        this.isTrackedTokenDerivative(
+          holding.symbol?.toLowerCase() ?? '',
+          symbolLower,
+        );
+
+      if (isDirectTracked || isStakingContract || isDerivative) {
+        ecosystemUsd += holding.usdValue;
+        if (isDirectTracked) {
+          hasDirectTrackedHolding = true;
+        }
+      }
+    }
+
+    if (!hasDirectTrackedHolding && trackedTokenUsdValue > 0) {
+      ecosystemUsd += trackedTokenUsdValue;
+    }
+
+    return ecosystemUsd > 0 ? ecosystemUsd : trackedTokenUsdValue;
+  }
+
+  private isTrackedTokenDerivative(
+    holdingSymbol: string,
+    trackedSymbol: string,
+  ): boolean {
+    if (!holdingSymbol || !trackedSymbol) {
+      return false;
+    }
+
+    return (
+      holdingSymbol === `st${trackedSymbol}` ||
+      holdingSymbol === `w${trackedSymbol}` ||
+      holdingSymbol === `${trackedSymbol}.e` ||
+      holdingSymbol === `${trackedSymbol}x`
+    );
   }
 
   private roundUsd(value: number): number {

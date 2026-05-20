@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { LiteClassification } from './lite-classifier.service';
 import { LiteScore } from './lite-scorer.service';
 import type { PortfolioContext } from './lite-portfolio.service';
@@ -50,15 +50,25 @@ export interface HolderQualityMetrics {
   qualityLabel: string;
   breakdown: {
     convictionHolders: number;
+    diamondHands: number;
     activeTraders: number;
     riskDegen: number;
     bots: number;
-    unclassified: number;
+    dormant: number;
     exchanges: number;
     contractsPools: number;
     teamConnected: number;
     burnDead: number;
     vestingLocked: number;
+  };
+  /** Raw EOA archetype counts; sums to totalAnalyzedEOAs. */
+  breakdownCounts: {
+    convictionHolders: number;
+    diamondHands: number;
+    activeTraders: number;
+    riskDegen: number;
+    bots: number;
+    dormant: number;
   };
   topHolderAvgScore: number;
   pnlAggregation: HolderPnlAggregation;
@@ -66,7 +76,12 @@ export interface HolderQualityMetrics {
 }
 
 export interface CategoryConcentration {
-  eoaHolders: { count: number; pctOfSupply: number; avgScore: number | null };
+  eoaHolders: {
+    count: number;
+    pctOfSupply: number;
+    avgScore: number | null;
+    scoredCount: number;
+  };
   teamLinked: { count: number; pctOfSupply: number; avgConfidence: number };
   exchanges: { count: number; pctOfSupply: number };
   contractsAndPools: { count: number; pctOfSupply: number };
@@ -82,6 +97,77 @@ export interface HolderPnlAggregation {
   holdersInProfit: number;
   holdersAtLoss: number;
   smartMoneyCount: number;
+  portfolioSmartMoneyCount: number;
+}
+
+function isUnclassifiedHolderType(primaryType: string | null | undefined): boolean {
+  return (
+    !primaryType ||
+    primaryType === 'Insufficient Data' ||
+    primaryType === 'Dormant Wallet'
+  );
+}
+
+function isBehavioralEoaHolder(holder: AnalyzedHolder): boolean {
+  return holder.walletLabel === 'eoa' || holder.walletLabel === 'team_connected';
+}
+
+/** Largest-remainder allocation so rounded behavioral % sum to 100. */
+function distributeBehavioralPercentages(
+  counts: {
+    convictionHolders: number;
+    diamondHands: number;
+    activeTraders: number;
+    riskDegen: number;
+    bots: number;
+    dormant: number;
+  },
+  total: number,
+): typeof counts {
+  if (total <= 0) {
+    return {
+      convictionHolders: 0,
+      diamondHands: 0,
+      activeTraders: 0,
+      riskDegen: 0,
+      bots: 0,
+      dormant: 0,
+    };
+  }
+
+  const keys = [
+    'convictionHolders',
+    'diamondHands',
+    'activeTraders',
+    'riskDegen',
+    'bots',
+    'dormant',
+  ] as const;
+
+  const allocated = keys.map((key) => {
+    const exact = (counts[key] / total) * 100;
+    return {
+      key,
+      pct: Math.floor(exact),
+      remainder: exact - Math.floor(exact),
+    };
+  });
+
+  let leftover = 100 - allocated.reduce((sum, entry) => sum + entry.pct, 0);
+  allocated.sort((left, right) => right.remainder - left.remainder);
+  for (let index = 0; leftover > 0; index += 1) {
+    allocated[index % allocated.length].pct += 1;
+    leftover -= 1;
+  }
+
+  return {
+    convictionHolders: allocated.find((entry) => entry.key === 'convictionHolders')!.pct,
+    diamondHands: allocated.find((entry) => entry.key === 'diamondHands')!.pct,
+    activeTraders: allocated.find((entry) => entry.key === 'activeTraders')!.pct,
+    riskDegen: allocated.find((entry) => entry.key === 'riskDegen')!.pct,
+    bots: allocated.find((entry) => entry.key === 'bots')!.pct,
+    dormant: allocated.find((entry) => entry.key === 'dormant')!.pct,
+  };
 }
 
 export interface HolderDistribution {
@@ -109,6 +195,8 @@ export interface RiskCallout {
 
 @Injectable()
 export class HolderAggregationService {
+  private readonly logger = new Logger(HolderAggregationService.name);
+
   // 1. Compute quality metrics from classification results
   computeQualityMetrics(
     holders: AnalyzedHolder[],
@@ -141,9 +229,7 @@ export class HolderAggregationService {
     const vestingLockedCount = holders.filter(
       (holder) => holder.walletLabel === 'vesting',
     ).length;
-    const analyzedEOAHolders = holders.filter(
-      (holder) => holder.walletLabel === 'eoa',
-    );
+    const analyzedEOAHolders = holders.filter(isBehavioralEoaHolder);
     const totalAnalyzedEOAs = analyzedEOAHolders.length;
     const scoredHolders = analyzedEOAHolders.filter(
       (holder) => typeof holder.score?.score === 'number' && holder.score.score > 0,
@@ -157,45 +243,71 @@ export class HolderAggregationService {
           )
         : 0;
 
-    // Group archetypes into display categories with explicit bot/unclassified split.
-    let convictionCount = 0;
-    let activeTraderCount = 0;
-    let riskDegenCount = 0;
-    let confirmedBotCount = 0;
-    let unclassifiedCount = 0;
+    const breakdownCounts = {
+      convictionHolders: 0,
+      diamondHands: 0,
+      activeTraders: 0,
+      riskDegen: 0,
+      bots: 0,
+      dormant: 0,
+    };
 
     for (const holder of analyzedEOAHolders) {
-      const type = holder.classification?.primaryType;
+      const type = holder.classification?.primaryType ?? null;
 
-      if (
-        !type ||
-        type === 'Insufficient Data' ||
-        type === 'Dormant Wallet'
-      ) {
-        unclassifiedCount += 1;
+      if (holder.classification === null || isUnclassifiedHolderType(type)) {
+        breakdownCounts.dormant += 1;
         continue;
       }
 
-      if (['Diamond Hand', 'Accumulator'].includes(type)) {
-        convictionCount += 1;
-        continue;
+      switch (type) {
+        case 'Diamond Hand':
+          breakdownCounts.diamondHands += 1;
+          break;
+        case 'Conviction Holder':
+        case 'Diversified Whale':
+        case 'Strategic Allocator':
+          breakdownCounts.convictionHolders += 1;
+          break;
+        case 'Swing Trader':
+        case 'Day Trader':
+        case 'Accumulator':
+          breakdownCounts.activeTraders += 1;
+          break;
+        case 'Degen':
+        case 'Paper Hand':
+          breakdownCounts.riskDegen += 1;
+          break;
+        case 'Bot / Automated':
+          breakdownCounts.bots += 1;
+          break;
+        default:
+          breakdownCounts.dormant += 1;
+          break;
       }
-
-      if (['Degen', 'Paper Hand'].includes(type)) {
-        riskDegenCount += 1;
-        continue;
-      }
-
-      if (type === 'Bot / Automated') {
-        confirmedBotCount += 1;
-        continue;
-      }
-
-      activeTraderCount += 1;
     }
 
+    const behavioralBucketTotal =
+      breakdownCounts.convictionHolders +
+      breakdownCounts.diamondHands +
+      breakdownCounts.activeTraders +
+      breakdownCounts.riskDegen +
+      breakdownCounts.bots +
+      breakdownCounts.dormant;
+
+    if (behavioralBucketTotal !== totalAnalyzedEOAs) {
+      this.logger.warn(
+        `EOA breakdown invariant mismatch: ${behavioralBucketTotal} bucketed vs ${totalAnalyzedEOAs} EOAs`,
+      );
+    }
+
+    const behavioralPct = distributeBehavioralPercentages(
+      breakdownCounts,
+      totalAnalyzedEOAs,
+    );
+
     const pct = (value: number): number =>
-      totalAnalyzedEOAs > 0 ? Math.round((value / totalAnalyzedEOAs) * 100) : 0;
+      totalHolders > 0 ? Math.round((value / totalHolders) * 100) : 0;
 
     // Top 10 avg score from holders that have a usable score.
     const top10 = [...scoredHolders]
@@ -211,20 +323,23 @@ export class HolderAggregationService {
           )
         : 0;
 
-    const baseQualityLabel =
-      avgScore >= 70
-        ? 'Strong Community'
-        : avgScore >= 50
-          ? 'Average Community'
-          : avgScore >= 30
-            ? 'Developing Community'
-            : 'Weak Community';
+    const baseQualityLabel = this.computeQualityLabel(
+      avgScore,
+      breakdownCounts.convictionHolders +
+        breakdownCounts.diamondHands +
+        breakdownCounts.activeTraders,
+      breakdownCounts.riskDegen,
+      breakdownCounts.bots,
+      totalAnalyzedEOAs,
+    );
     const qualityLabel =
       scoredHolderCount === 0
         ? 'Insufficient Trading Data'
         : scoredHolderCount < 5
           ? `Limited Data - ${baseQualityLabel}`
           : baseQualityLabel;
+
+    const pnlAggregation = this.computePnlAggregation(analyzedEOAHolders);
 
     return {
       totalAnalyzed: totalAnalyzedEOAs,
@@ -233,34 +348,55 @@ export class HolderAggregationService {
       avgScore,
       qualityLabel,
       breakdown: {
-        convictionHolders: pct(convictionCount),
-        activeTraders: pct(activeTraderCount),
-        riskDegen: pct(riskDegenCount),
-        bots: pct(confirmedBotCount),
-        unclassified: pct(unclassifiedCount),
-        exchanges:
-          totalHolders > 0 ? Math.round((exchangeCount / totalHolders) * 100) : 0,
-        contractsPools:
-          totalHolders > 0
-            ? Math.round((contractPoolCount / totalHolders) * 100)
-            : 0,
-        teamConnected:
-          totalHolders > 0
-            ? Math.round((teamConnectedCount / totalHolders) * 100)
-            : 0,
-        burnDead:
-          totalHolders > 0
-            ? Math.round((burnDeadCount / totalHolders) * 100)
-            : 0,
-        vestingLocked:
-          totalHolders > 0
-            ? Math.round((vestingLockedCount / totalHolders) * 100)
-            : 0,
+        convictionHolders: behavioralPct.convictionHolders,
+        diamondHands: behavioralPct.diamondHands,
+        activeTraders: behavioralPct.activeTraders,
+        riskDegen: behavioralPct.riskDegen,
+        bots: behavioralPct.bots,
+        dormant: behavioralPct.dormant,
+        exchanges: pct(exchangeCount),
+        contractsPools: pct(contractPoolCount),
+        teamConnected: pct(teamConnectedCount),
+        burnDead: pct(burnDeadCount),
+        vestingLocked: pct(vestingLockedCount),
       },
+      breakdownCounts,
       topHolderAvgScore,
-      pnlAggregation: this.computePnlAggregation(holders),
+      pnlAggregation,
       categoryConcentration,
     };
+  }
+
+  private computeQualityLabel(
+    avgScore: number,
+    loyaltyHolderCount: number,
+    riskDegenCount: number,
+    confirmedBotCount: number,
+    totalAnalyzedEOAs: number,
+  ): string {
+    if (totalAnalyzedEOAs <= 0) {
+      return 'Weak Community';
+    }
+
+    const convictionPct = (loyaltyHolderCount / totalAnalyzedEOAs) * 100;
+    const degenRiskPct =
+      ((riskDegenCount + confirmedBotCount) / totalAnalyzedEOAs) * 100;
+
+    const effectiveScore =
+      avgScore +
+      (convictionPct > 40 ? 8 : convictionPct > 25 ? 4 : 0) -
+      (degenRiskPct > 30 ? 8 : degenRiskPct > 15 ? 4 : 0);
+
+    if (effectiveScore >= 70) {
+      return 'Strong Community';
+    }
+    if (effectiveScore >= 50) {
+      return 'Average Community';
+    }
+    if (effectiveScore >= 30) {
+      return 'Developing Community';
+    }
+    return 'Weak Community';
   }
 
   // 2. Compute distribution metrics + Gini coefficient
@@ -371,9 +507,7 @@ export class HolderAggregationService {
       });
     }
 
-    const analyzedEOAHolders = holders.filter(
-      (holder) => holder.walletLabel === 'eoa',
-    );
+    const analyzedEOAHolders = holders.filter(isBehavioralEoaHolder);
     const totalAnalyzedEOAs = analyzedEOAHolders.length;
     const confirmedBotCount = analyzedEOAHolders.filter(
       (holder) => holder.classification?.primaryType === 'Bot / Automated',
@@ -382,15 +516,15 @@ export class HolderAggregationService {
       totalAnalyzedEOAs > 0
         ? Math.round((confirmedBotCount / totalAnalyzedEOAs) * 100)
         : 0;
-    const unclassifiedCount = analyzedEOAHolders.filter(
-      (holder) =>
-        holder.classification === null ||
-        holder.classification?.primaryType === 'Insufficient Data' ||
-        holder.classification?.primaryType === 'Dormant Wallet',
+    const dormantOrUnknownCount = analyzedEOAHolders.filter((holder) =>
+      isUnclassifiedHolderType(holder.classification?.primaryType ?? null),
     ).length;
-    const unclassifiedPct =
+    const analysisFailedCount = analyzedEOAHolders.filter(
+      (holder) => holder.classification === null,
+    ).length;
+    const dormantPct =
       totalAnalyzedEOAs > 0
-        ? Math.round((unclassifiedCount / totalAnalyzedEOAs) * 100)
+        ? Math.round((dormantOrUnknownCount / totalAnalyzedEOAs) * 100)
         : 0;
 
     // Confirmed bot activity only.
@@ -402,11 +536,19 @@ export class HolderAggregationService {
       });
     }
 
-    if (unclassifiedPct > 50) {
+    if (dormantPct > 50) {
       callouts.push({
         type: 'info',
         title: 'Limited Trading Data Available',
-        description: `${unclassifiedPct}% of top holders have insufficient on-chain swap history for behavioral classification. These wallets likely acquired tokens via transfers, OTC, or exchange withdrawals rather than DEX trading.`,
+        description: `${dormantPct}% of top holders have insufficient on-chain swap history for behavioral classification. These wallets likely acquired tokens via transfers, OTC, or exchange withdrawals rather than DEX trading.`,
+      });
+    }
+
+    if (analysisFailedCount > 0) {
+      callouts.push({
+        type: 'info',
+        title: 'Partial Analysis Coverage',
+        description: `${analysisFailedCount} EOA holder(s) could not be fully analyzed by the pipeline.`,
       });
     }
 
@@ -560,7 +702,7 @@ export class HolderAggregationService {
     totalSupplyFormatted: number | null,
   ): CategoryConcentration {
     const totals = {
-      eoa: { count: 0, balance: 0, scoreSum: 0, scoreCount: 0 },
+      eoa: { count: 0, balance: 0, scoreSum: 0, scoredCount: 0 },
       team: { count: 0, balance: 0, confidenceSum: 0 },
       exchanges: { count: 0, balance: 0 },
       contracts: { count: 0, balance: 0 },
@@ -592,9 +734,15 @@ export class HolderAggregationService {
       if (holder.walletLabel === 'eoa') {
         totals.eoa.count += 1;
         totals.eoa.balance += balance;
-        if (holder.score) {
-          totals.eoa.scoreSum += holder.score.score;
-          totals.eoa.scoreCount += 1;
+        const score = holder.score?.score;
+        const primaryType = holder.classification?.primaryType ?? null;
+        if (
+          typeof score === 'number' &&
+          score > 0 &&
+          !isUnclassifiedHolderType(primaryType)
+        ) {
+          totals.eoa.scoreSum += score;
+          totals.eoa.scoredCount += 1;
         }
       }
 
@@ -642,9 +790,10 @@ export class HolderAggregationService {
         count: totals.eoa.count,
         pctOfSupply: toPct(totals.eoa.balance),
         avgScore:
-          totals.eoa.scoreCount > 0
-            ? Math.round((totals.eoa.scoreSum / totals.eoa.scoreCount) * 100) / 100
+          totals.eoa.scoredCount > 0
+            ? Math.round(totals.eoa.scoreSum / totals.eoa.scoredCount)
             : null,
+        scoredCount: totals.eoa.scoredCount,
       },
       teamLinked: {
         count: totals.team.count,
@@ -746,7 +895,39 @@ export class HolderAggregationService {
       smartMoneyCount: holdersWithPnl.filter(
         (holder) => holder.pnl.winRate > 60 && holder.pnl.profitFactor > 1.5,
       ).length,
+      portfolioSmartMoneyCount: this.computePortfolioSmartMoneyCount(holders),
     };
+  }
+
+  private computePortfolioSmartMoneyCount(holders: AnalyzedHolder[]): number {
+    return holders
+      .filter(isBehavioralEoaHolder)
+      .filter((holder) => {
+        if (!holder.classification) {
+          return false;
+        }
+
+        const type = holder.classification.primaryType;
+        const portfolio = holder.portfolio;
+        const score = holder.score?.score ?? 0;
+
+        if (
+          type === 'Diversified Whale' &&
+          (portfolio?.totalPortfolioUsd ?? 0) >= 500_000
+        ) {
+          return true;
+        }
+
+        if ((portfolio?.totalPortfolioUsd ?? 0) >= 1_000_000 && score >= 40) {
+          return true;
+        }
+
+        if (score >= 75) {
+          return true;
+        }
+
+        return false;
+      }).length;
   }
 
   private roundAverage(values: number[]): number {
