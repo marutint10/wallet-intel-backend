@@ -65,6 +65,7 @@ export interface LiteFeatureVector {
   holdingChainCount: number;
 
   // Holdings-based features (filled when portfolio data is available)
+  totalPortfolioUsd?: number;
   trackedTokenWeight?: number;
   portfolioDiversificationScore?: number;
   holdingCategoryMix?: CategoryAllocations;
@@ -78,6 +79,23 @@ export interface LiteFeatureVector {
   activityConsistencyScore: number; // 0-100, higher = steadier cadence
   portfolioConcentrationScore: number; // 0-100, higher = more concentrated
   fastModeApplied: boolean;
+}
+
+/** True when portfolio enrichment was applied (not merely an empty category object). */
+export function hasPortfolioContext(features: LiteFeatureVector): boolean {
+  if (typeof features.totalPortfolioUsd === 'number' && features.totalPortfolioUsd > 0) {
+    return true;
+  }
+
+  const mix = features.holdingCategoryMix;
+  if (mix && Object.values(mix).some((value) => (value ?? 0) > 0)) {
+    return true;
+  }
+
+  return (
+    typeof features.trackedTokenWeight === 'number' &&
+    typeof features.portfolioDiversificationScore === 'number'
+  );
 }
 
 @Injectable()
@@ -96,13 +114,16 @@ export class LiteFeatureService {
     const resolvedHoldingChainCount = holdingChainCount ?? 1;
 
     if (!transfers || transfers.length === 0) {
-      return this.emptyVector(
-        walletAddress,
-        chain,
-        resolvedHoldingTokenCount,
-        resolvedHoldingChainCount,
+      return this.withHoldingsProfile(
+        this.emptyVector(
+          walletAddress,
+          chain,
+          resolvedHoldingTokenCount,
+          resolvedHoldingChainCount,
+          fastMode,
+        ),
         holdingsProfile,
-        fastMode,
+        resolvedHoldingTokenCount,
       );
     }
 
@@ -178,34 +199,61 @@ export class LiteFeatureService {
       holdingsProfile,
     );
 
+    return this.withHoldingsProfile(
+      {
+        address: walletAddress,
+        chain,
+        sampleSize: transfers.length,
+        totalTransfers: transfers.length,
+        swapCount: swaps.length,
+        tradingSpanDays: Math.round(tradingSpanDays * 10) / 10,
+        tradesPerDay: Math.round(tradesPerDay * 100) / 100,
+        avgGapHours: Math.round(avgGapHours * 100) / 100,
+        burstinessCoeff: Math.round(burstinessCoeff * 100) / 100,
+        medianHoldHours,
+        holdBuckets,
+        matchedLotCount,
+        uniqueTokens,
+        memecoinPercent,
+        blueChipPercent,
+        stablecoinPercent,
+        totalHoldingTokens: resolvedHoldingTokenCount,
+        holdingChainCount: resolvedHoldingChainCount,
+        walletAgeDays: Math.round(walletAgeDays * 10) / 10,
+        daysSinceLastActivity: Math.round(daysSinceLastActivity * 10) / 10,
+        activityConsistencyScore,
+        portfolioConcentrationScore: this.computePortfolioConcentrationScore(
+          holdingsProfile,
+        ),
+        fastModeApplied: fastMode,
+      },
+      holdingsProfile,
+      resolvedHoldingTokenCount,
+    );
+  }
+
+  // IMPROVEMENT 2/3: Always merge portfolio fields in one place so classify/score gates see them.
+  private withHoldingsProfile(
+    vector: LiteFeatureVector,
+    holdingsProfile?: HoldingsProfile | null,
+    holdingTokenCount?: number,
+  ): LiteFeatureVector {
+    if (!holdingsProfile) {
+      return vector;
+    }
+
     return {
-      address: walletAddress,
-      chain,
-      sampleSize: transfers.length,
-      totalTransfers: transfers.length,
-      swapCount: swaps.length,
-      tradingSpanDays: Math.round(tradingSpanDays * 10) / 10,
-      tradesPerDay: Math.round(tradesPerDay * 100) / 100,
-      avgGapHours: Math.round(avgGapHours * 100) / 100,
-      burstinessCoeff: Math.round(burstinessCoeff * 100) / 100,
-      medianHoldHours,
-      holdBuckets,
-      matchedLotCount,
-      uniqueTokens,
-      memecoinPercent,
-      blueChipPercent,
-      stablecoinPercent,
-      totalHoldingTokens: resolvedHoldingTokenCount,
-      holdingChainCount: resolvedHoldingChainCount,
-      trackedTokenWeight: holdingsProfile?.trackedTokenWeight,
-      portfolioDiversificationScore: holdingsProfile?.diversificationScore,
-      holdingCategoryMix: holdingsProfile?.categoryAllocations,
-      portfolioRiskSignal: holdingsProfile?.portfolioRiskSignal,
-      walletAgeDays: Math.round(walletAgeDays * 10) / 10,
-      daysSinceLastActivity: Math.round(daysSinceLastActivity * 10) / 10,
-      activityConsistencyScore,
-      portfolioConcentrationScore,
-      fastModeApplied: fastMode,
+      ...vector,
+      totalPortfolioUsd: holdingsProfile.totalPortfolioUsd,
+      trackedTokenWeight: holdingsProfile.trackedTokenWeight,
+      portfolioDiversificationScore: holdingsProfile.diversificationScore,
+      holdingCategoryMix: holdingsProfile.categoryAllocations,
+      portfolioRiskSignal: holdingsProfile.portfolioRiskSignal,
+      totalHoldingTokens:
+        holdingsProfile.holdingTokenCount ?? holdingTokenCount ?? vector.totalHoldingTokens,
+      portfolioConcentrationScore: this.computePortfolioConcentrationScore(
+        holdingsProfile,
+      ),
     };
   }
 
@@ -468,7 +516,6 @@ export class LiteFeatureService {
     chain: string,
     holdingTokenCount: number,
     holdingChainCount: number,
-    holdingsProfile?: HoldingsProfile | null,
     fastMode = false,
   ): LiteFeatureVector {
     return {
@@ -495,16 +542,10 @@ export class LiteFeatureService {
       stablecoinPercent: 0,
       totalHoldingTokens: holdingTokenCount,
       holdingChainCount,
-      trackedTokenWeight: holdingsProfile?.trackedTokenWeight,
-      portfolioDiversificationScore: holdingsProfile?.diversificationScore,
-      holdingCategoryMix: holdingsProfile?.categoryAllocations,
-      portfolioRiskSignal: holdingsProfile?.portfolioRiskSignal,
       walletAgeDays: 0,
       daysSinceLastActivity: 0,
       activityConsistencyScore: 0,
-      portfolioConcentrationScore: this.computePortfolioConcentrationScore(
-        holdingsProfile,
-      ),
+      portfolioConcentrationScore: 0,
       fastModeApplied: fastMode,
     };
   }
