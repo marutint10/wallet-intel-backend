@@ -186,6 +186,7 @@ export class TokenController {
       1,
       holdingsProfile,
       fastMode,
+      trackedToken,
     );
 
     return { features, holdingsProfile };

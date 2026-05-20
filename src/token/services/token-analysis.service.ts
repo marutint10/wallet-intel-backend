@@ -262,6 +262,7 @@ export class TokenAnalysisService {
               1,
               holdingsProfile,
               FAST_MODE,
+              address,
             );
             const tFeatures = Date.now() - tFeaturesStart;
 
