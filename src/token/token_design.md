@@ -27,8 +27,8 @@ Summary of the latest scoring, classification, and triage work (May 2026):
 - `src/token/constants/known-exchange-addresses.ts` — canonical exchange map
 - `src/token/services/token-intelligence.service.ts` — `lookupKnownExchange` in static triage
 - `src/token/services/wallet-filter.service.ts` — delegates to shared exchange registry
-- `src/token/services/holder-aggregation.service.ts` — Dormant Wallet in unclassified metrics
-- `src/token/services/dashboard-summary.service.ts` — `UNSCORED_SCORE_BANDS`, `isUnclassifiedHolderType`
+- `src/token/services/holder-aggregation.service.ts` — EOA breakdown (`breakdown` + `breakdown.counts`), smart-money portfolio signal, composite `qualityLabel`
+- `src/token/services/dashboard-summary.service.ts` — `UNSCORED_SCORE_BANDS`, `resolveQualityBreakdown`, circulating supply basis, `convictionHolders` / `dormant` breakdown buckets
 - `src/token/services/token-analysis.service.ts` — passes token contract into `extractFeatures`
 
 **Legacy vocabulary (persisted rows only):**
@@ -41,6 +41,30 @@ Summary of the latest scoring, classification, and triage work (May 2026):
 | band Average on all-in floor | band **Conviction** |
 
 Re-run `POST /token/analyze` after code or registry changes; cached `token_analyses` JSON does not self-update.
+
+### Dashboard aggregation & portfolio fixes (May 2026)
+
+| Area | Change |
+|------|--------|
+| **Smart Money (FAST_MODE)** | `pnlAggregation.portfolioSmartMoneyCount` — Diversified Whale ≥ $500K, $1M+ portfolio + score ≥ 40, or score ≥ 75; dashboard uses PnL count first, then portfolio count, then score fallback |
+| **qualityMetrics.breakdown** | Single schema: behavioral keys are **% of analyzed EOAs** (largest-remainder, sum 100); raw counts in `breakdown.counts` (sum `totalAnalyzedEOAs`); structural keys (`exchanges`, `contractsPools`, …) are **% of all top holders** |
+| **EOA behavioral set** | Breakdown loop uses `walletLabel === 'eoa'` or `team_connected` only; passive archetypes in `convictionHolders`; Swing/Day/Accumulator in `activeTraders`; Dormant / null / Insufficient Data in `dormant` |
+| **categoryConcentration.eoaHolders** | `avgScore` matches `qualityMetrics.avgScore` (scored EOAs only, excludes Dormant zeros); adds `scoredCount` |
+| **qualityLabel** | Composite: boosts/penalizes from loyalty % (conviction + diamond + active trader) vs degen+bot % before banding |
+| **trackedTokenWeight** | Ecosystem USD = tracked token + derivative symbols (`st{SYM}`, `w{SYM}`, `{SYM}.e`, `{SYM}x`) + optional staking contract addresses from top-holder list |
+| **percentSupply** | Prefers `circulatingSupply`, fallback `totalSupply`; holder rows expose `percentSupplyBasis`; `token.circulatingSupply` on dashboard DTO |
+| **Etherscan contract names** | L1 memory + L2 `@nestjs/cache-manager` (24h, key `token:contract-name:{chainId}:{address}`); **only successful names cached** — rate-limit/API failures are not cached so treasury/keyword labels can recover on retry |
+| **Dashboard resolver** | `resolveQualityBreakdown()` reads `breakdown.counts`, legacy `breakdownCounts`, detects legacy rows that stored counts in `breakdown` top-level |
+
+**Source files (this pass):**
+
+- `src/token/services/holder-aggregation.service.ts`
+- `src/token/services/dashboard-summary.service.ts`
+- `src/token/services/lite-portfolio.service.ts`
+- `src/token/services/token-analysis.service.ts` — passes `tokenMetadata.symbol`, staking-contract set into portfolio
+- `src/token/services/token-intelligence.service.ts` — persistent contract-name cache
+
+**Known follow-up (not implemented):** portfolio-concentration Degen boost when `swapCount < 10` and `tradesPerDay < 0.05` (e.g. rank-36 edge case after staked-weight fix).
 
 ### Holder classify + score decision tree
 
@@ -235,6 +259,10 @@ Responsibilities (production pre-analysis layer):
   6. else → async contract-name / eth_getCode heuristics for vesting, treasury, staking, generic contracts
 - evidence fields on every label: `labelConfidence`, `labelEvidence[]`, `teamConnectionScore`, optional `teamConnectionPath`
 - team detection: seed transfers from deployer/owner/treasury + Etherscan counterparty scan against top holders
+- **contract name resolution** (`getContractName`): Etherscan `getsourcecode` → `ContractName`; used for treasury/vesting/staking keyword labels and `knownLabel` on `generic_contract` rows
+  - **L1:** in-process map of successful names only (per `chainId:address`)
+  - **L2:** `@nestjs/cache-manager`, key `token:contract-name:{chainId}:{address}`, TTL **24h**
+  - **Not cached:** HTTP errors, empty responses, or missing API key — next run or same-run retry can succeed (avoids locking treasury wallets as generic_contract after a rate limit)
 
 Holder labels (`HolderLabel`):
 
@@ -491,18 +519,51 @@ Responsibilities:
 - compute category-split concentration metrics for eoaHolders, teamLinked, exchanges, contractsAndPools, vestingLocked, burnDead, and dust
 - generate risk/positive/info callouts
 - add callouts for low retail holder concentration and high-confidence team detection
-- breakdown now separates bots (confirmed Bot / Automated classification) from unclassified (**Dormant Wallet** or legacy **Insufficient Data** classification); passive labels (Diversified Whale, Conviction Holder, Strategic Allocator) count toward activeTrader bucket in aggregation
-- Bot Activity Detected callout only fires for confirmed automated trading patterns, not wallets with insufficient data
-- Limited Trading Data Available info callout fires when more than 50% of analyzed EOA holders lack swap history (common for transfer-heavy tokens)
-- avgScore and qualityLabel are computed from scored holders only (score > 0), excluding Dormant Wallet / legacy Insufficient Data from score averaging
-- unclassified EOA metrics treat `primaryType` of **Dormant Wallet** or legacy **Insufficient Data** (or null) as unclassified for callouts and breakdown denominators
+- **qualityMetrics.breakdown** (behavioral, EOA-only: `eoa` + `team_connected`):
+  - Top-level keys `convictionHolders`, `diamondHands`, `activeTraders`, `riskDegen`, `bots`, `dormant` are **percentages** (largest-remainder; sum **100**)
+  - `breakdown.counts` holds the same keys as **raw wallet counts** (must sum to `totalAnalyzedEOAs`, typically 78 for top-100 analyze)
+  - Archetype mapping: Conviction Holder / Diversified Whale / Strategic Allocator → `convictionHolders`; Diamond Hand → `diamondHands`; Swing Trader / Day Trader / Accumulator → `activeTraders`; Degen / Paper Hand → `riskDegen`; Bot / Automated → `bots`; Dormant Wallet / Insufficient Data / null classification → `dormant`
+  - Structural keys `exchanges`, `contractsPools`, `teamConnected`, `burnDead`, `vestingLocked` are **% of all top holders** (not EOA denominator)
+- **pnlAggregation**: `smartMoneyCount` (PnL win-rate + profit factor when FAST_MODE off); `portfolioSmartMoneyCount` (portfolio/score heuristic, always computed for EOAs)
+- Bot Activity Detected callout only fires for confirmed automated trading patterns
+- Limited Trading Data Available when &gt; 50% of behavioral EOAs are dormant/unprofiled; Partial Analysis Coverage when EOAs have `classification: null`
+- `avgScore` / `topHolderAvgScore`: scored EOAs only (`score > 0`, not Dormant / Insufficient Data)
+- `qualityLabel`: base bands on `avgScore`, adjusted by loyalty % vs degen+bot % (`computeQualityLabel`)
+- `categoryConcentration.eoaHolders.avgScore`: same scored-EOA rule as `avgScore`; `scoredCount` for clarity
+
+Example `qualityMetrics.breakdown` (illustrative — percentages ≠ counts):
+
+```json
+{
+  "convictionHolders": 32,
+  "diamondHands": 12,
+  "activeTraders": 10,
+  "riskDegen": 1,
+  "bots": 0,
+  "dormant": 45,
+  "counts": {
+    "convictionHolders": 25,
+    "diamondHands": 9,
+    "activeTraders": 8,
+    "riskDegen": 1,
+    "bots": 0,
+    "dormant": 35
+  },
+  "exchanges": 12,
+  "contractsPools": 8,
+  "teamConnected": 5,
+  "burnDead": 0,
+  "vestingLocked": 0
+}
+```
+
+Here `dormant: 45` means **45%** of EOAs (35/78), not 45 wallets. Frontend and AI layers should use `breakdown.counts` for raw composition and top-level behavioral keys for %.
 
 Output families:
 
-- qualityMetrics
+- qualityMetrics (includes `breakdown`, `pnlAggregation`, `categoryConcentration`, `circulatingSupply`, `teamDetection`, …)
 - distribution
 - riskCallouts
-- categoryConcentration (inside qualityMetrics)
 
 ### DashboardSummaryService
 
@@ -534,8 +595,8 @@ DashboardSummaryResponse shape (high level):
 - `token` - contract, chain, token name/symbol/price (best-effort, may be null)
 - `aiSummary` - plain-text holder-health summary (`string | null`). Populated by the controller in parallel with `buildDashboardSummary` when analysis status is `done`
 - `summaryCards` - 6 dashboard cards: Avg Holder Score, Smart Money Wallets, Top 10 Concentration, Decentralization Score, Team Allocation, Exchange Allocation. Each card has title, value, optional subtitle, optional sentiment (`positive` / `neutral` / `warning`)
-- `holderQuality` - flat numeric summary (avgScore, qualityLabel, smartMoneyPct, convictionPct, activeTraderPct, degenPct, botPct)
-- `holderQualityBreakdown` - per-archetype percentages of analyzed EOAs (diamondHands, accumulators, swingTraders, dayTraders, degens, bots, unclassified), all rounded to whole numbers
+- `holderQuality` - flat numeric summary (avgScore, qualityLabel, smartMoneyPct, convictionPct, activeTraderPct, degenPct, botPct). `convictionPct` sums dashboard breakdown: convictionHolders + diamondHands + accumulators
+- `holderQualityBreakdown` - per-archetype **percentages** of behavioral EOAs (`eoa` + `team_connected`): diamondHands, accumulators, swingTraders, dayTraders, degens, bots, **convictionHolders** (passive: Conviction Holder / Diversified Whale / Strategic Allocator), **dormant** (Dormant Wallet, Insufficient Data, null); largest-remainder rounding (sum 100)
 - `distribution` - flattened distribution summary (decentralizationScore, giniCoefficient, top10Pct, top50Pct, top100Pct)
 - `holderTable` - `{ total, rows }` with ALL analyzed holders sorted by rank ascending. No 100-holder cap. Frontend pagination, filtering, and sorting are expected to run client-side
 - `riskCallouts` - the existing `RiskCallout[]` from analytics, surfaced as-is
@@ -546,16 +607,24 @@ Sentiment rules (summary cards):
 - warning: top10Pct >= 50, team allocation >= 25, exchange allocation >= 40, botPct >= 15
 - otherwise: neutral
 
-Smart money percentage:
+Smart money percentage (`computeSmartMoneyPct`):
 
-- PRIMARY: when `qualityMetrics.pnlAggregation.smartMoneyCount > 0`, returns `round(smartMoneyCount / totalAnalyzedEOAs * 100)`
-- FALLBACK: when no PnL data is available (FAST_MODE), returns `round(eoaHoldersWithScore>=75 / totalAnalyzedEOAs * 100)` (Premium band and above on lite score)
+1. **PnL path:** `pnlAggregation.smartMoneyCount > 0` → `round(smartMoneyCount / totalAnalyzedEOAs * 100)`
+2. **Portfolio path (FAST_MODE):** `portfolioSmartMoneyCount > 0` → `round(portfolioSmartMoneyCount / totalAnalyzedEOAs * 100)`
+3. **Score fallback:** EOAs with lite `score >= 75` / totalAnalyzedEOAs
+
+Behavioral breakdown for cards (`resolveQualityBreakdown`):
+
+- Prefer `qualityMetrics.breakdown` top-level keys as **percentages**
+- Raw counts from `qualityMetrics.breakdown.counts` (fallback: legacy `breakdownCounts` on old rows)
+- Legacy detection: if top-level behavioral values sum to ~`totalAnalyzedEOAs` (not 100), treat as counts and recompute %
 
 Holder table row mapping:
 
 - `shortAddress`: 0x1234...cdef format via `shortenAddress`
 - `balanceUsd`: `holder.usdValue ?? 0`
-- `percentSupply`: derived from `holder.balance / qualityMetrics.totalSupply` when both are parseable, otherwise `0`
+- `percentSupply`: `holder.balance / circulatingSupply` when present, else `totalSupply`; `percentSupplyBasis`: `'circulating' | 'total'`
+- `token.circulatingSupply` exposed on dashboard `token` object (from `qualityMetrics.circulatingSupply`)
 - `walletLabel` / `walletLabelDetail`: from intelligence triage (`exchange`, `eoa`, …); exchange rows show detail e.g. `OKX Cold Wallet`
 - `classification` / `confidence`: from `holder.classification` with null-safety (`null` for exchange/burn/dust and other non-analyzed labels)
 - `score`: numeric lite score when present; **`null`** when `holder.score.band` is in `UNSCORED_SCORE_BANDS` (`Dormant Wallet`, legacy `Insufficient Data`) so the UI does not show 0 as a real score
@@ -570,8 +639,10 @@ Pure helper functions (all exported and unit-test friendly):
 - `safeNumberOrNull(value)`
 - `safeString(value, fallback)`
 - `buildSummaryCards(...)`
-- `computeHolderQualityBreakdown(...)`
-- `computeSmartMoneyPct(...)`
+- `computeHolderQualityBreakdown(...)` — mirrors aggregation archetype buckets; includes `convictionHolders` + `dormant`
+- `resolveQualityBreakdown(quality)` — persisted breakdown % + counts for dashboard cards
+- `computeSmartMoneyPct(smartMoneyCount, portfolioSmartMoneyCount, totalAnalyzedEOAs, holders)`
+- `resolveSupplyForPercent(circulating, total)` — supply basis for holder table
 - `buildDistributionSummary(...)`
 - `formatUsd(value)`
 - exported `RawHolder` interface (lenient holder JSONB shape for breakdown / smart-money helpers)
@@ -596,6 +667,7 @@ File: src/token/services/token-ai-summary.service.ts
 Purpose:
 
 - produce a short professional **plain-text** analyst blurb (4–5 sentences) from a minimal `TokenSummaryInput` derived from the same fields as the dashboard (holder quality, composition %, distribution, allocations, risk/positive signal titles)
+- `buildSummaryInput` uses `resolveQualityBreakdown` / `computeSmartMoneyPct` with `portfolioSmartMoneyCount`; composition prompt lines use `convictionHolderArchetypePct` + `dormantPct` (not legacy `unclassifiedPct`)
 - never break the dashboard: on Gemini failure or missing `GEMINI_API_KEY`, returns a deterministic fallback string
 
 Implementation notes:
@@ -627,7 +699,7 @@ File: src/token/token.module.ts
 
 Imports:
 
-- `CacheModule.register()` (shared in-memory cache store for token AI summary; can be pointed at Redis later via Nest cache config without changing callers)
+- `CacheModule.register()` (shared in-memory cache store for token AI summary, Etherscan contract names, and chart data; can be pointed at Redis later via Nest cache config without changing callers)
 
 Shared constants (not Nest providers):
 
@@ -927,7 +999,7 @@ The orchestrator saves output into token_analyses JSONB and scalar columns:
 - token_name / token_symbol: nullable scalar columns, written defensively (`tokenMetadata?.name ?? null` / `tokenMetadata?.symbol ?? null`) so partial metadata responses never block status=done
 - total_holders: count of holders that were enriched
 - holders_data: per-holder analyzed rows (classification + score)
-- quality_metrics: aggregated holder quality metrics plus tokenPriceUsd, priceSource, and PnL aggregation
+- quality_metrics: aggregated holder quality metrics plus tokenPriceUsd, priceSource, PnL aggregation (`smartMoneyCount`, `portfolioSmartMoneyCount`), `breakdown` (behavioral % + `breakdown.counts`), `circulatingSupply`, `teamDetection`, `categoryConcentration`
 - distribution: concentration/distribution metrics
 - risk_callouts: generated token-level insights
 
@@ -979,9 +1051,14 @@ Classifier and scorer behavior under FAST_MODE:
 - when `pnl` is null and `swapCount >= 3`, experience (1.5×) and portfolioQuality (1.3×) boost replace the profitability slice so scores still reach ~55-70 for conviction wallets
 - final-score confidence is NOT downgraded just because PnL is missing (active traders only)
 
+Smart money without PnL:
+
+- `HolderAggregationService` always sets `pnlAggregation.portfolioSmartMoneyCount` for behavioral EOAs (whale/portfolio/score rules above)
+- Dashboard `computeSmartMoneyPct` uses portfolio count when `smartMoneyCount === 0` (typical under FAST_MODE)
+
 Response shape is preserved:
 
-- `AnalyzedHolder.pnl` may now be `null` for all holders; HolderAggregationService already tolerates this (callouts depending on PnL aggregation simply do not fire)
+- `AnalyzedHolder.pnl` may now be `null` for all holders; PnL-dependent callouts simply do not fire; portfolio smart-money callouts can still fire when `holdersWithPnlData === 0` if portfolio count is high enough (via score fallback path on dashboard only for the card; aggregation callout still keys off `holdersWithPnlData > 10` for PnL-based smart %)
 - `LiteFeatureVector` gains 4 new fields plus `fastModeApplied`; existing fields are unchanged
 
 Per-wallet timing instrumentation:
@@ -1013,7 +1090,8 @@ Passive holder path (portfolio-only classify/score):
 - native gas-token balance is fetched per chain only (no cross-chain aggregation); native pricing failures cause the native bag to be skipped silently
 - token deep analysis requires a completed `token_analyses` row (`status=done`) for the same `(contract_address, chain)`; it does not run holder analytics itself
 - dashboard `aiSummary` and deep analysis depend on third-party APIs (Gemini, Tavily, Anthropic) and degrade or error independently per feature rules above
-- team detection can vary between runs when Etherscan rate limits or transfer scans fail silently; team labels are not yet persisted/cached across re-analyses (see TokenIntelligenceService)
+- team detection can still vary when Etherscan **transfer** scans fail; **contract names** are now cached 24h after first successful resolve (reduces treasury/generic_contract flakiness on re-runs)
+- FAST_MODE transfer cap causes rank 51–100 and same-wallet classification to vary slightly between analyze runs (different 50-transfer windows)
 - `walletAgeDays` on passive holders with zero transfers may be 0 (derived from transfer timestamps only); conviction floor uses this field for the 18 vs 25 split
 - persisted analyses do not auto-refresh when `known-exchange-addresses.ts` or scoring rules change — re-run `POST /token/analyze` to pick up new exchange tags or B2B score bands
 
@@ -1075,6 +1153,17 @@ After `POST /token/analyze` completes (fresh run, not stale DB row):
 3. **Rank &gt; 50** with no portfolio:
    - `classification.primaryType`: Dormant Wallet
    - dashboard `score`: null
+4. **Staked derivative holder** (e.g. rank 29 with stZENT + ZENT):
+   - `portfolio.trackedTokenWeight` ≈ 99% (ecosystem, not raw ZENT slice only)
+   - `classification`: Conviction Holder (not Strategic Allocator from understated weight)
+5. **qualityMetrics.breakdown invariant** (fresh run):
+   - `breakdown.counts.*` sum = `totalAnalyzedEOAs` (e.g. 78)
+   - `breakdown.convictionHolders + diamondHands + activeTraders + riskDegen + bots + dormant` = **100** (percentages)
+   - `pnlAggregation.portfolioSmartMoneyCount` &gt; 0 under FAST_MODE when large whales present
+6. **Dashboard** `GET /token/:address/dashboard`:
+   - `holderQuality.smartMoneyPct` &gt; 0 when `portfolioSmartMoneyCount` populated
+   - `holderQualityBreakdown.convictionHolders` and `.dormant` replace legacy `unclassified`
+   - holder rows include `percentSupplyBasis`; `token.circulatingSupply` set when metadata has it
 
 ### Inspect pricing / FAST_MODE log lines
 
@@ -1173,7 +1262,9 @@ File: src/token/services/lite-portfolio.service.ts
 - fetches full ERC-20 balances via Alchemy `getTokenBalances`
 - prices holdings via `LitePricingService.getBatchPrices` (DefiLlama-primary, CoinGecko-fallback)
 - produces a formalized HoldingsProfile with categoryAllocations (bluechip/defi/meme/ai/gaming/infrastructure/stablecoin/rwa/other), portfolioRiskSignal, and per-holding category labels
-- computes: totalPortfolioUsd, trackedTokenWeight, diversificationScore
+- computes: totalPortfolioUsd, `trackedTokenUsd`, `trackedTokenWeight`, diversificationScore
+- **tracked token ecosystem weight:** sums USD for (a) the analyzed token contract, (b) derivative symbols vs `tokenMetadata.symbol` — `st{SYM}`, `w{SYM}`, `{SYM}.e`, `{SYM}x` (case-insensitive), (c) optional staking-related contract addresses detected from top holders (`generic_contract` + knownLabel contains symbol / stake / silo / vault). Example: ZENT + stZENT → ~99% weight, not ZENT slice alone
+- `getPortfolioContext(..., stakingRelatedContracts?, trackedTokenSymbol?)` — production passes symbol + staking set from `TokenAnalysisService`
 - uses centralized src/token/constants/token-categories.ts for classification
 - HoldingsProfile is fetched BEFORE feature extraction for top 50 holders so portfolio signals feed into classification and scoring
 - only runs for top 50 holders for API cost management
@@ -1236,8 +1327,8 @@ See **section 2 → TokenIntelligenceService** for classify/triage flow. Additio
   - transfer-counterparty scan (Etherscan) against top-holder set
   - team concentration risk scoring (low/medium/high/critical)
 - includes internal caching:
-  - eth_getCode contract detection cache
-  - Etherscan contract-name cache
+  - eth_getCode contract detection cache (in-memory, per process)
+  - Etherscan contract-name cache: successful names only; memory L1 + Nest `CacheModule` L2 (`token:contract-name:{chainId}:{address}`, 24h). Failed lookups are **not** written to cache
 - degrades safely:
   - missing ALCHEMY_API_KEY: falls back to broad EOA labeling for unknown addresses
   - missing ETHERSCAN_API_KEY: skips deployer/sourcecode/team transfer scans
