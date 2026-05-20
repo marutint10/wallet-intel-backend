@@ -5,6 +5,81 @@ This document explains the token module as it exists today.
 It should be treated as a living architecture note.
 If token behavior changes, this file should be updated in the same task.
 
+## Recent changes (B2B holder intelligence pass)
+
+Summary of the latest scoring, classification, and triage work (May 2026):
+
+| Area | Change |
+|------|--------|
+| **Score bands (active)** | Day-trader labels replaced: Institutional / Premium / Strong / Solid / Developing |
+| **Passive scoring** | `scorePortfolioOnly`: quality **+ quantity** (max 12 pts), wallet-style **size multiplier**, formula denominator **112**, cap **60** |
+| **Whale floors** | Portfolio USD ≥ $1M → min score **45**; ≥ $100K → min **30** |
+| **Conviction floor** | Band **Conviction** (18/25); triggers at `trackedWeight ≥ 95%` OR (`≥ 80%` and `totalHoldingTokens ≤ 3`) for gas/airdrop side holdings |
+| **Passive labels** | Passive Holder / Passive Investor → **Conviction Holder** / **Strategic Allocator** |
+| **Unprofiled holders** | Insufficient Data → **Dormant Wallet** (classify + score band); dashboard shows `score: null` via `UNSCORED_SCORE_BANDS` |
+| **Exchange triage** | Shared `known-exchange-addresses.ts`; production uses **TokenIntelligenceService** (not `WalletFilterService`); OKX Cold Wallet tagged |
+
+**Source files touched:**
+
+- `src/token/services/lite-scorer.service.ts` — B2B bands, `scorePortfolioOnly`, `UNSCORED_SCORE_BANDS`
+- `src/token/services/lite-classifier.service.ts` — passive labels, Dormant Wallet gate
+- `src/token/services/lite-feature.service.ts` — `hasPortfolioContext`, `withHoldingsProfile`, `trackedTokenCategory`
+- `src/token/constants/known-exchange-addresses.ts` — canonical exchange map
+- `src/token/services/token-intelligence.service.ts` — `lookupKnownExchange` in static triage
+- `src/token/services/wallet-filter.service.ts` — delegates to shared exchange registry
+- `src/token/services/holder-aggregation.service.ts` — Dormant Wallet in unclassified metrics
+- `src/token/services/dashboard-summary.service.ts` — `UNSCORED_SCORE_BANDS`, `isUnclassifiedHolderType`
+- `src/token/services/token-analysis.service.ts` — passes token contract into `extractFeatures`
+
+**Legacy vocabulary (persisted rows only):**
+
+| Old | New |
+|-----|-----|
+| Elite Smart Money / Strong Trader / Good Trader / Average / Weak / Risky | Institutional / Premium / Strong / Solid / Developing |
+| Passive Holder / Passive Investor | Conviction Holder / Strategic Allocator |
+| Insufficient Data (classify or band) | Dormant Wallet |
+| band Average on all-in floor | band **Conviction** |
+
+Re-run `POST /token/analyze` after code or registry changes; cached `token_analyses` JSON does not self-update.
+
+### Holder classify + score decision tree
+
+```
+For each top holder (after TokenIntelligenceService Phase 2):
+│
+├─ shouldAnalyze = false (exchange, burn, dust, router, …)
+│    → walletLabel set, classification = null, score = null
+│    → counts toward Exchange Allocation / category buckets, not avgScore
+│
+└─ shouldAnalyze = true (typically EOA)
+     → transfers → extractFeatures(..., holdingsProfile?, fastMode, tokenContractAddress)
+     │
+     ├─ swapCount < 3
+     │    ├─ hasPortfolioContext(features) = false
+     │    │    → classify: Dormant Wallet
+     │    │    → score: 0, band Dormant Wallet (dashboard score null)
+     │    │
+     │    └─ hasPortfolioContext = true  [rank ≤ 50, portfolio fetched]
+     │         → classifyPassiveHolder() → Diversified Whale | Conviction Holder | Strategic Allocator
+     │         → scorePortfolioOnly()
+     │              ├─ conviction floor (≥95% weight OR ≥80% + ≤3 tokens) → band Conviction, 18|25
+     │              └─ else formula (quality+quantity)×multiplier + whale floors → Strong|Solid|Developing (cap 60)
+     │
+     └─ swapCount ≥ 3
+          → standard archetype classify + 0–100 score + full SCORE_BANDS
+```
+
+### Expected passive score outcomes (illustrative)
+
+| Holder profile | Typical band | Notes |
+|----------------|--------------|-------|
+| ~$95M diversified whale, low tracked % | Solid (~48–53) | Max quantity points + full multiplier |
+| ~$6.8M whale, moderate quality | Solid / Strong (up to 60) | Whale floor may lift to 45+ |
+| All-in holder, ≥80% weight, ≤3 tokens | **Conviction** (18–25) | Bypasses formula |
+| ~$5 dust wallet, clean % mix | Developing (~6–9) | `sizeMultiplier` 0.35 at &lt;$10 portfolio |
+| Rank &gt; 50, no portfolio fetch | Dormant Wallet | No `hasPortfolioContext` |
+| OKX Cold Wallet `0x611f…` | (none) | `walletLabel: exchange`, skipped |
+
 ## 1. What we built so far
 
 The token module currently has four cooperating layers:
@@ -220,7 +295,7 @@ Public API:
 
 - `extractFeatures(transfers, walletAddress, chain, holdingTokenCount?, holdingChainCount?, holdingsProfile?, fastMode = false, trackedTokenContractAddress?)`
 - `extractSwaps(transfers, walletAddress)` - unchanged, used only when FAST_MODE is disabled (for PnL input)
-- `hasPortfolioContext(features)` - exported helper; true when portfolio enrichment was applied (not merely an empty category object)
+- `hasPortfolioContext(features)` - exported helper; true when any of: `totalPortfolioUsd > 0`; any `holdingCategoryMix` bucket &gt; 0; or both `trackedTokenWeight` and `portfolioDiversificationScore` are numbers (portfolio merge ran). False for rank &gt; 50 without portfolio fetch → passive path falls through to **Dormant Wallet**
 
 Hold-time strategy depends on fastMode:
 
@@ -369,6 +444,11 @@ Blends **percentage quality** with **absolute capital quantity** (B2B founders c
 
 Breakdown: `portfolioQuality`, `riskManagement`, and `experience` reflect post-`sizeMultiplier` values so chart slices align with the displayed score.
 
+Private helpers (portfolio-only path):
+
+- `scorePortfolioQuantityPoints(totalPortfolioUsd, trackedTokenWeight)` — max 12, capped sum of wealth + position tiers
+- `resolvePortfolioSizeMultiplier(totalPortfolioUsd)` — mirrors wallet module: 1.0 / 0.85 / 0.6 / 0.35 / 0.1
+
 Profitability redistribution (active traders, no PnL):
 
 - when `swapCount >= 3` and pnl is null, profitability contributes 0; experience (1.5×) and portfolioQuality (1.3×) are boosted so conviction wallets score ~55-70 without PnL
@@ -415,6 +495,7 @@ Responsibilities:
 - Bot Activity Detected callout only fires for confirmed automated trading patterns, not wallets with insufficient data
 - Limited Trading Data Available info callout fires when more than 50% of analyzed EOA holders lack swap history (common for transfer-heavy tokens)
 - avgScore and qualityLabel are computed from scored holders only (score > 0), excluding Dormant Wallet / legacy Insufficient Data from score averaging
+- unclassified EOA metrics treat `primaryType` of **Dormant Wallet** or legacy **Insufficient Data** (or null) as unclassified for callouts and breakdown denominators
 
 Output families:
 
@@ -435,6 +516,8 @@ Purpose:
 - give the frontend a single payload it can render without re-deriving anything (avgScore formatting, sentiment, holder-table shortening, breakdown percentages)
 - keep dashboard concerns (formatting, sentiment, summary cards) out of the analytics engine so each layer evolves independently
 - export small pure helpers reused by AI layers: `RawHolder`, `safeNumber`, `safeNumberOrNull`, `safeString`, `computeSmartMoneyPct`, `computeHolderQualityBreakdown`, `buildDistributionSummary`, etc.
+- imports `UNSCORED_SCORE_BANDS` from `LiteScorerService` for holder-table score nulling
+- `isUnclassifiedHolderType(primaryType)` — true for null, **Dormant Wallet**, or legacy **Insufficient Data** (holder-quality breakdown bucket)
 
 Boundary rules:
 
@@ -545,6 +628,11 @@ File: src/token/token.module.ts
 Imports:
 
 - `CacheModule.register()` (shared in-memory cache store for token AI summary; can be pointed at Redis later via Nest cache config without changing callers)
+
+Shared constants (not Nest providers):
+
+- `src/token/constants/known-exchange-addresses.ts` — exchange triage map used by intelligence + wallet-filter
+- `src/token/constants/token-categories.ts` — token category slugs for features/portfolio
 
 Registered providers:
 
@@ -964,6 +1052,28 @@ Run in order:
 3. GET /token/wallet/:address/features
 4. GET /token/wallet/:address/classify
 5. GET /token/wallet/:address/score
+
+For steps 4–5, pass portfolio context like production:
+
+- `?trackedToken=<tokenContract>&trackedUsd=<holderUsdValue>&fastMode=true`
+
+Without `trackedToken`, passive holders show **Dormant Wallet** / unscored even if they are large on-chain holders.
+
+### Verify B2B pass on a real token (e.g. Zentry)
+
+After `POST /token/analyze` completes (fresh run, not stale DB row):
+
+1. **OKX Cold Wallet** `0x611f7bf868a6212f871e89f7e44684045ddfb09d` (often rank ~3):
+   - `walletLabel`: `exchange`
+   - `walletLabelDetail`: `OKX Cold Wallet`
+   - `classification` / `score`: null
+   - contributes to **Exchange Allocation**, not EOA avg score
+2. **Large passive EOA** (rank ≤ 50, transfer-heavy):
+   - `classification`: Diversified Whale or Conviction Holder
+   - `score.band`: Solid / Strong / Conviction (not Developing at $1M+ unless dust multiplier applies)
+3. **Rank &gt; 50** with no portfolio:
+   - `classification.primaryType`: Dormant Wallet
+   - dashboard `score`: null
 
 ### Inspect pricing / FAST_MODE log lines
 
