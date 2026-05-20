@@ -48,6 +48,12 @@ export interface HolderQualityMetrics {
   totalAnalyzedEOAs: number;
   avgScore: number;
   qualityLabel: string;
+  /**
+   * Holder composition metrics.
+   * - Top-level behavioral keys (convictionHolders, diamondHands, …) are **percentages** of analyzed EOAs (sum to 100).
+   * - `counts` holds raw EOA archetype counts (sum to totalAnalyzedEOAs).
+   * - Structural keys (exchanges, contractsPools, …) are **percentages of all top holders**.
+   */
   breakdown: {
     convictionHolders: number;
     diamondHands: number;
@@ -55,20 +61,19 @@ export interface HolderQualityMetrics {
     riskDegen: number;
     bots: number;
     dormant: number;
+    counts: {
+      convictionHolders: number;
+      diamondHands: number;
+      activeTraders: number;
+      riskDegen: number;
+      bots: number;
+      dormant: number;
+    };
     exchanges: number;
     contractsPools: number;
     teamConnected: number;
     burnDead: number;
     vestingLocked: number;
-  };
-  /** Raw EOA archetype counts; sums to totalAnalyzedEOAs. */
-  breakdownCounts: {
-    convictionHolders: number;
-    diamondHands: number;
-    activeTraders: number;
-    riskDegen: number;
-    bots: number;
-    dormant: number;
   };
   topHolderAvgScore: number;
   pnlAggregation: HolderPnlAggregation;
@@ -354,13 +359,13 @@ export class HolderAggregationService {
         riskDegen: behavioralPct.riskDegen,
         bots: behavioralPct.bots,
         dormant: behavioralPct.dormant,
+        counts: breakdownCounts,
         exchanges: pct(exchangeCount),
         contractsPools: pct(contractPoolCount),
         teamConnected: pct(teamConnectedCount),
         burnDead: pct(burnDeadCount),
         vestingLocked: pct(vestingLockedCount),
       },
-      breakdownCounts,
       topHolderAvgScore,
       pnlAggregation,
       categoryConcentration,
