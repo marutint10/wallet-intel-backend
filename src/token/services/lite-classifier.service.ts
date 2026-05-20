@@ -26,11 +26,11 @@ export class LiteClassifierService {
       }
 
       return {
-        primaryType: 'Insufficient Data',
+        primaryType: 'Dormant Wallet',
         confidence: 'low',
         primaryScore: 0,
         secondaryType: null,
-        reasoning: `Only ${features.swapCount} swaps detected - need at least 3 to classify.`,
+        reasoning: 'Wallet is dormant on DEXs with no recent swap history to profile.',
       };
     }
 
@@ -113,18 +113,6 @@ export class LiteClassifierService {
     const trackedWeight = features.trackedTokenWeight ?? 0;
     const diversification = features.portfolioDiversificationScore ?? 0;
     const totalUsd = features.totalPortfolioUsd ?? 0;
-    const formatUsd = (value: number): string => {
-      if (value >= 1_000_000) {
-        return `$${(value / 1_000_000).toFixed(1)}M`;
-      }
-      if (value >= 1_000) {
-        return `$${(value / 1_000).toFixed(0)}K`;
-      }
-      return `$${Math.round(value)}`;
-    };
-
-    const passiveConfidence: 'low' | 'medium' =
-      totalUsd > 1_000_000 && diversification > 30 ? 'medium' : 'low';
 
     const isDiversifiedWhale =
       (totalUsd > 5_000_000 && trackedWeight < 30) ||
@@ -140,40 +128,40 @@ export class LiteClassifierService {
         primaryScore: 75,
         secondaryType: null,
         reasoning:
-          `Large diversified portfolio (${formatUsd(totalUsd)} total) with ` +
+          `Large diversified portfolio ($${(totalUsd / 1_000_000).toFixed(1)}M total) with ` +
           `${trackedWeight.toFixed(1)}% allocation to this token. No DEX trading detected.`,
       };
     }
 
     if (trackedWeight >= 80) {
       return {
-        primaryType: 'Passive Holder',
-        confidence: passiveConfidence,
+        primaryType: 'Conviction Holder',
+        confidence: totalUsd > 1_000_000 ? 'medium' : 'low',
         primaryScore: 55,
         secondaryType: null,
         reasoning:
-          `Holds ${trackedWeight.toFixed(1)}% of portfolio in this token with no ` +
-          'DEX trading activity. Likely acquired via transfer or OTC.',
+          `Demonstrates strong conviction holding ${trackedWeight.toFixed(1)}% of total balance sheet in this token with no active trading profile.`,
       };
     }
 
     if (diversification > 30 && trackedWeight < 50) {
       return {
-        primaryType: 'Passive Investor',
-        confidence: passiveConfidence,
+        primaryType: 'Strategic Allocator',
+        confidence: totalUsd > 1_000_000 ? 'medium' : 'low',
         primaryScore: 50,
         secondaryType: null,
         reasoning:
-          'Diversified portfolio with modest allocation to this token. No DEX trading detected.',
+          'Maintains a well-diversified portfolio structure with a strategic exposure allocation to this token.',
       };
     }
 
     return {
-      primaryType: 'Passive Holder',
-      confidence: passiveConfidence,
+      primaryType: 'Conviction Holder',
+      confidence: 'low',
       primaryScore: 40,
       secondaryType: null,
-      reasoning: 'Token holder with no DEX trading history.',
+      reasoning:
+        'Long-term asset holder with a static portfolio distribution and no short-term execution activity.',
     };
   }
 
@@ -515,11 +503,14 @@ export class LiteClassifierService {
           `Large portfolio (${(f.totalPortfolioUsd ?? 0).toLocaleString('en-US', { maximumFractionDigits: 0 })} USD) ` +
           `with ${(f.trackedTokenWeight ?? 0).toFixed(1)}% in this token; no DEX swaps observed.`;
         break;
-      case 'Passive Holder':
-      case 'Passive Investor':
+      case 'Conviction Holder':
+      case 'Strategic Allocator':
         baseReasoning =
           `Holds ${(f.trackedTokenWeight ?? 0).toFixed(1)}% of portfolio in this token; ` +
           'no DEX trading activity detected.';
+        break;
+      case 'Dormant Wallet':
+        baseReasoning = 'Wallet is dormant on DEXs with no recent swap history to profile.';
         break;
       default:
         baseReasoning = `Based on ${f.swapCount} swaps over ${f.tradingSpanDays.toFixed(0)} days.`;

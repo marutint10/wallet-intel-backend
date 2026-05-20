@@ -21,12 +21,15 @@ export interface LiteScore {
 }
 
 const SCORE_BANDS = [
-  { min: 90, label: 'Elite Smart Money' },
-  { min: 75, label: 'Strong Trader' },
-  { min: 60, label: 'Good Trader' },
-  { min: 40, label: 'Average' },
-  { min: 0, label: 'Weak / Risky' },
+  { min: 90, label: 'Institutional' },
+  { min: 75, label: 'Premium' },
+  { min: 60, label: 'Strong' },
+  { min: 40, label: 'Solid' },
+  { min: 0, label: 'Developing' },
 ];
+
+/** Bands that mean the wallet was not scored (dashboard surfaces score as null). */
+export const UNSCORED_SCORE_BANDS = new Set(['Dormant Wallet', 'Insufficient Data']);
 
 @Injectable()
 export class LiteScorerService {
@@ -36,7 +39,7 @@ export class LiteScorerService {
   ): LiteScore {
     // FIX 2: gated wallets keep `score: 0` internally to preserve the
     // `LiteScore.score: number` contract that HolderAggregationService relies on,
-    // but `band: 'Insufficient Data'` is the canonical "not scored" signal that
+    // but `band: 'Dormant Wallet'` is the canonical "not scored" signal that
     // DashboardSummaryService translates into `null` in the API response.
     // Treat 0 here as a sentinel, not a real score.
     if (features.swapCount < 3) {
@@ -48,7 +51,7 @@ export class LiteScorerService {
       return {
         score: 0,
         confidence: 'low',
-        band: 'Insufficient Data',
+        band: 'Dormant Wallet',
         breakdown: {
           consistency: 0,
           riskManagement: 0,
@@ -100,7 +103,7 @@ export class LiteScorerService {
 
     const band =
       SCORE_BANDS.find((scoreBand) => clampedScore >= scoreBand.min)?.label ??
-      'Weak / Risky';
+      'Developing';
 
     // Confidence is driven by sample richness signals that are present even
     // without FIFO matched lots: swap count, sample size, and wallet age.
@@ -148,18 +151,26 @@ export class LiteScorerService {
     return Math.max(min, Math.min(max, value));
   }
 
-  // IMPROVEMENT 3: Portfolio-only path for wallets without DEX swaps (top-50 holders with holdings data).
+  /**
+   * Scores a passive holder using portfolio quality, risk metrics, and capital quantity.
+   * Capped at 60 points to preserve active-trader premium.
+   */
   private scorePortfolioOnly(features: LiteFeatureVector): LiteScore {
-    const trackedWeight = features.trackedTokenWeight ?? 0;
+    const totalPortfolioUsd = features.totalPortfolioUsd ?? 0;
+    const trackedTokenWeight = features.trackedTokenWeight ?? 0;
+    const walletAgeDays = features.walletAgeDays ?? 0;
+
+    // Loosen totalHoldingTokens from <= 1 to <= 3 for gas tokens (e.g. ETH) and airdrops.
     if (
-      trackedWeight >= 80 &&
-      (!features.holdingCategoryMix || features.totalHoldingTokens <= 1)
+      trackedTokenWeight >= 95 ||
+      (trackedTokenWeight >= 80 &&
+        (!features.holdingCategoryMix || features.totalHoldingTokens <= 3))
     ) {
-      const floorScore = features.walletAgeDays > 180 ? 25 : 18;
+      const floorScore = walletAgeDays > 180 ? 25 : 18;
       return {
         score: floorScore,
         confidence: 'low',
-        band: 'Average',
+        band: 'Conviction',
         breakdown: {
           consistency: 0,
           riskManagement: 10,
@@ -171,66 +182,111 @@ export class LiteScorerService {
       };
     }
 
-    const portfolioQuality = this.scorePortfolioQuality(features);
-    const riskManagement = this.scoreRiskManagementPortfolioOnly(features);
-    const experience = this.scorePortfolioOnlyExperience(features);
+    const portfolioQualityRaw = this.scorePortfolioQuality(features);
 
-    const rawScore = Math.round(
-      (portfolioQuality / 100) * 45 + (riskManagement / 20) * 12 + experience,
+    let riskManagementRaw = 10;
+    if (
+      features.portfolioRiskSignal === 'conservative' ||
+      features.portfolioRiskSignal === 'balanced'
+    ) {
+      riskManagementRaw += 5;
+    } else if (features.portfolioRiskSignal === 'aggressive') {
+      riskManagementRaw -= 3;
+    }
+
+    let experiencePoints = 0;
+    if (walletAgeDays > 365) {
+      experiencePoints = 8;
+    } else if (walletAgeDays > 180) {
+      experiencePoints = 5;
+    }
+
+    const quantityPoints = this.scorePortfolioQuantityPoints(
+      totalPortfolioUsd,
+      trackedTokenWeight,
     );
-    const clampedScore = Math.min(60, Math.max(0, rawScore));
+    const sizeMultiplier = this.resolvePortfolioSizeMultiplier(totalPortfolioUsd);
+
+    // Max totalPortfolioQualityScore = 112 (100 quality + 12 quantity).
+    const totalPortfolioQualityScore = portfolioQualityRaw + quantityPoints;
+    const baseFormulaScore =
+      (totalPortfolioQualityScore / 112) * 45 +
+      (riskManagementRaw / 15) * 12 +
+      experiencePoints;
+    const multipliedScore = baseFormulaScore * sizeMultiplier;
+
+    let finalScore = Math.min(60, Math.max(0, Math.round(multipliedScore)));
+    if (totalPortfolioUsd >= 1_000_000 && finalScore < 45) {
+      finalScore = 45;
+    } else if (totalPortfolioUsd >= 100_000 && finalScore < 30) {
+      finalScore = 30;
+    }
 
     const band =
-      SCORE_BANDS.find((scoreBand) => clampedScore >= scoreBand.min)?.label ??
-      'Weak / Risky';
+      SCORE_BANDS.find((scoreBand) => finalScore >= scoreBand.min)?.label ??
+      'Developing';
 
     return {
-      score: clampedScore,
+      score: finalScore,
       confidence: 'low',
       band,
       breakdown: {
         consistency: 0,
-        riskManagement,
-        portfolioQuality,
-        experience,
         activity: 0,
         profitability: 0,
+        riskManagement: Math.round(riskManagementRaw * sizeMultiplier),
+        portfolioQuality: Math.round(totalPortfolioQualityScore * sizeMultiplier),
+        experience: Math.round(experiencePoints * sizeMultiplier),
       },
     };
   }
 
-  // IMPROVEMENT 3: Partial risk score using portfolio signals only (no trade cadence).
-  private scoreRiskManagementPortfolioOnly(f: LiteFeatureVector): number {
-    let score = 0;
-
-    const memePct = f.holdingCategoryMix?.meme ?? f.memecoinPercent;
-    if (memePct < 10) {
-      score += 10;
-    } else if (memePct < 25) {
-      score += 7;
-    } else if (memePct < 50) {
-      score += 3;
+  /** Mirrors wallet holder `resolveHolderPortfolioSizeMultiplier` tiers. */
+  private resolvePortfolioSizeMultiplier(totalPortfolioUsd: number): number {
+    if (totalPortfolioUsd >= 1000) {
+      return 1.0;
     }
-
-    if (f.portfolioRiskSignal === 'conservative') {
-      score += 10;
-    } else if (f.portfolioRiskSignal === 'balanced') {
-      score += 5;
-    } else if (f.portfolioRiskSignal === 'degen') {
-      score -= 5;
+    if (totalPortfolioUsd >= 100) {
+      return 0.85;
     }
-
-    return Math.max(0, Math.min(score, 20));
+    if (totalPortfolioUsd >= 10) {
+      return 0.6;
+    }
+    if (totalPortfolioUsd >= 1) {
+      return 0.35;
+    }
+    return 0.1;
   }
 
-  private scorePortfolioOnlyExperience(f: LiteFeatureVector): number {
-    if (f.walletAgeDays > 365) {
-      return 8;
+  /** Absolute capital quantity (max 12): total wealth + tracked-token position USD. */
+  private scorePortfolioQuantityPoints(
+    totalPortfolioUsd: number,
+    trackedTokenWeight: number,
+  ): number {
+    let quantityPoints = 0;
+
+    if (totalPortfolioUsd > 1_000_000) {
+      quantityPoints += 6;
+    } else if (totalPortfolioUsd > 100_000) {
+      quantityPoints += 4;
+    } else if (totalPortfolioUsd > 10_000) {
+      quantityPoints += 2;
+    } else if (totalPortfolioUsd > 1_000) {
+      quantityPoints += 1;
     }
-    if (f.walletAgeDays > 180) {
-      return 5;
+
+    const trackedTokenUsd = totalPortfolioUsd * (trackedTokenWeight / 100);
+    if (trackedTokenUsd > 100_000) {
+      quantityPoints += 6;
+    } else if (trackedTokenUsd > 10_000) {
+      quantityPoints += 4;
+    } else if (trackedTokenUsd > 1_000) {
+      quantityPoints += 2;
+    } else if (trackedTokenUsd > 100) {
+      quantityPoints += 1;
     }
-    return 0;
+
+    return Math.min(12, quantityPoints);
   }
 
   // CONSISTENCY (max 20)
