@@ -1,5 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cache } from 'cache-manager';
 import { lookupKnownExchange } from '../constants/known-exchange-addresses';
 
 export type HolderLabel =
@@ -173,8 +175,11 @@ type TeamCounterpartySignal = {
 @Injectable()
 export class TokenIntelligenceService {
   private readonly logger = new Logger(TokenIntelligenceService.name);
+  private static readonly CONTRACT_NAME_CACHE_PREFIX = 'token:contract-name:';
+  private static readonly CONTRACT_NAME_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   private readonly contractCodeCache = new Map<string, boolean>();
-  private readonly contractNameCache = new Map<string, string | null>();
+  /** L1: successful Etherscan contract names only (never cache transient failures). */
+  private readonly contractNameMemoryCache = new Map<string, string>();
   private readonly missingKeyWarnings = new Set<string>();
 
   private static readonly KNOWN_DEX_ROUTERS = new Map<string, string>([
@@ -231,7 +236,10 @@ export class TokenIntelligenceService {
     'team',
   ];
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+  ) {}
 
   async getTokenMetadata(
     contractAddress: string,
@@ -989,18 +997,40 @@ export class TokenIntelligenceService {
     }
   }
 
+  private contractNameCacheKey(address: string, chain: string): string | null {
+    const chainId = this.getEtherscanChainId(chain);
+    if (!chainId) {
+      return null;
+    }
+
+    return `${chainId}:${address.toLowerCase()}`;
+  }
+
   private async getContractName(
     address: string,
     chain: string,
   ): Promise<string | null> {
-    if (this.contractNameCache.has(address)) {
-      return this.contractNameCache.get(address) ?? null;
+    const cacheKey = this.contractNameCacheKey(address, chain);
+    if (!cacheKey) {
+      return null;
+    }
+
+    const memoryHit = this.contractNameMemoryCache.get(cacheKey);
+    if (memoryHit) {
+      return memoryHit;
+    }
+
+    const persistentKey =
+      TokenIntelligenceService.CONTRACT_NAME_CACHE_PREFIX + cacheKey;
+    const cached = await this.cacheManager.get<string>(persistentKey);
+    if (typeof cached === 'string' && cached.length > 0) {
+      this.contractNameMemoryCache.set(cacheKey, cached);
+      return cached;
     }
 
     const apiKey = this.config.get<string>('ETHERSCAN_API_KEY') ?? '';
     const chainId = this.getEtherscanChainId(chain);
     if (chainId && this.shouldSkipEtherscan(chainId)) {
-      this.contractNameCache.set(address, null);
       return null;
     }
 
@@ -1009,7 +1039,6 @@ export class TokenIntelligenceService {
         'ETHERSCAN_API_KEY',
         'Skipping contract source/name lookup',
       );
-      this.contractNameCache.set(address, null);
       return null;
     }
 
@@ -1023,18 +1052,26 @@ export class TokenIntelligenceService {
 
       const response = await fetch(url.toString());
       if (!response.ok) {
-        this.contractNameCache.set(address, null);
+        this.logger.debug(
+          `Contract name lookup HTTP ${response.status} for ${address}; not caching`,
+        );
         return null;
       }
 
       const payload = (await response.json()) as EtherscanSourceCodeResponse;
       const contractName = payload.result?.[0]?.ContractName?.trim() || null;
-      this.contractNameCache.set(address, contractName);
+      if (contractName) {
+        this.contractNameMemoryCache.set(cacheKey, contractName);
+        await this.cacheManager.set(
+          persistentKey,
+          contractName,
+          TokenIntelligenceService.CONTRACT_NAME_CACHE_TTL_MS,
+        );
+      }
 
       return contractName;
     } catch (err: unknown) {
       this.logger.warn(`Contract name lookup failed: ${this.getErrorMessage(err)}`);
-      this.contractNameCache.set(address, null);
       return null;
     }
   }
