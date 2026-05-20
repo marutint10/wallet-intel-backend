@@ -40,6 +40,9 @@ export interface HoldingsProfile {
   trackedTokenWeight: number;
   diversificationScore: number;
   holdingTokenCount: number;
+  totalTokenBalances: number;
+  pricedTokenCount: number;
+  unpricedTokenCount: number;
   categoryAllocations: CategoryAllocations;
   topHoldings: Array<{
     symbol: string;
@@ -97,6 +100,9 @@ export class LitePortfolioService {
           trackedTokenWeight,
           diversificationScore: 0,
           holdingTokenCount,
+          totalTokenBalances: holdingTokenCount,
+          pricedTokenCount: holdingTokenCount,
+          unpricedTokenCount: 0,
           holdingCount: holdingTokenCount,
           categoryAllocations,
           topHoldings: [],
@@ -118,6 +124,8 @@ export class LitePortfolioService {
         decimals?: number;
         name?: string;
       }> = [];
+      let pricedTokenCount = nativeHolding ? 1 : 0;
+      let unpricedTokenCount = 0;
 
       if (nativeHolding) {
         holdings.push(nativeHolding);
@@ -136,10 +144,18 @@ export class LitePortfolioService {
               (priceMap.get(`${chain.toLowerCase()}:${balance.contractAddress}`) ??
                 0);
 
+        if (
+          balance.contractAddress !== normalizedTrackedToken &&
+          !priceMap.has(`${chain.toLowerCase()}:${balance.contractAddress}`)
+        ) {
+          unpricedTokenCount += 1;
+        }
+
         if (usdValue < 1 && balance.contractAddress !== normalizedTrackedToken) {
           continue;
         }
 
+        pricedTokenCount += 1;
         holdings.push({
           contractAddress: balance.contractAddress,
           symbol: balance.symbol || 'UNKNOWN',
@@ -157,6 +173,7 @@ export class LitePortfolioService {
         trackedTokenUsdValue > 0 &&
         !holdings.some((holding) => holding.contractAddress === normalizedTrackedToken)
       ) {
+        pricedTokenCount += 1;
         holdings.push({
           contractAddress: normalizedTrackedToken,
           symbol: 'TRACKED',
@@ -207,6 +224,7 @@ export class LitePortfolioService {
         Math.max(0, Math.min(100, (1 - maxWeight / 100) * 120)),
       );
       const holdingTokenCount = holdings.length;
+      const totalTokenBalances = balances.length + (nativeHolding ? 1 : 0);
 
       this.logger.debug(
         `Portfolio context for ${walletAddress}: $${this.roundUsd(totalPortfolioUsd)}`,
@@ -218,6 +236,9 @@ export class LitePortfolioService {
         trackedTokenWeight,
         diversificationScore,
         holdingTokenCount,
+        totalTokenBalances,
+        pricedTokenCount,
+        unpricedTokenCount,
         holdingCount: holdingTokenCount,
         categoryAllocations,
         topHoldings,

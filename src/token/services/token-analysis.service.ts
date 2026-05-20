@@ -200,6 +200,14 @@ export class TokenAnalysisService {
       const results = await Promise.allSettled(
         batch.map(async (holder) => {
           const filter = classifications.get(holder.walletAddress.toLowerCase());
+          const holdingsProfile = await this.fetchHolderPortfolioContext(
+            holder.walletAddress,
+            holder.rank,
+            address,
+            holder.usdValue,
+            chain,
+            filter?.label,
+          );
 
           if (filter && !filter.shouldAnalyze) {
             return {
@@ -219,7 +227,7 @@ export class TokenAnalysisService {
               teamConnectionScore: filter.teamConnectionScore,
               classification: null,
               score: null,
-              portfolio: null,
+              portfolio: holdingsProfile,
               pnl: null,
             } as AnalyzedHolder;
           }
@@ -236,22 +244,6 @@ export class TokenAnalysisService {
               FAST_MODE,
             );
             const tTransfers = Date.now() - tTransfersStart;
-
-            let holdingsProfile: HoldingsProfile | null = null;
-            if (holder.rank <= 50) {
-              try {
-                holdingsProfile = await this.portfolio.getPortfolioContext(
-                  holder.walletAddress,
-                  address,
-                  holder.usdValue,
-                  chain,
-                );
-              } catch (err: unknown) {
-                this.logger.warn(
-                  `Portfolio fetch failed for ${holder.walletAddress}: ${this.getErrorMessage(err)}`,
-                );
-              }
-            }
 
             const tFeaturesStart = Date.now();
             const features = this.feature.extractFeatures(
@@ -453,6 +445,37 @@ export class TokenAnalysisService {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async fetchHolderPortfolioContext(
+    walletAddress: string,
+    rank: number,
+    trackedTokenAddress: string,
+    trackedTokenUsdValue: number,
+    chain: string,
+    holderLabel?: string,
+  ): Promise<HoldingsProfile | null> {
+    if (holderLabel === 'exchange' || holderLabel === 'cex_deposit') {
+      return null;
+    }
+
+    if (rank > 50) {
+      return null;
+    }
+
+    try {
+      return await this.portfolio.getPortfolioContext(
+        walletAddress,
+        trackedTokenAddress,
+        trackedTokenUsdValue,
+        chain,
+      );
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Portfolio fetch failed for ${walletAddress}: ${this.getErrorMessage(err)}`,
+      );
+      return null;
+    }
   }
 
   private getErrorMessage(err: unknown): string {

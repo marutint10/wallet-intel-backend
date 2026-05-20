@@ -161,7 +161,7 @@ Responsibilities:
 - **Phase 1:** `TokenIntelligenceService.getTokenMetadata` (deployer, owner, liquidity, supply)
 - **Phase 2:** `TokenIntelligenceService.classifyHolders` — labels every holder; known exchanges/contracts/burn/dust get `shouldAnalyze: false`
 - **Phase 3:** batch lite pipeline only for holders that pass triage (`shouldAnalyze: true`, typically `walletLabel: eoa`)
-- enrich holder rows with usdValue, top-holder portfolio context (rank ≤ 50), and (when not FAST_MODE) lite PnL summaries
+- enrich holder rows with usdValue, selective top-holder portfolio context (rank ≤ 50, except CEX labels), and (when not FAST_MODE) lite PnL summaries
 - aggregate holder-level analytics into token-level metrics
 - persist status done/error and payload into token_analyses, including defensively-nullable tokenName / tokenSymbol
 
@@ -169,7 +169,7 @@ Holder row outcomes after triage:
 
 | `shouldAnalyze` | `walletLabel` examples | lite classify/score | persisted fields |
 |-----------------|------------------------|---------------------|------------------|
-| `false` | `exchange`, `burn`, `dust`, `dex_router`, … | skipped | `classification: null`, `score: null` |
+| `false` | `exchange`, `cex_deposit`, `burn`, `dust`, `dex_router`, … | skipped | `classification: null`, `score: null` |
 | `true` | `eoa` (and team-linked EOAs) | full or passive path | populated when pipeline succeeds |
 
 FAST_MODE constant:
@@ -243,7 +243,7 @@ Holder labels (`HolderLabel`):
 Integration:
 
 - `TokenAnalysisService` Phase 2 runs before any per-wallet transfer fetch
-- exchange-labeled holders never hit `LiteClassifierService` / `LiteScorerService` but still appear in `holders_data` and exchange allocation metrics
+- exchange/cex_deposit-labeled holders never hit `LiteClassifierService` / `LiteScorerService`, keep `portfolio: null` by design, and still appear in `holders_data` + exchange allocation metrics
 
 ### LiteIngestionService
 
@@ -559,7 +559,7 @@ Holder table row mapping:
 - `walletLabel` / `walletLabelDetail`: from intelligence triage (`exchange`, `eoa`, …); exchange rows show detail e.g. `OKX Cold Wallet`
 - `classification` / `confidence`: from `holder.classification` with null-safety (`null` for exchange/burn/dust and other non-analyzed labels)
 - `score`: numeric lite score when present; **`null`** when `holder.score.band` is in `UNSCORED_SCORE_BANDS` (`Dormant Wallet`, legacy `Insufficient Data`) so the UI does not show 0 as a real score
-- `portfolioRisk`: `holder.portfolio?.portfolioRiskSignal ?? null`
+- `portfolioRisk`: `holder.portfolio?.portfolioRiskSignal ?? null` (always `null` for `exchange` / `cex_deposit`, by design)
 - `lastActiveDays`: `holder.features?.daysSinceLastActivity ?? null` (currently always null because features are not persisted on holder rows; included as forward-compatible)
 
 Pure helper functions (all exported and unit-test friendly):
@@ -706,6 +706,7 @@ Current runtime notes:
 - production orchestrator uses TokenIntelligenceService for holder labeling, team detection, and token metadata before running lite analysis on EOA holders
 - known exchange addresses (see `known-exchange-addresses.ts`) are labeled in Phase 2 with `shouldAnalyze: false` — they never receive lite scores but count toward **Exchange Allocation** on the dashboard
 - non-EOA holders (exchanges, contracts, burn, etc.) skip transfer fetch and classification but still appear in `holders_data` with `walletLabel`, `labelEvidence`, `classification: null`, `score: null`
+- portfolio context is fetched for top-50 non-EOA holders except CEX labels; `exchange` / `cex_deposit` intentionally keep `portfolio: null` so portfolio USD and token share are hidden for custodial wallets
 
 Failure behavior:
 
