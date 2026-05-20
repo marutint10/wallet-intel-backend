@@ -18,6 +18,8 @@ import { LiteClassifierService } from './services/lite-classifier.service';
 import { LiteIngestionService } from './services/lite-ingestion.service';
 import { LiteFeatureService } from './services/lite-feature.service';
 import { LiteScorerService } from './services/lite-scorer.service';
+import { LitePortfolioService } from './services/lite-portfolio.service';
+import type { HoldingsProfile } from './services/lite-portfolio.service';
 import { TokenAiSummaryService } from './services/token-ai-summary.service';
 import {
   type ChartTimeframe,
@@ -50,6 +52,7 @@ export class TokenController {
     private readonly liteFeature: LiteFeatureService,
     private readonly liteClassifier: LiteClassifierService,
     private readonly liteScorer: LiteScorerService,
+    private readonly litePortfolio: LitePortfolioService,
     private readonly tokenAnalysis: TokenAnalysisService,
     private readonly dashboardSummary: DashboardSummaryService,
     private readonly tokenAiSummary: TokenAiSummaryService,
@@ -112,15 +115,19 @@ export class TokenController {
   async classifyWallet(
     @Param('address') address: string,
     @Query('chain') chain: string = 'ethereum',
+    @Query('trackedToken') trackedToken?: string,
+    @Query('trackedUsd') trackedUsd?: string,
+    @Query('fastMode') fastMode?: string,
   ) {
-    const transfers = await this.liteIngestion.getRecentTransfers(
+    const { features, holdingsProfile } = await this.buildDebugWalletFeatures(
       address,
       chain,
-      200,
+      trackedToken,
+      trackedUsd,
+      fastMode === 'true',
     );
-    const features = this.liteFeature.extractFeatures(transfers, address, chain);
     const classification = this.liteClassifier.classify(features);
-    return { features, classification };
+    return { features, classification, holdingsProfile };
   }
 
   // GET /token/wallet/:address/score?chain=ethereum
@@ -128,16 +135,60 @@ export class TokenController {
   async scoreWallet(
     @Param('address') address: string,
     @Query('chain') chain: string = 'ethereum',
+    @Query('trackedToken') trackedToken?: string,
+    @Query('trackedUsd') trackedUsd?: string,
+    @Query('fastMode') fastMode?: string,
   ) {
-    const transfers = await this.liteIngestion.getRecentTransfers(
+    const { features, holdingsProfile } = await this.buildDebugWalletFeatures(
       address,
       chain,
-      200,
+      trackedToken,
+      trackedUsd,
+      fastMode === 'true',
     );
-    const features = this.liteFeature.extractFeatures(transfers, address, chain);
     const classification = this.liteClassifier.classify(features);
     const score = this.liteScorer.score(features);
-    return { score, classification };
+    return { score, classification, features, holdingsProfile };
+  }
+
+  /** Mirrors TokenAnalysisService holder path for debug endpoints. */
+  private async buildDebugWalletFeatures(
+    walletAddress: string,
+    chain: string,
+    trackedToken?: string,
+    trackedUsd?: string,
+    fastMode = true,
+  ): Promise<{ features: ReturnType<LiteFeatureService['extractFeatures']>; holdingsProfile: HoldingsProfile | null }> {
+    const transferLimit = fastMode ? 50 : 200;
+    const transfers = await this.liteIngestion.getRecentTransfers(
+      walletAddress,
+      chain,
+      transferLimit,
+      fastMode,
+    );
+
+    let holdingsProfile: HoldingsProfile | null = null;
+    if (trackedToken) {
+      const usd = Number.parseFloat(trackedUsd ?? '0');
+      holdingsProfile = await this.litePortfolio.getPortfolioContext(
+        walletAddress,
+        trackedToken,
+        Number.isFinite(usd) ? usd : 0,
+        chain,
+      );
+    }
+
+    const features = this.liteFeature.extractFeatures(
+      transfers,
+      walletAddress,
+      chain,
+      holdingsProfile?.holdingTokenCount,
+      1,
+      holdingsProfile,
+      fastMode,
+    );
+
+    return { features, holdingsProfile };
   }
 
   // POST /token/analyze
