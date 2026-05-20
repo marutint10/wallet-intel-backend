@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { lookupKnownExchange } from '../constants/known-exchange-addresses';
 
 export type HolderLabel =
   | 'eoa'
@@ -175,35 +176,6 @@ export class TokenIntelligenceService {
   private readonly contractCodeCache = new Map<string, boolean>();
   private readonly contractNameCache = new Map<string, string | null>();
   private readonly missingKeyWarnings = new Set<string>();
-
-  private static readonly KNOWN_EXCHANGES = new Map<string, string>([
-    ['0x28c6c06298d514db089934071355e5743bf21d60', 'Binance 14'],
-    ['0x21a31ee1afc51d94c2efccaa2092ad1028285549', 'Binance'],
-    ['0xdfd5293d8e347dfe59e90efd55b2956a1343963d', 'Binance'],
-    ['0x47ac0fb4f2d84898e4d9e7b4dab3c24507a6d503', 'Binance'],
-    ['0xf977814e90da44bfa03b6295a0616a897441acec', 'Binance 8'],
-    ['0xa9d1e08c7793af67e9d92fe308d5697fb81d3e43', 'Coinbase'],
-    ['0x71660c4005ba85c37ccec55d0c4493e66fe775d3', 'Coinbase'],
-    ['0x503828976d22510aad0201ac7ec88293211d23da', 'Coinbase'],
-    ['0x5a52e96bacdabb82fd05763e25335261b270efcb', 'OKX'],
-    ['0x6cc5f688a315f3dc28a7781717a9a798a59fda7b', 'OKX'],
-    ['0x1884c178a6542f288ebc8780d04c72514284fb84', 'OKX 2'],
-    ['0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0', 'Kraken'],
-    ['0xae2d4617c862309a3d75a0ffb358c7a5009c673f', 'Kraken'],
-    ['0x1ab4973a48dc892cd9971ece8e01dcc7688f8f23', 'Gate.io'],
-    ['0x0d0707963952f2fba59dd06f2b425ace40b492fe', 'Gate.io'],
-    ['0x56eddb7aa87536c09ccc2793473599fd21a8b17f', 'Bybit'],
-    ['0xf89d7b9c864f589bbf53a82105107622b35eaa40', 'Bybit'],
-    ['0x46340b20830761efd32832a74d7169b29feb9758', 'Crypto.com'],
-    ['0xab5c66752a9e8167967685f1450532fb96d5d24f', 'Huobi'],
-    ['0x0548f59fee79f8832c299e01dca5c76f034f558e', 'KuCoin'],
-    ['0xd6216fc19db775df9774a6e33526131da7d19a2c', 'KuCoin'],
-    ['0x2faf487a4414fe77e2327f0bf4ae2a264a776ad2', 'FTX (defunct)'],
-    ['0x974caa59e49682cda0ad2bbe82983419a2ecc400', 'Bitfinex'],
-    ['0x77134cbc06cb00b44f64f51ba68d10b0811c72f5', 'Bitfinex'],
-    ['0xbe0eb53f46cd790cd13851d5eff43d12404d33e8', 'Binance 7'],
-    ['0x3f5ce5fbfe3e9af3971dd833d26ba9b5c936f0be', 'Binance (old)'],
-  ]);
 
   private static readonly KNOWN_DEX_ROUTERS = new Map<string, string>([
     ['0x7a250d5630b4cf539739df2c5dacb4c659f2488d', 'Uniswap V2 Router'],
@@ -719,8 +691,10 @@ export class TokenIntelligenceService {
     usdValue: number,
     tokenMetadata: TokenMetadata,
   ): HolderFilterResult | null {
-    if (TokenIntelligenceService.BURN_ADDRESSES.has(address)) {
-      return this.makeResult(address, 'burn', false, false, {
+    const normalizedAddress = address.trim().toLowerCase();
+
+    if (TokenIntelligenceService.BURN_ADDRESSES.has(normalizedAddress)) {
+      return this.makeResult(normalizedAddress, 'burn', false, false, {
         labelDetail: 'Burn Address',
         labelConfidence: 99,
         labelEvidence: [
@@ -734,9 +708,9 @@ export class TokenIntelligenceService {
       });
     }
 
-    const exchangeName = TokenIntelligenceService.KNOWN_EXCHANGES.get(address);
+    const exchangeName = lookupKnownExchange(normalizedAddress);
     if (exchangeName) {
-      return this.makeResult(address, 'exchange', false, false, {
+      return this.makeResult(normalizedAddress, 'exchange', false, false, {
         labelDetail: exchangeName,
         labelConfidence: 99,
         labelEvidence: [
@@ -750,9 +724,9 @@ export class TokenIntelligenceService {
       });
     }
 
-    const dexRouter = TokenIntelligenceService.KNOWN_DEX_ROUTERS.get(address);
+    const dexRouter = TokenIntelligenceService.KNOWN_DEX_ROUTERS.get(normalizedAddress);
     if (dexRouter) {
-      return this.makeResult(address, 'dex_router', false, false, {
+      return this.makeResult(normalizedAddress, 'dex_router', false, false, {
         labelDetail: dexRouter,
         labelConfidence: 99,
         labelEvidence: [
@@ -766,9 +740,9 @@ export class TokenIntelligenceService {
       });
     }
 
-    const bridge = TokenIntelligenceService.KNOWN_BRIDGES.get(address);
+    const bridge = TokenIntelligenceService.KNOWN_BRIDGES.get(normalizedAddress);
     if (bridge) {
-      return this.makeResult(address, 'bridge', false, false, {
+      return this.makeResult(normalizedAddress, 'bridge', false, false, {
         labelDetail: bridge,
         labelConfidence: 99,
         labelEvidence: [
@@ -783,7 +757,7 @@ export class TokenIntelligenceService {
     }
 
     if (usdValue < 10) {
-      return this.makeResult(address, 'dust', false, false, {
+      return this.makeResult(normalizedAddress, 'dust', false, false, {
         labelDetail: 'Holding below $10',
         labelConfidence: 95,
         labelEvidence: [
@@ -797,10 +771,10 @@ export class TokenIntelligenceService {
       });
     }
 
-    if (tokenMetadata.deployer?.toLowerCase() === address) {
-      return this.makeResult(address, 'deployer', true, true, {
+    if (tokenMetadata.deployer?.toLowerCase() === normalizedAddress) {
+      return this.makeResult(normalizedAddress, 'deployer', true, true, {
         labelDetail: 'Token deployer',
-        teamConnectionPath: `deployer -> ${address}`,
+        teamConnectionPath: `deployer -> ${normalizedAddress}`,
         labelConfidence: 99,
         labelEvidence: [
           {
@@ -813,10 +787,10 @@ export class TokenIntelligenceService {
       });
     }
 
-    if (tokenMetadata.owner?.toLowerCase() === address) {
-      return this.makeResult(address, 'owner', true, true, {
+    if (tokenMetadata.owner?.toLowerCase() === normalizedAddress) {
+      return this.makeResult(normalizedAddress, 'owner', true, true, {
         labelDetail: 'Token owner',
-        teamConnectionPath: `owner -> ${address}`,
+        teamConnectionPath: `owner -> ${normalizedAddress}`,
         labelConfidence: 99,
         labelEvidence: [
           {
