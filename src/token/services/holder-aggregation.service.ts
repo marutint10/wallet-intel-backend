@@ -167,7 +167,11 @@ export class HolderAggregationService {
     for (const holder of analyzedEOAHolders) {
       const type = holder.classification?.primaryType;
 
-      if (!type || type === 'Insufficient Data') {
+      if (
+        !type ||
+        type === 'Insufficient Data' ||
+        type === 'Dormant Wallet'
+      ) {
         unclassifiedCount += 1;
         continue;
       }
@@ -381,7 +385,8 @@ export class HolderAggregationService {
     const unclassifiedCount = analyzedEOAHolders.filter(
       (holder) =>
         holder.classification === null ||
-        holder.classification?.primaryType === 'Insufficient Data',
+        holder.classification?.primaryType === 'Insufficient Data' ||
+        holder.classification?.primaryType === 'Dormant Wallet',
     ).length;
     const unclassifiedPct =
       totalAnalyzedEOAs > 0
@@ -408,7 +413,8 @@ export class HolderAggregationService {
     const classifiedTraderHolders = analyzedEOAHolders.filter(
       (holder) =>
         Boolean(holder.classification?.primaryType) &&
-        holder.classification!.primaryType !== 'Insufficient Data',
+        holder.classification!.primaryType !== 'Insufficient Data' &&
+        holder.classification!.primaryType !== 'Dormant Wallet',
     );
     const classifiedTraderCount = classifiedTraderHolders.length;
 

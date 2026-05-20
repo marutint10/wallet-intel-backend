@@ -1,6 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { TokenAnalysisEntity } from '../entities/token-analysis.entity';
 import type { RiskCallout } from './holder-aggregation.service';
+import { UNSCORED_SCORE_BANDS } from './lite-scorer.service';
+
+function isUnclassifiedHolderType(primaryType: string | null): boolean {
+  return (
+    !primaryType ||
+    primaryType === 'Insufficient Data' ||
+    primaryType === 'Dormant Wallet'
+  );
+}
 
 // =============================================================================
 // DashboardSummaryService
@@ -467,7 +476,7 @@ export function computeHolderQualityBreakdown(
         ? (holder.classification.primaryType as string)
         : null;
 
-    if (!primaryType || primaryType === 'Insufficient Data') {
+    if (isUnclassifiedHolderType(primaryType)) {
       buckets.unclassified += 1;
       continue;
     }
@@ -581,10 +590,12 @@ function buildHolderTableRow(
       ? (holder.classification.confidence as string)
       : null;
 
-  // FIX 2: gated wallets (band === 'Insufficient Data') surface as null instead of 0
-  // so the dashboard does not misrepresent "we lacked data" as "scored zero points".
+  // FIX 2: gated wallets (Dormant Wallet / legacy Insufficient Data band) surface as null
+  // instead of 0 so the dashboard does not misrepresent "not scored" as "scored zero".
   const score =
-    holder?.score && holder.score.band === 'Insufficient Data'
+    holder?.score &&
+    typeof holder.score.band === 'string' &&
+    UNSCORED_SCORE_BANDS.has(holder.score.band)
       ? null
       : holder?.score && typeof holder.score.score === 'number'
         ? holder.score.score
