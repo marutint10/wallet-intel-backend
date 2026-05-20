@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { LiteFeatureVector, hasPortfolioContext } from './lite-feature.service';
+import {
+  LiteFeatureVector,
+  hasPortfolioContext,
+} from './lite-feature.service';
+import type { CategoryAllocations } from './lite-portfolio.service';
 import type { WalletPnlMetrics } from './lite-pnl.service';
 
 export interface LiteScore {
@@ -146,6 +150,27 @@ export class LiteScorerService {
 
   // IMPROVEMENT 3: Portfolio-only path for wallets without DEX swaps (top-50 holders with holdings data).
   private scorePortfolioOnly(features: LiteFeatureVector): LiteScore {
+    const trackedWeight = features.trackedTokenWeight ?? 0;
+    if (
+      trackedWeight >= 80 &&
+      (!features.holdingCategoryMix || features.totalHoldingTokens <= 1)
+    ) {
+      const floorScore = features.walletAgeDays > 180 ? 25 : 18;
+      return {
+        score: floorScore,
+        confidence: 'low',
+        band: 'Average',
+        breakdown: {
+          consistency: 0,
+          riskManagement: 10,
+          portfolioQuality: 0,
+          experience: floorScore - 10,
+          activity: 0,
+          profitability: 0,
+        },
+      };
+    }
+
     const portfolioQuality = this.scorePortfolioQuality(features);
     const riskManagement = this.scoreRiskManagementPortfolioOnly(features);
     const experience = this.scorePortfolioOnlyExperience(features);
@@ -295,26 +320,29 @@ export class LiteScorerService {
       const divScore = f.portfolioDiversificationScore || 0;
       score += (divScore / 100) * 30;
 
-      // IMPROVEMENT 1: Exclude the analyzed token from "other" when scoring category quality.
+      // IMPROVEMENT 1: Subtract tracked token weight from its category bucket before quality scoring.
       const trackedWeight = f.trackedTokenWeight ?? 0;
+      const adjustedMix = this.buildAdjustedCategoryMix(f);
       const nonTrackedPct = Math.max(0, 100 - trackedWeight);
-      if (nonTrackedPct > 0 && typeof f.trackedTokenWeight === 'number') {
+
+      if (adjustedMix && nonTrackedPct > 0 && typeof f.trackedTokenWeight === 'number') {
         const qualityInNonTracked =
-          (f.holdingCategoryMix.bluechip || 0) +
-          (f.holdingCategoryMix.defi || 0) +
-          (f.holdingCategoryMix.infrastructure || 0);
+          (adjustedMix.bluechip || 0) +
+          (adjustedMix.defi || 0) +
+          (adjustedMix.infrastructure || 0);
         const qualityAllocationPct = (qualityInNonTracked / nonTrackedPct) * 100;
         score += Math.min(30, qualityAllocationPct * 0.4);
-      } else {
+      } else if (adjustedMix) {
         const qualityAllocation =
-          (f.holdingCategoryMix.bluechip || 0) +
-          (f.holdingCategoryMix.defi || 0) +
-          (f.holdingCategoryMix.infrastructure || 0);
+          (adjustedMix.bluechip || 0) +
+          (adjustedMix.defi || 0) +
+          (adjustedMix.infrastructure || 0);
         score += Math.min(30, qualityAllocation * 0.4);
       }
 
       // Stablecoin reserve bonus (0-15)
-      const stablePct = f.holdingCategoryMix.stablecoin || 0;
+      const stablePct =
+        adjustedMix?.stablecoin ?? (f.holdingCategoryMix.stablecoin || 0);
       if (stablePct >= 5 && stablePct <= 40) {
         score += 15;
       } else if (stablePct > 40) {
@@ -335,6 +363,9 @@ export class LiteScorerService {
       const concentrationWeight = f.trackedTokenWeight || 0;
       if (concentrationWeight > 80) {
         score -= 2;
+        if (f.walletAgeDays > 90) {
+          score += 5;
+        }
       } else if (concentrationWeight > 50) {
         score -= 1;
       }
@@ -352,6 +383,24 @@ export class LiteScorerService {
     }
 
     return Math.max(0, Math.min(100, score));
+  }
+
+  private buildAdjustedCategoryMix(
+    f: LiteFeatureVector,
+  ): CategoryAllocations | null {
+    if (!f.holdingCategoryMix) {
+      return null;
+    }
+
+    const trackedWeight = f.trackedTokenWeight ?? 0;
+    const trackedCat = f.trackedTokenCategory || 'other';
+    const adjustedMix: CategoryAllocations = { ...f.holdingCategoryMix };
+
+    if (trackedWeight > 0 && trackedCat in adjustedMix) {
+      adjustedMix[trackedCat] = Math.max(0, adjustedMix[trackedCat] - trackedWeight);
+    }
+
+    return adjustedMix;
   }
 
   // EXPERIENCE (max 15)

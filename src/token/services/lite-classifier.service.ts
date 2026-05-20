@@ -123,11 +123,17 @@ export class LiteClassifierService {
       return `$${Math.round(value)}`;
     };
 
-    if (
-      totalUsd > 500_000 &&
-      trackedWeight < 20 &&
-      diversification > 50
-    ) {
+    const passiveConfidence: 'low' | 'medium' =
+      totalUsd > 1_000_000 && diversification > 30 ? 'medium' : 'low';
+
+    const isDiversifiedWhale =
+      (totalUsd > 5_000_000 && trackedWeight < 30) ||
+      (totalUsd > 500_000 && trackedWeight < 20 && diversification > 50) ||
+      (totalUsd > 1_000_000 &&
+        trackedWeight < 30 &&
+        (features.holdingCategoryMix?.bluechip ?? 0) > 50);
+
+    if (isDiversifiedWhale) {
       return {
         primaryType: 'Diversified Whale',
         confidence: 'medium',
@@ -142,7 +148,7 @@ export class LiteClassifierService {
     if (trackedWeight >= 80) {
       return {
         primaryType: 'Passive Holder',
-        confidence: 'low',
+        confidence: passiveConfidence,
         primaryScore: 55,
         secondaryType: null,
         reasoning:
@@ -154,7 +160,7 @@ export class LiteClassifierService {
     if (diversification > 30 && trackedWeight < 50) {
       return {
         primaryType: 'Passive Investor',
-        confidence: 'low',
+        confidence: passiveConfidence,
         primaryScore: 50,
         secondaryType: null,
         reasoning:
@@ -164,7 +170,7 @@ export class LiteClassifierService {
 
     return {
       primaryType: 'Passive Holder',
-      confidence: 'low',
+      confidence: passiveConfidence,
       primaryScore: 40,
       secondaryType: null,
       reasoning: 'Token holder with no DEX trading history.',
