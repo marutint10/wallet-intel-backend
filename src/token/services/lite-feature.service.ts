@@ -70,6 +70,8 @@ export interface LiteFeatureVector {
   portfolioDiversificationScore?: number;
   holdingCategoryMix?: CategoryAllocations;
   portfolioRiskSignal?: PortfolioRiskSignal;
+  /** Category slug of the token under analysis (for portfolio quality adjustment). */
+  trackedTokenCategory?: TokenCategorySlug;
 
   // FAST_MODE derived features.
   // These replace exact realized hold durations as the primary classification
@@ -108,6 +110,7 @@ export class LiteFeatureService {
     holdingChainCount?: number,
     holdingsProfile?: HoldingsProfile | null,
     fastMode = false,
+    trackedTokenContractAddress?: string,
   ): LiteFeatureVector {
     const resolvedHoldingTokenCount =
       holdingsProfile?.holdingTokenCount ?? holdingTokenCount ?? 0;
@@ -124,6 +127,8 @@ export class LiteFeatureService {
         ),
         holdingsProfile,
         resolvedHoldingTokenCount,
+        trackedTokenContractAddress,
+        chain,
       );
     }
 
@@ -229,6 +234,8 @@ export class LiteFeatureService {
       },
       holdingsProfile,
       resolvedHoldingTokenCount,
+      trackedTokenContractAddress,
+      chain,
     );
   }
 
@@ -237,10 +244,21 @@ export class LiteFeatureService {
     vector: LiteFeatureVector,
     holdingsProfile?: HoldingsProfile | null,
     holdingTokenCount?: number,
+    trackedTokenContractAddress?: string,
+    chain?: string,
   ): LiteFeatureVector {
     if (!holdingsProfile) {
       return vector;
     }
+
+    const resolvedChain = chain ?? vector.chain;
+    const trackedTokenCategory = trackedTokenContractAddress
+      ? classifyTokenCategory(
+          trackedTokenContractAddress,
+          undefined,
+          resolvedChain,
+        )
+      : undefined;
 
     return {
       ...vector,
@@ -249,6 +267,7 @@ export class LiteFeatureService {
       portfolioDiversificationScore: holdingsProfile.diversificationScore,
       holdingCategoryMix: holdingsProfile.categoryAllocations,
       portfolioRiskSignal: holdingsProfile.portfolioRiskSignal,
+      trackedTokenCategory,
       totalHoldingTokens:
         holdingsProfile.holdingTokenCount ?? holdingTokenCount ?? vector.totalHoldingTokens,
       portfolioConcentrationScore: this.computePortfolioConcentrationScore(
