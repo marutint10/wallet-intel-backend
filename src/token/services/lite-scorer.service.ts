@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { LiteFeatureVector } from './lite-feature.service';
+import { LiteFeatureVector, hasPortfolioContext } from './lite-feature.service';
 import type { WalletPnlMetrics } from './lite-pnl.service';
 
 export interface LiteScore {
@@ -36,6 +36,11 @@ export class LiteScorerService {
     // DashboardSummaryService translates into `null` in the API response.
     // Treat 0 here as a sentinel, not a real score.
     if (features.swapCount < 3) {
+      // IMPROVEMENT 3: Score passive holders from portfolio context when DEX history is absent.
+      if (hasPortfolioContext(features)) {
+        return this.scorePortfolioOnly(features);
+      }
+
       return {
         score: 0,
         confidence: 'low',
@@ -139,6 +144,70 @@ export class LiteScorerService {
     return Math.max(min, Math.min(max, value));
   }
 
+  // IMPROVEMENT 3: Portfolio-only path for wallets without DEX swaps (top-50 holders with holdings data).
+  private scorePortfolioOnly(features: LiteFeatureVector): LiteScore {
+    const portfolioQuality = this.scorePortfolioQuality(features);
+    const riskManagement = this.scoreRiskManagementPortfolioOnly(features);
+    const experience = this.scorePortfolioOnlyExperience(features);
+
+    const rawScore = Math.round(
+      (portfolioQuality / 100) * 45 + (riskManagement / 20) * 12 + experience,
+    );
+    const clampedScore = Math.min(60, Math.max(0, rawScore));
+
+    const band =
+      SCORE_BANDS.find((scoreBand) => clampedScore >= scoreBand.min)?.label ??
+      'Weak / Risky';
+
+    return {
+      score: clampedScore,
+      confidence: 'low',
+      band,
+      breakdown: {
+        consistency: 0,
+        riskManagement,
+        portfolioQuality,
+        experience,
+        activity: 0,
+        profitability: 0,
+      },
+    };
+  }
+
+  // IMPROVEMENT 3: Partial risk score using portfolio signals only (no trade cadence).
+  private scoreRiskManagementPortfolioOnly(f: LiteFeatureVector): number {
+    let score = 0;
+
+    const memePct = f.holdingCategoryMix?.meme ?? f.memecoinPercent;
+    if (memePct < 10) {
+      score += 10;
+    } else if (memePct < 25) {
+      score += 7;
+    } else if (memePct < 50) {
+      score += 3;
+    }
+
+    if (f.portfolioRiskSignal === 'conservative') {
+      score += 10;
+    } else if (f.portfolioRiskSignal === 'balanced') {
+      score += 5;
+    } else if (f.portfolioRiskSignal === 'degen') {
+      score -= 5;
+    }
+
+    return Math.max(0, Math.min(score, 20));
+  }
+
+  private scorePortfolioOnlyExperience(f: LiteFeatureVector): number {
+    if (f.walletAgeDays > 365) {
+      return 8;
+    }
+    if (f.walletAgeDays > 180) {
+      return 5;
+    }
+    return 0;
+  }
+
   // CONSISTENCY (max 20)
   // Rewards wallets that trade steadily, not in panic bursts.
   // In FAST_MODE matchedLotCount is a round-trip proxy, not a true FIFO count,
@@ -226,12 +295,23 @@ export class LiteScorerService {
       const divScore = f.portfolioDiversificationScore || 0;
       score += (divScore / 100) * 30;
 
-      // Category quality (0-30)
-      const qualityAllocation =
-        (f.holdingCategoryMix.bluechip || 0) +
-        (f.holdingCategoryMix.defi || 0) +
-        (f.holdingCategoryMix.infrastructure || 0);
-      score += Math.min(30, qualityAllocation * 0.4);
+      // IMPROVEMENT 1: Exclude the analyzed token from "other" when scoring category quality.
+      const trackedWeight = f.trackedTokenWeight ?? 0;
+      const nonTrackedPct = Math.max(0, 100 - trackedWeight);
+      if (nonTrackedPct > 0 && typeof f.trackedTokenWeight === 'number') {
+        const qualityInNonTracked =
+          (f.holdingCategoryMix.bluechip || 0) +
+          (f.holdingCategoryMix.defi || 0) +
+          (f.holdingCategoryMix.infrastructure || 0);
+        const qualityAllocationPct = (qualityInNonTracked / nonTrackedPct) * 100;
+        score += Math.min(30, qualityAllocationPct * 0.4);
+      } else {
+        const qualityAllocation =
+          (f.holdingCategoryMix.bluechip || 0) +
+          (f.holdingCategoryMix.defi || 0) +
+          (f.holdingCategoryMix.infrastructure || 0);
+        score += Math.min(30, qualityAllocation * 0.4);
+      }
 
       // Stablecoin reserve bonus (0-15)
       const stablePct = f.holdingCategoryMix.stablecoin || 0;
@@ -251,12 +331,12 @@ export class LiteScorerService {
         score += 5;
       }
 
-      // Concentration penalty (0 to -10)
-      const trackedWeight = f.trackedTokenWeight || 0;
-      if (trackedWeight > 80) {
-        score -= 10;
-      } else if (trackedWeight > 50) {
-        score -= 5;
+      // IMPROVEMENT 1: In B2B token reports, heavy allocation to the analyzed token is conviction, not risk.
+      const concentrationWeight = f.trackedTokenWeight || 0;
+      if (concentrationWeight > 80) {
+        score -= 2;
+      } else if (concentrationWeight > 50) {
+        score -= 1;
       }
     } else {
       // NO portfolio data: keep placeholder logic.

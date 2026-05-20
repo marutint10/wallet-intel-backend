@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { LiteFeatureVector } from './lite-feature.service';
+import { LiteFeatureVector, hasPortfolioContext } from './lite-feature.service';
 import type { WalletPnlMetrics } from './lite-pnl.service';
 
 export interface LiteClassification {
@@ -20,6 +20,11 @@ export class LiteClassifierService {
     // no longer required - FAST_MODE classification leans on cadence, category
     // mix, and portfolio context instead of realized trade reconstruction.
     if (features.swapCount < 3 && !this.hasUsablePnl(pnlMetrics)) {
+      // IMPROVEMENT 2: Classify passive holders from portfolio when DEX history is missing (top-50).
+      if (hasPortfolioContext(features)) {
+        return this.classifyPassiveHolder(features);
+      }
+
       return {
         primaryType: 'Insufficient Data',
         confidence: 'low',
@@ -101,6 +106,69 @@ export class LiteClassifierService {
     pnlMetrics: WalletPnlMetrics | null,
   ): pnlMetrics is WalletPnlMetrics {
     return Boolean(pnlMetrics && pnlMetrics.trades.length >= 3);
+  }
+
+  // IMPROVEMENT 2: Portfolio-based labels for holders who acquired via transfer/OTC, not DEX.
+  private classifyPassiveHolder(features: LiteFeatureVector): LiteClassification {
+    const trackedWeight = features.trackedTokenWeight ?? 0;
+    const diversification = features.portfolioDiversificationScore ?? 0;
+    const totalUsd = features.totalPortfolioUsd ?? 0;
+    const formatUsd = (value: number): string => {
+      if (value >= 1_000_000) {
+        return `$${(value / 1_000_000).toFixed(1)}M`;
+      }
+      if (value >= 1_000) {
+        return `$${(value / 1_000).toFixed(0)}K`;
+      }
+      return `$${Math.round(value)}`;
+    };
+
+    if (
+      totalUsd > 500_000 &&
+      trackedWeight < 20 &&
+      diversification > 50
+    ) {
+      return {
+        primaryType: 'Diversified Whale',
+        confidence: 'medium',
+        primaryScore: 75,
+        secondaryType: null,
+        reasoning:
+          `Large diversified portfolio (${formatUsd(totalUsd)} total) with ` +
+          `${trackedWeight.toFixed(1)}% allocation to this token. No DEX trading detected.`,
+      };
+    }
+
+    if (trackedWeight >= 80) {
+      return {
+        primaryType: 'Passive Holder',
+        confidence: 'low',
+        primaryScore: 55,
+        secondaryType: null,
+        reasoning:
+          `Holds ${trackedWeight.toFixed(1)}% of portfolio in this token with no ` +
+          'DEX trading activity. Likely acquired via transfer or OTC.',
+      };
+    }
+
+    if (diversification > 30 && trackedWeight < 50) {
+      return {
+        primaryType: 'Passive Investor',
+        confidence: 'low',
+        primaryScore: 50,
+        secondaryType: null,
+        reasoning:
+          'Diversified portfolio with modest allocation to this token. No DEX trading detected.',
+      };
+    }
+
+    return {
+      primaryType: 'Passive Holder',
+      confidence: 'low',
+      primaryScore: 40,
+      secondaryType: null,
+      reasoning: 'Token holder with no DEX trading history.',
+    };
   }
 
   private scoreDiamondHand(f: LiteFeatureVector): number {
@@ -435,6 +503,17 @@ export class LiteClassifierService {
         break;
       case 'Whale':
         baseReasoning = `Long-term active wallet (${f.tradingSpanDays.toFixed(0)} days), ${f.blueChipPercent}% blue chip.`;
+        break;
+      case 'Diversified Whale':
+        baseReasoning =
+          `Large portfolio (${(f.totalPortfolioUsd ?? 0).toLocaleString('en-US', { maximumFractionDigits: 0 })} USD) ` +
+          `with ${(f.trackedTokenWeight ?? 0).toFixed(1)}% in this token; no DEX swaps observed.`;
+        break;
+      case 'Passive Holder':
+      case 'Passive Investor':
+        baseReasoning =
+          `Holds ${(f.trackedTokenWeight ?? 0).toFixed(1)}% of portfolio in this token; ` +
+          'no DEX trading activity detected.';
         break;
       default:
         baseReasoning = `Based on ${f.swapCount} swaps over ${f.tradingSpanDays.toFixed(0)} days.`;
