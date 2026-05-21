@@ -35,16 +35,55 @@ export interface TokenSummaryInput {
 
   decentralizationScore: number;
   giniCoefficient: number;
-  top10Pct: number;
-  top50Pct: number;
+
+  top10PctOfRetail: number;
+  top50PctOfRetail: number;
+  top100PctOfRetail: number;
+  /** Top-10 retail wallets' share of total supply (derived). */
+  top10RetailShareOfTotalSupply: number;
+
+  rawTop10PctOfTotal: number;
+  rawTop50PctOfTotal: number;
+  rawGini: number;
+
+  retailSupplyPct: number;
+  retailHolderCount: number;
+  exchangeSupplyPct: number;
+  teamSupplyPct: number;
+  burnSupplyPct: number;
+  lpSupplyPct: number;
+
+  scope: 'retail-only' | 'all-holder';
 
   smartMoneyPct: number;
   teamAllocationPct: number;
   exchangeAllocationPct: number;
 
+  classificationBreakdown: Record<string, number>;
+  classifiableRetailCount: number;
+
   riskSignals: string[];
   positiveSignals: string[];
 }
+
+const CLAUDE_SYSTEM_PROMPT = `You are a senior crypto investment analyst. Respond only with a valid JSON object.
+
+NUMERIC FIDELITY RULES:
+- Every percentage you cite must match EXACTLY a number provided in the on-chain data block.
+- Do not round, interpolate, or recombine numbers. If the data says 67%, write 67%, not 69% or "roughly 70%".
+- For every concentration figure, you MUST clarify scope inline: write "67% of retail-held supply" or "69% of total supply", never bare "67%".
+- Exchange custody is a neutral liquidity signal, never a concentration risk.
+- If a number is not in the data block, do not cite it. Say "data not available" instead of fabricating.
+- Do not invent "unclassified" holder percentages — use the HOLDER CLASSIFICATION BREAKDOWN counts only.
+
+OFF-CHAIN RULES:
+- For factual claims about the project (team names, funding, dates, partnerships, buybacks), only use information in the WEB RESEARCH block.
+- Cite the source inline as (Source N) where N matches [Source N] in the web block.
+- If a claim cannot be supported by the provided sources, omit it. Do not infer.
+
+Never mention internal implementation terms (e.g. FAST_MODE, legacy PnL, composite holder signal).
+
+No markdown, no explanation outside the JSON.`;
 
 export interface TavilySearchResult {
   query: string;
@@ -122,6 +161,14 @@ export class TokenDeepAnalysisService {
   private static readonly CLAUDE_MODEL = 'claude-sonnet-4-6';
   private static readonly CLAUDE_MAX_TOKENS = 4000;
   private static readonly CACHE_TTL_MS = 48 * 60 * 60 * 1000;
+  private static readonly PROMPT_VERSION = 3;
+
+  private static readonly FORBIDDEN_OUTPUT_TERMS = [
+    /FAST_MODE/gi,
+    /legacy PnL/gi,
+    /PnL-proven/gi,
+    /composite holder signal/gi,
+  ];
   private readonly logger = new Logger(TokenDeepAnalysisService.name);
 
   constructor(
@@ -145,6 +192,7 @@ export class TokenDeepAnalysisService {
 
       if (
         existing?.status === 'done' &&
+        (existing.promptVersion ?? 1) >= TokenDeepAnalysisService.PROMPT_VERSION &&
         Date.now() - existing.updatedAt.getTime() <
           TokenDeepAnalysisService.CACHE_TTL_MS
       ) {
@@ -312,7 +360,10 @@ export class TokenDeepAnalysisService {
         tokenSymbol,
       );
 
-      const parsed = await this.callClaude(prompt, anthropicApiKey);
+      const parsed = this.sanitizeDeepAnalysisOutput(
+        await this.callClaude(prompt, anthropicApiKey),
+        normalized,
+      );
 
       const dataFreshness = `Web data searched on ${new Date().toLocaleDateString('en-US', {
         month: 'long',
@@ -339,6 +390,7 @@ export class TokenDeepAnalysisService {
           status: 'done',
           result: result as object,
           tavilyQueries: tavilyQueriesPayload as object,
+          promptVersion: TokenDeepAnalysisService.PROMPT_VERSION,
           errorMessage: null,
           updatedAt: new Date(),
         },
@@ -415,6 +467,39 @@ export class TokenDeepAnalysisService {
     const { riskSignals, positiveSignals } =
       this.partitionCalloutTitles(riskCallouts);
 
+    const supplyBreakdown = (distribution.supplyBreakdown ?? {}) as Record<
+      string,
+      { pctOfSupply?: number }
+    >;
+    const supplyConcentration = (distribution.supplyConcentration ?? {}) as Record<
+      string,
+      unknown
+    >;
+
+    const retailSupplyPct = safeNumber(supplyBreakdown.retail?.pctOfSupply);
+    const exchangeSupplyPct = safeNumber(supplyBreakdown.exchange?.pctOfSupply);
+    const teamSupplyPct = safeNumber(supplyBreakdown.team?.pctOfSupply);
+    const burnSupplyPct = safeNumber(supplyBreakdown.burn?.pctOfSupply);
+    const lpSupplyPct = safeNumber(supplyBreakdown.lp?.pctOfSupply);
+    const retailHolderCount = safeNumber(distribution.retailHolderCount);
+
+    const top10PctOfRetail = safeNumber(supplyConcentration.top10Pct);
+    const top50PctOfRetail = safeNumber(supplyConcentration.top50Pct);
+    const top100PctOfRetail = safeNumber(supplyConcentration.top100Pct);
+    const top10RetailShareOfTotalSupply =
+      Math.round(((top10PctOfRetail * retailSupplyPct) / 100) * 10) / 10;
+
+    const rawTop10PctOfTotal = distributionSummary.raw.top10PctOfTotal;
+    const rawTop50PctOfTotal = distributionSummary.raw.top50PctOfTotal;
+    const rawGini = distributionSummary.raw.giniCoefficient;
+
+    const classificationBreakdown =
+      (quality.classificationBreakdown as Record<string, number>) ?? {};
+    const classifiableRetailCount = safeNumber(quality.classifiableRetailCount);
+
+    const scope: 'retail-only' | 'all-holder' =
+      distribution.scope === 'retail-only' ? 'retail-only' : 'all-holder';
+
     return {
       tokenName: safeString(analysis.tokenName, 'Unknown'),
       tokenSymbol: safeString(analysis.tokenSymbol, 'N/A'),
@@ -433,14 +518,87 @@ export class TokenDeepAnalysisService {
       convictionHolderArchetypePct: holderQualityBreakdown.convictionHolders,
       decentralizationScore: distributionSummary.decentralizationScore,
       giniCoefficient: distributionSummary.giniCoefficient,
-      top10Pct: distributionSummary.top10Pct,
-      top50Pct: distributionSummary.top50Pct,
+
+      top10PctOfRetail,
+      top50PctOfRetail,
+      top100PctOfRetail,
+      top10RetailShareOfTotalSupply,
+
+      rawTop10PctOfTotal,
+      rawTop50PctOfTotal,
+      rawGini,
+
+      retailSupplyPct,
+      retailHolderCount,
+      exchangeSupplyPct,
+      teamSupplyPct,
+      burnSupplyPct,
+      lpSupplyPct,
+      scope,
+
       smartMoneyPct,
       teamAllocationPct: safeNumber((teamDetection ?? {}).teamTotalPctOfSupply),
       exchangeAllocationPct: safeNumber(exchangesEntry.pctOfSupply),
-      riskSignals,
-      positiveSignals,
+      classificationBreakdown,
+      classifiableRetailCount,
+      riskSignals: riskSignals.map((s) => this.scrubInternalTerms(s)),
+      positiveSignals: positiveSignals.map((s) => this.scrubInternalTerms(s)),
     };
+  }
+
+  private scrubInternalTerms(text: string): string {
+    return text
+      .replace(/FAST_MODE/gi, '')
+      .replace(/legacy PnL/gi, '')
+      .replace(/PnL-proven/gi, '')
+      .replace(/composite holder signal/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
+  private formatClassificationBreakdownBlock(input: TokenSummaryInput): string {
+    const entries = Object.entries(input.classificationBreakdown)
+      .filter(([, count]) => safeNumber(count) > 0)
+      .sort((a, b) => safeNumber(b[1]) - safeNumber(a[1]));
+
+    const lines =
+      entries.length > 0
+        ? entries.map(([label, count]) => `- ${label}: ${safeNumber(count)} wallets`)
+        : ['- No classification counts available'];
+
+    const totalClassified = entries.reduce(
+      (sum, [, count]) => sum + safeNumber(count),
+      0,
+    );
+    const retailTotal =
+      input.classifiableRetailCount > 0
+        ? input.classifiableRetailCount
+        : input.retailHolderCount;
+
+    return [
+      'HOLDER CLASSIFICATION BREAKDOWN (wallet counts — use these, not invented percentages)',
+      ...lines,
+      `- Total classified: ${totalClassified} of ${retailTotal} retail wallets`,
+      '',
+      'DO NOT claim any holders are "unclassified" — every retail wallet above has a classification label.',
+      'DO NOT invent trader/degen/unclassified percentage breakdowns.',
+    ].join('\n');
+  }
+
+  private sanitizeDeepAnalysisOutput(
+    parsed: Record<string, unknown>,
+    contractAddress: string,
+  ): Record<string, unknown> {
+    let json = JSON.stringify(parsed);
+    for (const pattern of TokenDeepAnalysisService.FORBIDDEN_OUTPUT_TERMS) {
+      if (pattern.test(json)) {
+        this.logger.warn(
+          `[TokenDeepAnalysis] scrubbing internal term in output for ${contractAddress}`,
+        );
+        json = json.replace(pattern, '');
+      }
+    }
+    return JSON.parse(json) as Record<string, unknown>;
   }
 
   private partitionCalloutTitles(callouts: RiskCallout[]): {
@@ -533,6 +691,29 @@ export class TokenDeepAnalysisService {
             )
             .join('\n\n---\n\n');
 
+    const sampleSizeNote =
+      input.retailHolderCount < 100
+        ? `\n- Only ${input.retailHolderCount} retail wallets exist in the top 100. ` +
+          `If top-50 or top-100 retail figures show 100%, that is a SAMPLE-SIZE ARTIFACT, not concentration risk. ` +
+          `Never frame it as a concentration signal.`
+        : '';
+
+    const classificationBlock = this.formatClassificationBreakdownBlock(input);
+
+    const scopeBlock =
+      input.scope === 'retail-only'
+        ? `
+=== METRIC SCOPE — CRITICAL, READ BEFORE WRITING ANY SECTION ===
+Two concentration scopes are provided. Never mix them without labeling:
+- RETAIL-SCOPED: % of supply held by retail wallets only (retail = ${input.retailSupplyPct}% of total).
+- ALL-HOLDER: % of TOTAL supply held by top N wallets regardless of bucket.
+- Exchange custody (${input.exchangeSupplyPct}% of total) is NEUTRAL (CEX accessibility), not concentration risk.
+- Team/treasury: ${input.teamSupplyPct}%. Burned: ${input.burnSupplyPct}%. LP pools: ${input.lpSupplyPct}%.${sampleSizeNote}
+
+For overallVerdict, riskAssessment, and onChainVsOffChain: cite ALL-HOLDER figures for concentration.
+`.trim()
+        : '';
+
     return `You are a senior crypto investment analyst at a tier-1 venture capital firm.
 
 Analyze this token using both on-chain intelligence and off-chain web research provided below.
@@ -543,26 +724,46 @@ HARD RULES:
 - Do NOT say scam, rug pull, or variants — describe concerning signals factually
 - Do NOT give investment advice or buy/sell recommendations  
 - Do NOT fabricate information not present in the provided data
+- Every on-chain percentage must match EXACTLY a number below — no rounding or guessing
 - If data is insufficient for a section, acknowledge the limitation clearly
 - Respond ONLY with a valid JSON object, no markdown, no explanation
+- Off-chain facts (team names, funding, dates, buybacks) must appear in WEB RESEARCH and be cited as (Source N), or omitted
+
+${scopeBlock}
 
 === ON-CHAIN INTELLIGENCE ===
 Token: ${tokenName} (${tokenSymbol}) on ${input.chain}
-Average Holder Score: ${input.avgHolderScore}/100 (${input.qualityLabel})
-Decentralization Score: ${input.decentralizationScore}/100
-Gini Coefficient: ${input.giniCoefficient}
-Top 10 Holder Concentration: ${input.top10Pct}%
-Top 50 Holder Concentration: ${input.top50Pct}%
-Team-Linked Supply: ${input.teamAllocationPct}%
-Exchange Supply: ${input.exchangeAllocationPct}%
-Smart Money Wallets: ${input.smartMoneyPct}%
-Conviction Holders (Diamond Hands/HODLers): ${input.convictionPct}%
-Active Traders (Swing/Day): ${input.activeTraderPct}%
-Degen/High-Risk Holders: ${input.degenPct}%
-Passive Conviction Holders: ${input.convictionHolderArchetypePct}%
-Dormant / No Profile Holders: ${input.dormantPct}%
-Risk Signals: ${input.riskSignals.join(', ') || 'None detected'}
-Positive Signals: ${input.positiveSignals.join(', ') || 'None detected'}
+
+SUPPLY COMPOSITION (% of total supply — cite these exact figures only)
+- Retail wallets: ${input.retailSupplyPct}% (${input.retailHolderCount} addresses)
+- Exchange custody: ${input.exchangeSupplyPct}% [neutral liquidity signal]
+- Team / Treasury: ${input.teamSupplyPct}%
+- Burned: ${input.burnSupplyPct}%
+- LP pools: ${input.lpSupplyPct}%
+
+HOLDER QUALITY (retail wallets only)
+- Average Holder Score: ${input.avgHolderScore}/100 (${input.qualityLabel})
+- Smart Money wallets: ${input.smartMoneyPct}% of analyzed retail EOAs
+- Team-linked supply (quality metrics): ${input.teamAllocationPct}% of total supply
+
+${classificationBlock}
+
+RETAIL CONCENTRATION (within retail-held supply only — retail = ${input.retailSupplyPct}% of total)
+- Top 10 retail wallets: ${input.top10PctOfRetail}% of retail-held supply
+- Top 50 retail wallets: ${input.top50PctOfRetail}% of retail-held supply
+- Top 100 retail wallets: ${input.top100PctOfRetail}% of retail-held supply
+- Top 10 retail share of total supply (derived): ${input.top10RetailShareOfTotalSupply}% of total supply
+- Decentralization Score: ${input.decentralizationScore}/100 (retail-only)
+- Gini Coefficient: ${input.giniCoefficient} (retail-only)
+
+ALL-HOLDER CONCENTRATION (% of TOTAL supply — use for executive verdict)
+- Top 10 holders (all buckets): ${input.rawTop10PctOfTotal}% of total supply
+- Top 50 holders (all buckets): ${input.rawTop50PctOfTotal}% of total supply
+- Gini Coefficient: ${input.rawGini} (all-holder)
+
+SIGNALS (titles only — do not invent additional metrics)
+- Risk: ${input.riskSignals.join(', ') || 'None detected'}
+- Positive: ${input.positiveSignals.join(', ') || 'None detected'}
 
 === OFF-CHAIN WEB RESEARCH ===
 ${offChainBlock}
@@ -572,7 +773,7 @@ Return exactly this JSON structure with all fields populated:
 
 {
   "overallVerdict": {
-    "summary": "2-3 sentence executive summary combining on-chain and off-chain signals",
+    "summary": "2-3 sentence executive summary. For concentration, cite ALL-HOLDER figures (e.g. top 10 = ${input.rawTop10PctOfTotal}% of total supply). Off-chain claims must cite (Source N).",
     "strengthScore": <integer 0-100>,
     "confidenceLevel": "<low|medium|high>"
   },
@@ -586,7 +787,7 @@ Return exactly this JSON structure with all fields populated:
     },
     "teamAndLegitimacy": {
       "title": "Team & Legitimacy",
-      "summary": "3-5 sentences on team credibility, doxxed status, backers, any red flags",
+      "summary": "3-5 sentences on team credibility, doxxed status, backers, any red flags. Cite (Source N) for every named person or funding claim.",
       "keyPoints": ["<3-5 specific points>"],
       "sentiment": "<positive|neutral|warning|critical>",
       "dataSource": "offchain"
@@ -621,14 +822,14 @@ Return exactly this JSON structure with all fields populated:
     },
     "onChainVsOffChain": {
       "title": "On-Chain vs Off-Chain Alignment",
-      "summary": "3-5 sentences comparing what the project claims or markets vs what on-chain holder data actually shows",
+      "summary": "3-5 sentences comparing marketing claims vs on-chain data. Use ALL-HOLDER concentration (${input.rawTop10PctOfTotal}% top-10 of total supply). Cite (Source N) for off-chain claims.",
       "keyPoints": ["<3-5 specific points>"],
       "sentiment": "<positive|neutral|warning|critical>",
       "dataSource": "combined"
     },
     "riskAssessment": {
       "title": "Risk Assessment",
-      "summary": "3-5 sentences covering the most significant combined on-chain and off-chain risks",
+      "summary": "3-5 sentences covering the most significant combined on-chain and off-chain risks. Do not flag exchange custody as risk. Do not flag sample-size artifacts as risk.",
       "keyPoints": ["<3-5 specific points>"],
       "sentiment": "<positive|neutral|warning|critical>",
       "dataSource": "combined",
@@ -666,8 +867,7 @@ Return exactly this JSON structure with all fields populated:
         model: TokenDeepAnalysisService.CLAUDE_MODEL,
         max_tokens: TokenDeepAnalysisService.CLAUDE_MAX_TOKENS,
         temperature: 0,
-        system:
-          'You are a senior crypto investment analyst. Respond only with a valid JSON object. No markdown, no explanation outside the JSON.',
+        system: CLAUDE_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: prompt }],
       });
 
