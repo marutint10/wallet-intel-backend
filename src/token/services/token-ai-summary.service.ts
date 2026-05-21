@@ -33,8 +33,21 @@ export interface TokenSummaryInput {
 
   decentralizationScore: number;
   giniCoefficient: number;
-  top10Pct: number;
-  top50Pct: number;
+
+  top10PctOfRetail: number;
+  top50PctOfRetail: number;
+  top100PctOfRetail: number;
+
+  top10PctOfTotal: number;
+
+  retailSupplyPct: number;
+  retailHolderCount: number;
+  exchangeSupplyPct: number;
+  teamSupplyPct: number;
+  burnSupplyPct: number;
+  lpSupplyPct: number;
+
+  scope: 'retail-only' | 'all-holder';
 
   smartMoneyPct: number;
   teamAllocationPct: number;
@@ -88,7 +101,7 @@ Output format:
 
 @Injectable()
 export class TokenAiSummaryService {
-  private static readonly CACHE_PREFIX = 'token:summary:';
+  private static readonly CACHE_PREFIX = 'token:summary:v2:';
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly FALLBACK_CACHE_TTL_SECONDS = 1_800;
   private static readonly GEMINI_PRIMARY_MODEL = 'gemini-2.5-flash';
@@ -212,6 +225,32 @@ export class TokenAiSummaryService {
 
     const { riskSignals, positiveSignals } = this.partitionCalloutTitles(riskCallouts);
 
+    const supplyBreakdown = (distribution.supplyBreakdown ?? {}) as Record<
+      string,
+      { pctOfSupply?: number }
+    >;
+    const supplyConcentration = (distribution.supplyConcentration ?? {}) as Record<
+      string,
+      unknown
+    >;
+
+    const retailSupplyPct = safeNumber(supplyBreakdown.retail?.pctOfSupply);
+    const exchangeSupplyPct = safeNumber(supplyBreakdown.exchange?.pctOfSupply);
+    const teamSupplyPct = safeNumber(supplyBreakdown.team?.pctOfSupply);
+    const burnSupplyPct = safeNumber(supplyBreakdown.burn?.pctOfSupply);
+    const lpSupplyPct = safeNumber(supplyBreakdown.lp?.pctOfSupply);
+    const retailHolderCount = safeNumber(distribution.retailHolderCount);
+
+    const top10PctOfRetail = safeNumber(supplyConcentration.top10Pct);
+    const top50PctOfRetail = safeNumber(supplyConcentration.top50Pct);
+    const top100PctOfRetail = safeNumber(supplyConcentration.top100Pct);
+
+    const top10PctOfTotal =
+      Math.round(((top10PctOfRetail * retailSupplyPct) / 100) * 10) / 10;
+
+    const scope: 'retail-only' | 'all-holder' =
+      distribution.scope === 'retail-only' ? 'retail-only' : 'all-holder';
+
     return {
       tokenName: safeString(analysis.tokenName, 'Unknown'),
       tokenSymbol: safeString(analysis.tokenSymbol, 'N/A'),
@@ -230,8 +269,20 @@ export class TokenAiSummaryService {
       convictionHolderArchetypePct: holderQualityBreakdown.convictionHolders,
       decentralizationScore: distributionSummary.decentralizationScore,
       giniCoefficient: distributionSummary.giniCoefficient,
-      top10Pct: distributionSummary.top10Pct,
-      top50Pct: distributionSummary.top50Pct,
+
+      top10PctOfRetail,
+      top50PctOfRetail,
+      top100PctOfRetail,
+      top10PctOfTotal,
+
+      retailSupplyPct,
+      retailHolderCount,
+      exchangeSupplyPct,
+      teamSupplyPct,
+      burnSupplyPct,
+      lpSupplyPct,
+      scope,
+
       smartMoneyPct,
       teamAllocationPct: safeNumber((teamDetection ?? {}).teamTotalPctOfSupply),
       exchangeAllocationPct: safeNumber(exchangesEntry.pctOfSupply),
@@ -268,14 +319,42 @@ export class TokenAiSummaryService {
         ? `Positive signals: ${input.positiveSignals.join(', ')}.`
         : '';
 
+    const sampleSizeNote =
+      input.retailHolderCount < 100
+        ? `\nNOTE: Only ${input.retailHolderCount} retail wallets were analyzed in the top 100 holders. ` +
+          `If top 50 or top 100 retail concentration shows 100%, this is a SAMPLE-SIZE ARTIFACT ` +
+          `(there are fewer than 50 or 100 retail wallets in the set), NOT a concentration risk. ` +
+          `Do not describe this as concerning.`
+        : '';
+
+    const scopeWarning =
+      input.scope === 'retail-only'
+        ? `
+CRITICAL — READ BEFORE WRITING:
+- All concentration figures (top 10 / top 50 / top 100) are scoped to RETAIL wallets only.
+- Retail wallets hold ${input.retailSupplyPct}% of total supply across ${input.retailHolderCount} addresses.
+- The other ${(100 - input.retailSupplyPct).toFixed(1)}% is: exchange custody ${input.exchangeSupplyPct}%, team/treasury ${input.teamSupplyPct}%, burned ${input.burnSupplyPct}%, LP pools ${input.lpSupplyPct}%.
+- "Top 10 retail = ${input.top10PctOfRetail}%" means those 10 wallets hold ~${input.top10PctOfTotal}% of TOTAL supply.
+- Exchange custody is a NEUTRAL liquidity signal indicating CEX accessibility, NOT a concentration risk.${sampleSizeNote}
+`.trim()
+        : '';
+
     return `
+${scopeWarning}
+
 Generate a professional analyst summary for the following token:
 
 Token: ${input.tokenName} (${input.tokenSymbol}) on ${input.chain}
 
-HOLDER QUALITY
+SUPPLY COMPOSITION (% of total supply)
+- Retail wallets: ${input.retailSupplyPct}% (across ${input.retailHolderCount} addresses)
+- Exchange custody: ${input.exchangeSupplyPct}% (neutral signal)
+- Team / Treasury: ${input.teamSupplyPct}%
+- Burned: ${input.burnSupplyPct}%
+- LP pools: ${input.lpSupplyPct}%
+
+HOLDER QUALITY (retail wallets only)
 - Average Holder Score: ${input.avgHolderScore}/100 (${input.qualityLabel})
-- Total Holders Analyzed: ${input.totalAnalyzedHolders}
 - Smart Money Wallets: ${input.smartMoneyPct}%
 
 COMMUNITY COMPOSITION
@@ -283,18 +362,15 @@ COMMUNITY COMPOSITION
 - Active Traders (Swing / Day): ${input.activeTraderPct}%
 - Degen / High-Risk: ${input.degenPct}%
 - Bots / Automated: ${input.botPct}%
-- Passive conviction holders (Conviction Holder / Whale / Allocator): ${input.convictionHolderArchetypePct}%
-- Dormant / no profile (insufficient swap history): ${input.dormantPct}%
+- Passive conviction holders: ${input.convictionHolderArchetypePct}%
+- Dormant / no profile: ${input.dormantPct}%
 
-SUPPLY DISTRIBUTION
-- Decentralization Score: ${input.decentralizationScore}/100
-- Gini Coefficient: ${input.giniCoefficient}
-- Top 10 Holders: ${input.top10Pct}% of supply
-- Top 50 Holders: ${input.top50Pct}% of supply
-
-ALLOCATIONS
-- Team-Linked Wallets: ${input.teamAllocationPct}% of supply
-- Exchange Wallets: ${input.exchangeAllocationPct}% of supply
+RETAIL CONCENTRATION (within retail-held supply only)
+- Top 10 retail wallets: ${input.top10PctOfRetail}% of retail (~${input.top10PctOfTotal}% of total)
+- Top 50 retail wallets: ${input.top50PctOfRetail}% of retail
+- Top 100 retail wallets: ${input.top100PctOfRetail}% of retail
+- Decentralization Score: ${input.decentralizationScore}/100 (retail-only)
+- Gini Coefficient: ${input.giniCoefficient} (retail-only)
 
 SIGNALS
 ${riskLine}
@@ -306,11 +382,13 @@ Write the 4-5 sentence analyst summary now.
 
   private buildFallbackSummary(input: TokenSummaryInput): string {
     return (
-      `${input.tokenName} (${input.tokenSymbol}) has an average holder score ` +
-      `of ${input.avgHolderScore}/100, classified as ${input.qualityLabel}. ` +
-      `Top 10 holders control ${input.top10Pct}% of supply with a decentralization ` +
-      `score of ${input.decentralizationScore}/100. ` +
-      `Conviction holders represent ${input.convictionPct}% of the analyzed community.`
+      `${input.tokenName} (${input.tokenSymbol}) has an average holder score of ` +
+      `${input.avgHolderScore}/100 across ${input.retailHolderCount} analyzed retail wallets, ` +
+      `classified as ${input.qualityLabel}. ` +
+      `The top 10 retail wallets hold ${input.top10PctOfRetail}% of retail-held supply ` +
+      `(approximately ${input.top10PctOfTotal}% of total supply). ` +
+      `Exchange custody accounts for ${input.exchangeSupplyPct}% of total supply, ` +
+      `a neutral liquidity signal.`
     );
   }
 
