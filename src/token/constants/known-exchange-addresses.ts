@@ -139,6 +139,7 @@ export const KNOWN_EXCHANGE_ADDRESSES = new Map<string, string>([
   ['0x40b38765696e3d5d8d9d834d8aad4bb6e418e489', 'Robinhood'],
   ['0x841ed663f2636863d40be4ee76243377dff13a34', 'Robinhood 2'],
   ['0x1887fa9edadeab7562b01cc3f4fa246ace2c3cdd', 'Robinhood 3'],
+  ['0x1d48963DD8FAdA6aB5C2C7b92Eba81ECC5030270', 'Robinhood 4'],
 
   // ── eToro ────────────────────────────────────────────────────────────────
   ['0x77fb357f55bef5a70d30663955f8c9f35794df0e', 'eToro'],         // listed as "eterro" — likely typo
