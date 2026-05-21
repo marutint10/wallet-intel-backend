@@ -47,4 +47,8 @@ export default () => ({
       10000,
     ),
   },
+  pdfExport: {
+    frontendUrl: process.env.FRONTEND_URL ?? '',
+    internalPrintSecret: process.env.INTERNAL_PRINT_SECRET ?? '',
+  },
 });

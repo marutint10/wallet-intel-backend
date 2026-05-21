@@ -25,7 +25,9 @@ import { TokenAnalysisService } from './services/token-analysis.service';
 import { TokenDeepAnalysisService } from './services/token-deep-analysis.service';
 import { TokenIntelligenceService } from './services/token-intelligence.service';
 import { WalletFilterService } from './services/wallet-filter.service';
+import { ExportPdfController } from './export-pdf.controller';
 import { TokenController } from './token.controller';
+import { TokenPdfExportService } from './services/token-pdf-export.service';
 
 @Module({
   imports: [
@@ -39,7 +41,7 @@ import { TokenController } from './token.controller';
       WhaleAlertEntity,
     ]),
   ],
-  controllers: [TokenController],
+  controllers: [TokenController, ExportPdfController],
   providers: [
     ChainbaseService,
     LiteIngestionService,
@@ -57,6 +59,7 @@ import { TokenController } from './token.controller';
     TokenAiSummaryService,
     TokenChartService,
     TokenDeepAnalysisService,
+    TokenPdfExportService,
   ],
 })
 export class TokenModule {}
