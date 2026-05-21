@@ -113,6 +113,8 @@ export const KNOWN_EXCHANGE_ADDRESSES = new Map<string, string>([
   // ── MEXC ─────────────────────────────────────────────────────────────────
   ['0x3cc936b795a188f0e246cbb2d74c5bd190aecf18', 'MEXC'],
   ['0x9642b23ed1e01df1092b92641051881a322f5d4e', 'MEXC 2'],
+  ['0x576b81F0c21EDBc920ad63FeEEB2b0736b018A58', 'MEXC 3'],
+  ['0x51E3D44172868Acc60D68ca99591Ce4230bc75E0', 'MEXC 4'],
 
   // ── Bithumb ──────────────────────────────────────────────────────────────
   ['0xc671b05671a7cd3080c6ceae79d284bdde0ef271', 'Bithumb'],
