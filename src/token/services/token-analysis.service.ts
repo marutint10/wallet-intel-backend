@@ -19,6 +19,10 @@ import { LitePnlService } from './lite-pnl.service';
 import type { WalletPnlMetrics } from './lite-pnl.service';
 import { TokenIntelligenceService } from './token-intelligence.service';
 import {
+  TOP_HOLDERS_FETCH_LIMIT,
+  TOP_HOLDERS_PORTFOLIO_RANK_LIMIT,
+} from '../constants/token-analysis-limits';
+import {
   HolderAggregationService,
   AnalyzedHolder,
   HolderPnlSummary,
@@ -128,8 +132,12 @@ export class TokenAnalysisService {
         ? configuredDelayMs
         : 1500;
 
-    // Step 1: Fetch top 100 holders from Chainbase
-    const { holders } = await this.chainbase.getTopHolders(address, chain, 100);
+    // Step 1: Fetch top holders from Chainbase
+    const { holders } = await this.chainbase.getTopHolders(
+      address,
+      chain,
+      TOP_HOLDERS_FETCH_LIMIT,
+    );
     this.logger.log(`Fetched ${holders.length} holders for ${contractAddress}`);
 
     // ========== PHASE 1: Token Metadata ==========
@@ -383,7 +391,7 @@ export class TokenAnalysisService {
       tokenMetadata.totalSupplyFormatted,
     );
     const distribution = this.aggregation.computeDistribution(
-      enrichedHolders,
+      analyzedHolders,
       tokenMetadata.totalSupply ?? '0',
       tokenMetadata.totalSupplyFormatted,
     );
@@ -507,7 +515,7 @@ export class TokenAnalysisService {
       return null;
     }
 
-    if (rank > 50) {
+    if (rank > TOP_HOLDERS_PORTFOLIO_RANK_LIMIT) {
       return null;
     }
 

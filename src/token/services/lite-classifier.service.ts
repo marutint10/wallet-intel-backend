@@ -20,7 +20,7 @@ export class LiteClassifierService {
     // no longer required - FAST_MODE classification leans on cadence, category
     // mix, and portfolio context instead of realized trade reconstruction.
     if (features.swapCount < 3 && !this.hasUsablePnl(pnlMetrics)) {
-      // IMPROVEMENT 2: Classify passive holders from portfolio when DEX history is missing (top-50).
+      // IMPROVEMENT 2: Classify passive holders from portfolio when DEX history is missing (top 100).
       if (hasPortfolioContext(features)) {
         return this.classifyPassiveHolder(features);
       }
