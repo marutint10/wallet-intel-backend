@@ -8,7 +8,8 @@
     "db:migrate:token": "psql $DATABASE_URL -f migrations/202605060001_create_token_tables.sql",
     "start": "nest start",
     "start:dev": "nest start --watch",
-    "start:prod": "node dist/main"
+    "start:prod": "node dist/main",
+    "token:replay-aggregation": "npm run build && node scripts/replay-token-aggregation.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
