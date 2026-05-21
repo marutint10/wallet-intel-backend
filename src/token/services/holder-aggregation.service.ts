@@ -7,6 +7,13 @@ import type {
   LabelEvidence,
   TeamDetectionResult,
 } from './token-intelligence.service';
+import {
+  attachBucket,
+  emptySupplyBreakdown,
+  isRetailHolder,
+  type HolderBucket,
+  type HolderWithBucket,
+} from './holder-classification';
 
 export interface AnalyzedHolder {
   walletAddress: string;
@@ -78,6 +85,10 @@ export interface HolderQualityMetrics {
   topHolderAvgScore: number;
   pnlAggregation: HolderPnlAggregation;
   categoryConcentration: CategoryConcentration;
+  scoringBase: 'retail-classifiable';
+  classifiableRetailCount: number;
+  totalHoldersExamined: number;
+  classificationBreakdown: Record<string, number>;
 }
 
 export interface CategoryConcentration {
@@ -114,7 +125,7 @@ function isUnclassifiedHolderType(primaryType: string | null | undefined): boole
 }
 
 function isBehavioralEoaHolder(holder: AnalyzedHolder): boolean {
-  return holder.walletLabel === 'eoa' || holder.walletLabel === 'team_connected';
+  return isRetailHolder(holder);
 }
 
 /** Largest-remainder allocation so rounded behavioral % sum to 100. */
@@ -175,9 +186,25 @@ function distributeBehavioralPercentages(
   };
 }
 
+export interface SupplyBucketStat {
+  count: number;
+  pctOfSupply: number;
+}
+
 export interface HolderDistribution {
   totalHolders: number;
+  /** Headline concentration metrics are computed on retail holders only. */
+  scope: 'retail-only';
+  retailHolderCount: number;
+  supplyBreakdown: Record<HolderBucket, SupplyBucketStat>;
   buckets: {
+    micro: number;
+    small: number;
+    medium: number;
+    whale: number;
+  };
+  /** Retail-only size tier counts (legacy micro/whale naming). */
+  retailSizeBuckets: {
     micro: number;
     small: number;
     medium: number;
@@ -190,6 +217,13 @@ export interface HolderDistribution {
   };
   giniCoefficient: number;
   decentralizationScore: number;
+  raw: {
+    giniCoefficient: number;
+    supplyConcentration: {
+      top10PctOfTotal: number;
+      top50PctOfTotal: number;
+    };
+  };
 }
 
 export interface RiskCallout {
@@ -234,8 +268,17 @@ export class HolderAggregationService {
     const vestingLockedCount = holders.filter(
       (holder) => holder.walletLabel === 'vesting',
     ).length;
-    const analyzedEOAHolders = holders.filter(isBehavioralEoaHolder);
+    const retailHolders = holders.filter(isRetailHolder);
+    const analyzedEOAHolders = retailHolders;
     const totalAnalyzedEOAs = analyzedEOAHolders.length;
+    const classifiableRetail = retailHolders.filter(
+      (holder) => holder.classification !== null,
+    );
+    const classificationBreakdown: Record<string, number> = {};
+    for (const holder of classifiableRetail) {
+      const type = holder.classification?.primaryType ?? 'Unknown';
+      classificationBreakdown[type] = (classificationBreakdown[type] ?? 0) + 1;
+    }
     const scoredHolders = analyzedEOAHolders.filter(
       (holder) => typeof holder.score?.score === 'number' && holder.score.score > 0,
     );
@@ -369,6 +412,53 @@ export class HolderAggregationService {
       topHolderAvgScore,
       pnlAggregation,
       categoryConcentration,
+      scoringBase: 'retail-classifiable',
+      classifiableRetailCount: classifiableRetail.length,
+      totalHoldersExamined: totalHolders,
+      classificationBreakdown,
+    };
+  }
+
+  /**
+   * Recompute quality, distribution, and callouts from persisted holders_data
+   * without re-fetching on-chain data.
+   */
+  reprocessFromStoredHolders(
+    holders: AnalyzedHolder[],
+    totalSupply: string,
+    totalSupplyFormatted: number | null,
+    teamDetection: TeamDetectionResult | null = null,
+    existingQualityExtras: Record<string, unknown> = {},
+  ): {
+    quality: HolderQualityMetrics & Record<string, unknown>;
+    distribution: HolderDistribution;
+    riskCallouts: RiskCallout[];
+  } {
+    const quality = this.computeQualityMetrics(
+      holders,
+      totalSupply,
+      totalSupplyFormatted,
+    );
+    const distribution = this.computeDistribution(
+      holders,
+      totalSupply,
+      totalSupplyFormatted,
+    );
+    const qualityWithExtras = {
+      ...quality,
+      ...existingQualityExtras,
+    };
+    const riskCallouts = this.generateRiskCallouts(
+      qualityWithExtras,
+      distribution,
+      holders,
+      teamDetection,
+    );
+
+    return {
+      quality: qualityWithExtras,
+      distribution,
+      riskCallouts,
     };
   }
 
@@ -404,29 +494,37 @@ export class HolderAggregationService {
     return 'Weak Community';
   }
 
-  // 2. Compute distribution metrics + Gini coefficient
+  // 2. Compute distribution metrics (retail-scoped headline + supply breakdown)
   computeDistribution(
-    holders: Array<{ walletAddress: string; balance: string; rank: number }>,
+    holders: AnalyzedHolder[],
     totalSupply: string,
     totalSupplyFormatted: number | null = null,
   ): HolderDistribution {
-    const rankedHolders = [...holders].sort((left, right) => left.rank - right.rank);
-    const totalHolders = rankedHolders.length;
-
-    if (totalHolders === 0) {
-      return {
-        totalHolders: 0,
-        buckets: { micro: 0, small: 0, medium: 0, whale: 0 },
-        supplyConcentration: { top10Pct: 0, top50Pct: 0, top100Pct: 0 },
+    const emptyRetailBuckets = { micro: 0, small: 0, medium: 0, whale: 0 };
+    const emptyDistribution: HolderDistribution = {
+      totalHolders: 0,
+      scope: 'retail-only',
+      retailHolderCount: 0,
+      supplyBreakdown: emptySupplyBreakdown(),
+      buckets: emptyRetailBuckets,
+      retailSizeBuckets: emptyRetailBuckets,
+      supplyConcentration: { top10Pct: 0, top50Pct: 0, top100Pct: 0 },
+      giniCoefficient: 0,
+      decentralizationScore: 50,
+      raw: {
         giniCoefficient: 0,
-        decentralizationScore: 50,
-      };
+        supplyConcentration: { top10PctOfTotal: 0, top50PctOfTotal: 0 },
+      },
+    };
+
+    if (holders.length === 0) {
+      return emptyDistribution;
     }
 
-    const balances = rankedHolders.map((holder) =>
-      this.parseBalanceAsNumber(holder.balance),
+    const bucketed: HolderWithBucket<AnalyzedHolder>[] = holders.map((holder) =>
+      attachBucket(holder),
     );
-    const totalHeld = balances.reduce((total, value) => total + value, 0);
+    const totalHolders = bucketed.length;
 
     const onchainTotal =
       typeof totalSupplyFormatted === 'number' &&
@@ -439,50 +537,121 @@ export class HolderAggregationService {
       Number.isFinite(rawTotalCandidate) && rawTotalCandidate > 0
         ? rawTotalCandidate
         : null;
+    const totalHeld = bucketed.reduce(
+      (sum, holder) => sum + this.parseBalanceAsNumber(holder.balance),
+      0,
+    );
     const effectiveTotal = onchainTotal ?? rawTotal ?? totalHeld;
 
-    // Holder size buckets by % of supply
-    const buckets = { micro: 0, small: 0, medium: 0, whale: 0 };
+    const supplyBreakdown = emptySupplyBreakdown();
+    const balanceByBucket: Record<HolderBucket, number> = {
+      retail: 0,
+      exchange: 0,
+      contract: 0,
+      team: 0,
+      burn: 0,
+      lp: 0,
+    };
 
-    for (const balance of balances) {
-      const pct =
+    for (const holder of bucketed) {
+      const balance = this.parseBalanceAsNumber(holder.balance);
+      supplyBreakdown[holder.bucket].count += 1;
+      balanceByBucket[holder.bucket] += balance;
+    }
+
+    for (const key of Object.keys(supplyBreakdown) as HolderBucket[]) {
+      supplyBreakdown[key].pctOfSupply =
         effectiveTotal > 0
-          ? (balance / effectiveTotal) * 100
+          ? this.round2((balanceByBucket[key] / effectiveTotal) * 100)
           : 0;
+    }
 
-      if (pct > 1) {
-        buckets.whale += 1;
-      } else if (pct > 0.1) {
-        buckets.medium += 1;
-      } else if (pct > 0.01) {
-        buckets.small += 1;
+    const retailHolders = bucketed.filter((holder) => holder.bucket === 'retail');
+    const retailHolderCount = retailHolders.length;
+    const retailSorted = [...retailHolders].sort(
+      (left, right) =>
+        this.parseBalanceAsNumber(right.balance) -
+        this.parseBalanceAsNumber(left.balance),
+    );
+    const retailBalances = retailSorted.map((holder) =>
+      this.parseBalanceAsNumber(holder.balance),
+    );
+    const retailSupply = retailBalances.reduce((sum, value) => sum + value, 0);
+
+    const sumTopOfRetail = (count: number): number => {
+      if (retailSupply <= 0) {
+        return 0;
+      }
+      const top = retailBalances
+        .slice(0, count)
+        .reduce((sum, value) => sum + value, 0);
+      return Math.round((top / retailSupply) * 100);
+    };
+
+    const retailSizeBuckets = { micro: 0, small: 0, medium: 0, whale: 0 };
+    for (const balance of retailBalances) {
+      const pct = retailSupply > 0 ? (balance / retailSupply) * 100 : 0;
+      if (pct >= 1) {
+        retailSizeBuckets.whale += 1;
+      } else if (pct >= 0.1) {
+        retailSizeBuckets.medium += 1;
+      } else if (pct >= 0.01) {
+        retailSizeBuckets.small += 1;
       } else {
-        buckets.micro += 1;
+        retailSizeBuckets.micro += 1;
       }
     }
 
-    // Supply concentration
-    const pctHeld = (count: number): number => {
-      const top = balances.slice(0, count).reduce((total, value) => total + value, 0);
-      return effectiveTotal > 0
-        ? Math.round((top / effectiveTotal) * 100)
-        : 0;
-    };
+    const retailGini = this.computeGini(retailBalances);
+    const retailGiniRounded = Math.round(retailGini * 1000) / 1000;
 
-    // Gini coefficient
-    const gini = this.computeGini(balances);
+    const allBalances = bucketed
+      .map((holder) => this.parseBalanceAsNumber(holder.balance))
+      .sort((left, right) => right - left);
+    const rawGini = this.computeGini(allBalances);
+    const rawTop10 =
+      effectiveTotal > 0
+        ? this.round2(
+            (allBalances.slice(0, 10).reduce((sum, value) => sum + value, 0) /
+              effectiveTotal) *
+              100,
+          )
+        : 0;
+    const rawTop50 =
+      effectiveTotal > 0
+        ? this.round2(
+            (allBalances.slice(0, 50).reduce((sum, value) => sum + value, 0) /
+              effectiveTotal) *
+              100,
+          )
+        : 0;
 
     return {
       totalHolders,
-      buckets,
+      scope: 'retail-only',
+      retailHolderCount,
+      supplyBreakdown,
+      buckets: { ...retailSizeBuckets },
+      retailSizeBuckets,
       supplyConcentration: {
-        top10Pct: pctHeld(Math.min(10, totalHolders)),
-        top50Pct: pctHeld(Math.min(50, totalHolders)),
-        top100Pct: pctHeld(Math.min(100, totalHolders)),
+        top10Pct: sumTopOfRetail(Math.min(10, retailHolderCount)),
+        top50Pct: sumTopOfRetail(Math.min(50, retailHolderCount)),
+        top100Pct: sumTopOfRetail(Math.min(100, retailHolderCount)),
       },
-      giniCoefficient: Math.round(gini * 100) / 100,
-      decentralizationScore: Math.round((1 - gini) * 100),
+      giniCoefficient: retailGiniRounded,
+      decentralizationScore: Math.round((1 - retailGini) * 100),
+      raw: {
+        giniCoefficient: Math.round(rawGini * 1000) / 1000,
+        supplyConcentration: {
+          top10PctOfTotal: rawTop10,
+          top50PctOfTotal: rawTop50,
+        },
+      },
     };
+  }
+
+  private round2(value: number): number {
+    return Math.round(value * 100) / 100;
   }
 
   // 3. Generate 3-5 auto risk callouts
@@ -493,13 +662,23 @@ export class HolderAggregationService {
     teamDetection: TeamDetectionResult | null = null,
   ): RiskCallout[] {
     const callouts: RiskCallout[] = [];
+    const retailTop10Pct = distribution.supplyConcentration.top10Pct;
+    const exchangeSupplyPct =
+      distribution.supplyBreakdown?.exchange?.pctOfSupply ?? 0;
 
-    // Concentration warnings
-    if (distribution.supplyConcentration.top10Pct > 50) {
+    if (retailTop10Pct > 40) {
       callouts.push({
         type: 'warning',
-        title: 'High Concentration Risk',
-        description: `Top 10 holders control ${distribution.supplyConcentration.top10Pct}% of supply. High sell pressure risk.`,
+        title: 'Retail Whale Concentration',
+        description: `Top 10 individual wallets control ${retailTop10Pct}% of the retail-held supply. These are the wallets that can move the chart.`,
+      });
+    }
+
+    if (exchangeSupplyPct > 30) {
+      callouts.push({
+        type: 'info',
+        title: 'Broad Exchange Distribution',
+        description: `${exchangeSupplyPct}% of supply is held in major exchange custody, indicating wide retail accessibility. This is typical for tokens with CEX listings.`,
       });
     }
 
@@ -585,11 +764,18 @@ export class HolderAggregationService {
       });
     }
 
-    if (quality.categoryConcentration.eoaHolders.pctOfSupply < 30) {
+    const retailSupplyPct =
+      distribution.supplyBreakdown?.retail?.pctOfSupply ??
+      quality.categoryConcentration.eoaHolders.pctOfSupply;
+    if (
+      retailSupplyPct < 15 &&
+      exchangeSupplyPct < 20 &&
+      retailTop10Pct > 40
+    ) {
       callouts.push({
         type: 'warning',
-        title: 'Low Retail Holder Concentration',
-        description: `Only ${quality.categoryConcentration.eoaHolders.pctOfSupply.toFixed(1)}% of analyzed supply is held by individual wallets (EOAs). The majority is in exchanges, contracts, and team wallets.`,
+        title: 'Thin Retail Float',
+        description: `Only ${retailSupplyPct.toFixed(1)}% of supply sits in individual wallets while top retail holders remain concentrated (${retailTop10Pct}% in top 10 retail).`,
       });
     }
 
@@ -640,8 +826,8 @@ export class HolderAggregationService {
     if (distribution.decentralizationScore > 70) {
       callouts.push({
         type: 'positive',
-        title: 'Well Distributed Supply',
-        description: `Decentralization score ${distribution.decentralizationScore}/100 - supply is relatively well distributed.`,
+        title: 'Well Distributed Retail Supply',
+        description: `Retail decentralization score ${distribution.decentralizationScore}/100 (individual wallets only; exchanges and contracts excluded).`,
       });
     }
 
@@ -668,13 +854,15 @@ export class HolderAggregationService {
       }
     }
 
-    const exchangeConcentrationPct = this.computeExchangeSupplyConcentration(holders);
-    if (exchangeConcentrationPct > 30) {
-      callouts.push({
-        type: 'info',
-        title: 'Significant Exchange Holdings',
-        description: `Exchange wallets hold approximately ${exchangeConcentrationPct}% of analyzed supply. Actual retail holder distribution may differ.`,
-      });
+    if (exchangeSupplyPct > 0 && exchangeSupplyPct <= 30) {
+      const exchangeConcentrationPct = this.computeExchangeSupplyConcentration(holders);
+      if (exchangeConcentrationPct > 15) {
+        callouts.push({
+          type: 'info',
+          title: 'Exchange Custody Present',
+          description: `Exchange wallets hold approximately ${exchangeConcentrationPct}% of analyzed top-holder supply.`,
+        });
+      }
     }
 
     const dexPoolCount = holders.filter(

@@ -69,7 +69,7 @@ export interface ResolvedQualityBreakdown {
 
 // FIX 1: dropped `lastActiveDays` (always null in practice) and surfaced wallet-level
 // portfolio context (`portfolioUsd`, `trackedTokenWeight`) that LitePortfolioService
-// already computes for top-50 holders but was not being passed through to the dashboard.
+// already computes for all analyzed top holders but was not being passed through to the dashboard.
 // CHANGE 2: added `knownLabel` to expose the Etherscan-resolved contract name for
 // `generic_contract` rows so the UI can show "GnosisSafeProxy" / "ERC1967Proxy"
 // instead of an opaque "generic_contract" cell.
@@ -91,12 +91,35 @@ export interface HolderTableRow {
   knownLabel: string | null;
 }
 
+export interface SupplyBreakdownSummary {
+  retail: { count: number; pctOfSupply: number };
+  exchange: { count: number; pctOfSupply: number };
+  contract: { count: number; pctOfSupply: number };
+  team: { count: number; pctOfSupply: number };
+  burn: { count: number; pctOfSupply: number };
+  lp: { count: number; pctOfSupply: number };
+}
+
 export interface DistributionSummary {
+  scope: string;
+  retailHolderCount: number;
   decentralizationScore: number;
   giniCoefficient: number;
   top10Pct: number;
   top50Pct: number;
   top100Pct: number;
+  supplyBreakdown: SupplyBreakdownSummary;
+  retailSizeBuckets: {
+    micro: number;
+    small: number;
+    medium: number;
+    whale: number;
+  };
+  raw: {
+    giniCoefficient: number;
+    top10PctOfTotal: number;
+    top50PctOfTotal: number;
+  };
 }
 
 export interface DashboardSummaryResponse {
@@ -122,6 +145,10 @@ export interface DashboardSummaryResponse {
     activeTraderPct: number;
     degenPct: number;
     botPct: number;
+    scoringBase: string;
+    classifiableRetailCount: number;
+    totalHoldersExamined: number;
+    classificationBreakdown: Record<string, number>;
   };
 
   holderQualityBreakdown: HolderQualityBreakdown;
@@ -269,6 +296,11 @@ export class DashboardSummaryService {
         activeTraderPct,
         degenPct,
         botPct,
+        scoringBase: safeString(quality.scoringBase, 'retail-classifiable'),
+        classifiableRetailCount: safeNumber(quality.classifiableRetailCount),
+        totalHoldersExamined: safeNumber(quality.totalHoldersExamined),
+        classificationBreakdown:
+          (quality.classificationBreakdown as Record<string, number>) ?? {},
       },
       holderQualityBreakdown,
       distribution: distributionSummary,
@@ -568,11 +600,12 @@ export function computeHolderQualityBreakdown(
     return empty;
   }
 
-  // Mirror HolderAggregationService: only behavioral EOAs are eligible.
+  // Mirror HolderAggregationService: retail (EOA, non-team-linked) only.
   const eoaHolders = holders.filter(
     (holder) =>
       holder &&
-      (holder.walletLabel === 'eoa' || holder.walletLabel === 'team_connected'),
+      holder.walletLabel === 'eoa' &&
+      holder.isTeamLinked !== true,
   );
 
   if (eoaHolders.length === 0) {
@@ -714,6 +747,17 @@ function distributeDashboardBreakdownPercentages(
 // Distribution summary
 // -----------------------------
 
+function readSupplyBucket(
+  breakdown: Record<string, unknown> | undefined,
+  key: string,
+): { count: number; pctOfSupply: number } {
+  const entry = (breakdown?.[key] ?? {}) as Record<string, unknown>;
+  return {
+    count: safeNumber(entry.count),
+    pctOfSupply: safeNumber(entry.pctOfSupply),
+  };
+}
+
 export function buildDistributionSummary(
   distribution: Record<string, unknown> | null | undefined,
 ): DistributionSummary {
@@ -722,13 +766,47 @@ export function buildDistributionSummary(
     string,
     unknown
   >;
+  const supplyBreakdownRaw = (safe.supplyBreakdown ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const retailSizeBucketsRaw = (safe.retailSizeBuckets ?? safe.buckets ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const rawBlock = (safe.raw ?? {}) as Record<string, unknown>;
+  const rawConcentration = (rawBlock.supplyConcentration ?? {}) as Record<
+    string,
+    unknown
+  >;
 
   return {
+    scope: safeString(safe.scope, 'retail-only'),
+    retailHolderCount: safeNumber(safe.retailHolderCount),
     decentralizationScore: safeNumber(safe.decentralizationScore),
     giniCoefficient: safeNumber(safe.giniCoefficient),
     top10Pct: safeNumber(supplyConcentration.top10Pct),
     top50Pct: safeNumber(supplyConcentration.top50Pct),
     top100Pct: safeNumber(supplyConcentration.top100Pct),
+    supplyBreakdown: {
+      retail: readSupplyBucket(supplyBreakdownRaw, 'retail'),
+      exchange: readSupplyBucket(supplyBreakdownRaw, 'exchange'),
+      contract: readSupplyBucket(supplyBreakdownRaw, 'contract'),
+      team: readSupplyBucket(supplyBreakdownRaw, 'team'),
+      burn: readSupplyBucket(supplyBreakdownRaw, 'burn'),
+      lp: readSupplyBucket(supplyBreakdownRaw, 'lp'),
+    },
+    retailSizeBuckets: {
+      micro: safeNumber(retailSizeBucketsRaw.micro),
+      small: safeNumber(retailSizeBucketsRaw.small),
+      medium: safeNumber(retailSizeBucketsRaw.medium),
+      whale: safeNumber(retailSizeBucketsRaw.whale),
+    },
+    raw: {
+      giniCoefficient: safeNumber(rawBlock.giniCoefficient),
+      top10PctOfTotal: safeNumber(rawConcentration.top10PctOfTotal),
+      top50PctOfTotal: safeNumber(rawConcentration.top50PctOfTotal),
+    },
   };
 }
 
@@ -802,8 +880,8 @@ function buildHolderTableRow(
       ? (holder.portfolio.portfolioRiskSignal as string)
       : null;
 
-  // FIX 1: surface the wallet-level portfolio context already computed by
-  // LitePortfolioService for top-50 holders; null for ranks 51-100 by design.
+  // FIX 1: surface the wallet-level portfolio context from LitePortfolioService
+  // (all top-100 analyzed holders except exchange/cex_deposit labels).
   const portfolioUsd =
     holder?.portfolio &&
     typeof holder.portfolio.totalPortfolioUsd === 'number' &&
