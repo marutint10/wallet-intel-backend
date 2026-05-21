@@ -137,6 +137,7 @@ Current capabilities:
 - triage every top holder via `TokenIntelligenceService` (static exchange registry, contract detection, team links) before lite analytics run
 - provide an advanced token intelligence service for holder labeling, team-link detection, and richer token metadata collection
 - expose `GET /token/:address/dashboard` for a frontend-ready dashboard DTO, including an `aiSummary` plain-text line produced by Gemini (cached via `@nestjs/cache-manager`, deterministic fallback when the key is missing or the model fails)
+- expose `GET /api/export-pdf/:tokenId` to render a print-optimized frontend route via Puppeteer and stream an A4 PDF (`printBackground: true` for dark mode)
 - expose async token **deep analysis**: trigger + poll endpoints backed by `token_deep_analyses` (parallel Tavily searches, Claude Sonnet JSON report, 48-hour freshness cache on completed rows; never blocks or breaks the main token analysis pipeline)
 
 Important boundary:
@@ -723,6 +724,12 @@ Registered providers:
 - DashboardSummaryService
 - TokenAiSummaryService
 - TokenDeepAnalysisService
+- TokenPdfExportService
+
+Registered controllers:
+
+- TokenController
+- ExportPdfController (`GET /api/export-pdf/:tokenId`)
 
 Registered entities:
 
@@ -892,6 +899,31 @@ Response behavior:
 Pagination / filtering / sorting:
 
 - not implemented server-side. `holderTable` always returns every analyzed holder. Client-side handles pagination, sorting, and filtering.
+
+### GET /api/export-pdf/:tokenId?chain=ethereum
+
+Purpose:
+
+- generate a downloadable PDF report for a token whose analysis is already `done`
+
+Implementation:
+
+- `ExportPdfController` → `TokenPdfExportService` (Puppeteer)
+- requires env `FRONTEND_URL` and `INTERNAL_PRINT_SECRET`
+- navigates to `{FRONTEND_URL}/report-print/{tokenId}?chain={chain}&secret={INTERNAL_PRINT_SECRET}`
+- viewport 1440×900 @2x; `waitUntil: networkidle0` (30s timeout); optional wait for `.pdf-ready` (5s, logs warning if missing)
+- PDF: A4, `printBackground: true`, 20/15/20/15 mm margins, no header/footer
+
+Prerequisites:
+
+- `tokenId` = EVM contract address (`0x` + 40 hex)
+- analysis row must exist with `status=done` (otherwise HTTP 400)
+- frontend must implement `/report-print/:tokenId` and validate `secret` query param against the same `INTERNAL_PRINT_SECRET`
+
+Response:
+
+- `Content-Type: application/pdf`
+- `Content-Disposition: attachment; filename="WalletIntel_{symbol}_Report.pdf"`
 
 ### POST /token/:address/deep-analysis/trigger?chain=ethereum
 
