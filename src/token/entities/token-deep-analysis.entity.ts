@@ -31,6 +31,9 @@ export class TokenDeepAnalysisEntity {
   @Column({ name: 'tavily_queries', type: 'jsonb', nullable: true })
   tavilyQueries!: Record<string, unknown> | null;
 
+  @Column({ name: 'prompt_version', type: 'int', default: 1 })
+  promptVersion!: number;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamp' })
   createdAt!: Date;
 
