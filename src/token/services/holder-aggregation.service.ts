@@ -1093,6 +1093,8 @@ export class HolderAggregationService {
   }
 
   private computePortfolioSmartMoneyCount(holders: AnalyzedHolder[]): number {
+    const eliteBands = new Set(['Institutional', 'Premium', 'Strong']);
+
     return holders
       .filter(isBehavioralEoaHolder)
       .filter((holder) => {
@@ -1103,19 +1105,35 @@ export class HolderAggregationService {
         const type = holder.classification.primaryType;
         const portfolio = holder.portfolio;
         const score = holder.score?.score ?? 0;
+        const band = holder.score?.band ?? '';
+
+        if (eliteBands.has(band)) {
+          return true;
+        }
 
         if (
           type === 'Diversified Whale' &&
-          (portfolio?.totalPortfolioUsd ?? 0) >= 500_000
+          (portfolio?.totalPortfolioUsd ?? 0) >= 500_000 &&
+          score >= 55
         ) {
           return true;
         }
 
-        if ((portfolio?.totalPortfolioUsd ?? 0) >= 1_000_000 && score >= 40) {
+        if (
+          (portfolio?.totalPortfolioUsd ?? 0) >= 1_000_000 &&
+          score >= 60
+        ) {
           return true;
         }
 
         if (score >= 75) {
+          return true;
+        }
+
+        if (
+          (portfolio?.totalPortfolioUsd ?? 0) >= 5_000_000 &&
+          score >= 50
+        ) {
           return true;
         }
 
