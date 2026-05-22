@@ -12,7 +12,7 @@ Summary of the latest scoring, classification, and triage work (May 2026):
 | Area | Change |
 |------|--------|
 | **Score bands (active)** | Day-trader labels replaced: Institutional / Premium / Strong / Solid / Developing |
-| **Passive scoring** | `scorePortfolioOnly`: quality **+ quantity** (max 12 pts), wallet-style **size multiplier**, formula denominator **112**, cap **60** |
+| **Passive scoring** | `scoreHolderPortfolio` via `holder-scoring.engine`: quality 35, conviction 30, assetSelection 20, capitalScale 10, longevity 5 (0–100, Institutional/Premium eligible) |
 | **Whale floors** | Portfolio USD ≥ $1M → min score **45**; ≥ $100K → min **30** |
 | **Conviction floor** | Band **Conviction** (18/25); triggers at `trackedWeight ≥ 95%` OR (`≥ 80%` and `totalHoldingTokens ≤ 3`) for gas/airdrop side holdings |
 | **Passive labels** | Passive Holder / Passive Investor → **Conviction Holder** / **Strategic Allocator** |
