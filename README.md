@@ -50,3 +50,40 @@ Example response:
   "native_transactions": []
 }
 ```
+
+
+## Database migrations (TypeORM)
+
+Schema changes are managed with TypeORM migrations (`synchronize` is always `false`).
+
+```bash
+# Apply pending migrations
+npm run migration:run
+
+# List applied migrations
+npm run migration:show
+
+# Revert last migration
+npm run migration:revert
+```
+
+### Workflow for a new schema change
+
+1. Update the relevant `*.entity.ts` file.
+2. Generate a migration:  
+   `npm run migration:generate -- src/database/migrations/YourMigrationName`
+3. Review the generated file under `src/database/migrations/`.
+4. Apply: `npm run migration:run`
+5. Commit the entity change and the migration file together.
+
+Do not use `synchronize: true` or hand-edit schema in the Supabase SQL editor for app tables.
+
+## Whitelist
+
+After editing `src/auth/whitelist.ts`:
+
+```bash
+npm run migration:run   # if schema changed
+npm run whitelist:sync
+npm run start:dev
+```
