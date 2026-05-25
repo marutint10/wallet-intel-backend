@@ -28,6 +28,7 @@ import { WalletFilterService } from './services/wallet-filter.service';
 import { ExportPdfController } from './export-pdf.controller';
 import { TokenController } from './token.controller';
 import { TokenPdfExportService } from './services/token-pdf-export.service';
+import { TokenTargetValidatorService } from './services/token-target-validator.service';
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { TokenPdfExportService } from './services/token-pdf-export.service';
     TokenChartService,
     TokenDeepAnalysisService,
     TokenPdfExportService,
+    TokenTargetValidatorService,
   ],
 })
 export class TokenModule {}

@@ -27,6 +27,10 @@ import {
   AnalyzedHolder,
   HolderPnlSummary,
 } from './holder-aggregation.service';
+import {
+  TokenAnalysisTargetValidation,
+  TokenTargetValidatorService,
+} from './token-target-validator.service';
 
 // FAST_MODE = true enables the B2B holder-intelligence path:
 //   * skip LitePnlService entirely (no realized PnL reconstruction)
@@ -56,14 +60,50 @@ export class TokenAnalysisService {
     private readonly intelligence: TokenIntelligenceService,
     private readonly aggregation: HolderAggregationService,
     private readonly config: ConfigService,
+    private readonly targetValidator: TokenTargetValidatorService,
   ) {}
 
   // --- START ANALYSIS (saves status=processing, runs in background) ---
   async startAnalysis(
     contractAddress: string,
     chain: string,
-  ): Promise<TokenAnalysisEntity> {
-    const address = contractAddress.toLowerCase();
+  ): Promise<{
+    entity: TokenAnalysisEntity;
+    validation: TokenAnalysisTargetValidation;
+  }> {
+    const address = contractAddress.trim().toLowerCase();
+    const validation = await this.targetValidator.validate(address, chain);
+
+    if (!validation.canAnalyze) {
+      await this.tokenRepo.upsert(
+        {
+          contractAddress: address,
+          chain,
+          status: 'not_token',
+          errorMessage: validation.message,
+          qualityMetrics: {
+            targetValidation: {
+              kind: validation.kind,
+              addressType: validation.addressType,
+              title: validation.title,
+              message: validation.message,
+            },
+          },
+          updatedAt: new Date(),
+        },
+        ['contractAddress', 'chain'],
+      );
+
+      const blocked = await this.tokenRepo.findOne({
+        where: { contractAddress: address, chain },
+      });
+
+      if (!blocked) {
+        throw new Error(`Unable to persist not_token row for ${address} on ${chain}`);
+      }
+
+      return { entity: blocked, validation };
+    }
 
     // Upsert with status=processing
     await this.tokenRepo.upsert(
@@ -72,6 +112,7 @@ export class TokenAnalysisService {
         chain,
         status: 'processing',
         errorMessage: null,
+        qualityMetrics: null,
         updatedAt: new Date(),
       },
       ['contractAddress', 'chain'],
@@ -99,7 +140,48 @@ export class TokenAnalysisService {
       );
     });
 
-    return entity;
+    return { entity, validation };
+  }
+
+  extractTargetValidation(
+    entity: TokenAnalysisEntity,
+  ): TokenAnalysisTargetValidation | null {
+    if (entity.status !== 'not_token') {
+      return null;
+    }
+
+    const metrics = entity.qualityMetrics as
+      | {
+          targetValidation?: {
+            kind?: TokenAnalysisTargetValidation['kind'];
+            addressType?: TokenAnalysisTargetValidation['addressType'];
+            title?: string;
+            message?: string;
+          };
+        }
+      | null
+      | undefined;
+
+    const stored = metrics?.targetValidation;
+    if (stored?.title && stored.message && stored.addressType && stored.kind) {
+      return {
+        kind: stored.kind,
+        addressType: stored.addressType,
+        canAnalyze: false,
+        title: stored.title,
+        message: stored.message,
+      };
+    }
+
+    return {
+      kind: 'non_token_contract',
+      addressType: 'contract',
+      canAnalyze: false,
+      title: 'Not a token contract',
+      message:
+        entity.errorMessage ??
+        'This address cannot be analyzed as an ERC-20 token contract.',
+    };
   }
 
   // --- GET RESULT ---

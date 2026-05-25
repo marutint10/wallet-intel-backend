@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -8,6 +9,7 @@ import {
   Param,
   Post,
   Query,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { ChainbaseService } from './services/chainbase.service';
 import {
@@ -36,6 +38,10 @@ interface DashboardProcessingResponse {
   contractAddress: string;
   chain: string;
   updatedAt: Date;
+  canAnalyze?: boolean;
+  addressType?: 'invalid' | 'eoa' | 'contract' | 'erc20';
+  title?: string;
+  message?: string;
 }
 
 @Controller('token')
@@ -196,16 +202,40 @@ export class TokenController {
   // Starts background analysis for a token contract
   @Post('analyze')
   async analyzeToken(@Body() body: { contractAddress: string; chain?: string }) {
+    const contractAddress = body.contractAddress?.trim();
+    if (!contractAddress) {
+      throw new BadRequestException({
+        status: 'invalid_address',
+        message: 'contractAddress is required.',
+      });
+    }
+
     const chain = body.chain ?? 'ethereum';
-    const entity = await this.tokenAnalysis.startAnalysis(
-      body.contractAddress,
+    const { entity, validation } = await this.tokenAnalysis.startAnalysis(
+      contractAddress,
       chain,
     );
+
+    if (!validation.canAnalyze) {
+      throw new UnprocessableEntityException({
+        status: 'not_token',
+        canAnalyze: false,
+        addressType: validation.addressType,
+        title: validation.title,
+        message: validation.message,
+        contractAddress: entity.contractAddress,
+        chain: entity.chain,
+        id: entity.id,
+      });
+    }
+
     return {
       id: entity.id,
       contractAddress: entity.contractAddress,
       chain: entity.chain,
       status: entity.status,
+      canAnalyze: true,
+      addressType: validation.addressType,
       message: 'Analysis started. Poll GET /token/:address for results.',
     };
   }
@@ -268,6 +298,11 @@ export class TokenController {
         message: 'No analysis found. POST /token/analyze to start.',
       };
     }
+
+    if (result.status === 'not_token') {
+      return this.buildNotTokenAnalysisPayload(result);
+    }
+
     return result;
   }
 
@@ -291,6 +326,10 @@ export class TokenController {
         },
         HttpStatus.NOT_FOUND,
       );
+    }
+
+    if (result.status === 'not_token') {
+      return this.buildNotTokenDashboardPayload(result);
     }
 
     if (result.status !== 'done') {
@@ -328,5 +367,40 @@ export class TokenController {
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
+  }
+
+  private buildNotTokenAnalysisPayload(
+    result: NonNullable<Awaited<ReturnType<TokenAnalysisService['getResult']>>>,
+  ) {
+    const validation = this.tokenAnalysis.extractTargetValidation(result);
+    return {
+      ...result,
+      canAnalyze: false,
+      addressType: validation?.addressType ?? 'contract',
+      title: validation?.title ?? 'Not a token contract',
+      message:
+        validation?.message ??
+        result.errorMessage ??
+        'This address cannot be analyzed as a token.',
+    };
+  }
+
+  private buildNotTokenDashboardPayload(
+    result: NonNullable<Awaited<ReturnType<TokenAnalysisService['getResult']>>>,
+  ): DashboardProcessingResponse {
+    const validation = this.tokenAnalysis.extractTargetValidation(result);
+    return {
+      status: 'not_token',
+      canAnalyze: false,
+      contractAddress: result.contractAddress,
+      chain: result.chain,
+      updatedAt: result.updatedAt,
+      addressType: validation?.addressType ?? 'contract',
+      title: validation?.title ?? 'Not a token contract',
+      message:
+        validation?.message ??
+        result.errorMessage ??
+        'This address cannot be analyzed as a token.',
+    };
   }
 }
