@@ -2,6 +2,7 @@ import { Logger, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import configuration from './config/configuration';
+import { AuthModule } from './auth/auth.module';
 import { TokenModule } from './token/token.module';
 import { WalletModule } from './wallet/wallet.module';
 
@@ -34,6 +35,7 @@ const shouldUseSsl = (
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      envFilePath: ['.env.local', '.env'],
       load: [configuration],
       expandVariables: true,
     }),
@@ -71,6 +73,7 @@ const shouldUseSsl = (
         };
       },
     }),
+    AuthModule,
     TokenModule,
     WalletModule,
   ],
