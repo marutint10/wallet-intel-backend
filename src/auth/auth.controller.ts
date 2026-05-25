@@ -7,10 +7,13 @@ import {
   Req,
   Res,
 } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
 import type { Request, Response } from 'express';
+import { Repository } from 'typeorm';
 import { generateNonce, SiweMessage } from 'siwe';
 import { NONCE_COOKIE_NAME, clearNonceCookie, setNonceCookie } from '../lib/auth/nonce-cookie';
 import { getSession } from '../lib/auth/session';
+import { WhitelistedWalletEntity } from './entities/whitelisted-wallet.entity';
 
 interface VerifyBody {
   message?: string;
@@ -19,6 +22,10 @@ interface VerifyBody {
 
 @Controller('api/auth')
 export class AuthController {
+  constructor(
+    @InjectRepository(WhitelistedWalletEntity)
+    private readonly whitelistRepo: Repository<WhitelistedWalletEntity>,
+  ) {}
   @Get('nonce')
   async getNonce(@Res() res: Response): Promise<void> {
     try {
@@ -116,6 +123,30 @@ export class AuthController {
       const session = await getSession(req, res);
       session.destroy();
       res.status(HttpStatus.OK).json({ ok: true });
+    } catch {
+      res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: 'Internal server error' });
+    }
+  }
+
+  @Get('access-check')
+  async accessCheck(@Req() req: Request, @Res() res: Response): Promise<void> {
+    try {
+      const session = await getSession(req, res);
+
+      if (!session.authenticated || !session.address) {
+        res.status(HttpStatus.UNAUTHORIZED).json({ error: 'Not authenticated' });
+        return;
+      }
+
+      const wallet = await this.whitelistRepo.findOne({
+        where: { address: session.address.toLowerCase() },
+      });
+
+      if (wallet) {
+        res.status(HttpStatus.OK).json({ whitelisted: true, plan: wallet.plan });
+      } else {
+        res.status(HttpStatus.OK).json({ whitelisted: false });
+      }
     } catch {
       res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: 'Internal server error' });
     }
