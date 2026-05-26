@@ -27,6 +27,15 @@ export class TokenAnalysisEntity {
   @Column({ name: 'token_symbol', type: 'varchar', length: 32, nullable: true })
   tokenSymbol!: string | null;
 
+  @Column({
+    name: 'share_id',
+    type: 'varchar',
+    length: 12,
+    nullable: true,
+    unique: true,
+  })
+  shareId!: string | null;
+
   @Column({ name: 'total_holders', type: 'integer', nullable: true })
   totalHolders!: number | null;
 
