@@ -67,8 +67,9 @@ export class AuthController {
 
       const forwardedHost = req.headers['x-forwarded-host'];
       const expectedDomain =
-        (typeof forwardedHost === 'string' ? forwardedHost.split(',')[0]?.trim() : null) ||
-        (typeof req.headers.host === 'string' ? req.headers.host.split(',')[0]?.trim() : null);
+      process.env.SIWE_DOMAIN ||
+      (typeof forwardedHost === 'string' ? forwardedHost.split(',')[0]?.trim() : null) ||
+      (typeof req.headers.host === 'string' ? req.headers.host.split(',')[0]?.trim() : null);
 
       const result = await siweMessage.verify(
         {
