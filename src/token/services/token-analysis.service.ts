@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { randomBytes } from 'crypto';
 import { Repository } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { ConfigService } from '@nestjs/config';
@@ -41,6 +42,10 @@ import {
 // deep wallet-analysis mode. LitePnlService is intentionally still wired up so
 // flipping this flag is a one-line change.
 const FAST_MODE = true;
+
+function generateShareId(): string {
+  return randomBytes(6).toString('hex');
+}
 
 @Injectable()
 export class TokenAnalysisService {
@@ -105,11 +110,17 @@ export class TokenAnalysisService {
       return { entity: blocked, validation };
     }
 
+    const existing = await this.tokenRepo.findOne({
+      where: { contractAddress: address, chain },
+    });
+    const shareId = existing?.shareId ?? generateShareId();
+
     // Upsert with status=processing
     await this.tokenRepo.upsert(
       {
         contractAddress: address,
         chain,
+        shareId,
         status: 'processing',
         errorMessage: null,
         qualityMetrics: null,
@@ -191,6 +202,12 @@ export class TokenAnalysisService {
   ): Promise<TokenAnalysisEntity | null> {
     return this.tokenRepo.findOne({
       where: { contractAddress: contractAddress.toLowerCase(), chain },
+    });
+  }
+
+  async findByShareId(shareId: string): Promise<TokenAnalysisEntity | null> {
+    return this.tokenRepo.findOne({
+      where: { shareId: shareId.toLowerCase() },
     });
   }
 
