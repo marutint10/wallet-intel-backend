@@ -9,8 +9,10 @@ import {
   Param,
   Post,
   Query,
+  Res,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ChainbaseService } from './services/chainbase.service';
 import {
   DashboardSummaryResponse,
@@ -44,12 +46,26 @@ interface DashboardProcessingResponse {
   message?: string;
 }
 
+type SharedDashboardResponse = DashboardSummaryResponse & {
+  shareId: string | null;
+  shareUrl: string | null;
+};
+
 @Controller('token')
 export class TokenController {
   private readonly logger = new Logger(TokenController.name);
 
   private isEvmContractAddress(address: string): boolean {
     return /^0x[a-fA-F0-9]{40}$/i.test(address.trim());
+  }
+
+  private buildShareUrl(shareId: string | null): string | null {
+    if (!shareId) {
+      return null;
+    }
+
+    const frontendUrl = process.env.FRONTEND_URL ?? '';
+    return `${frontendUrl}/share/${shareId}`;
   }
 
   constructor(
@@ -234,6 +250,8 @@ export class TokenController {
       contractAddress: entity.contractAddress,
       chain: entity.chain,
       status: entity.status,
+      shareId: entity.shareId,
+      shareUrl: this.buildShareUrl(entity.shareId),
       canAnalyze: true,
       addressType: validation.addressType,
       message: 'Analysis started. Poll GET /token/:address for results.',
@@ -284,6 +302,42 @@ export class TokenController {
     return this.tokenChart.getChart(address, chain, chartTf);
   }
 
+  // GET /token/share/:shareId
+  // Public read-only dashboard report lookup by opaque share id.
+  @Get('share/:shareId')
+  async getSharedReport(
+    @Param('shareId') shareId: string,
+    @Res() res: Response,
+  ) {
+    const entity = await this.tokenAnalysis.findByShareId(shareId);
+
+    if (!entity) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    if (entity.status !== 'done') {
+      return res.json({ status: entity.status });
+    }
+
+    const [dashboard, aiSummary, deepAnalysis] = await Promise.all([
+      Promise.resolve(this.dashboardSummary.buildDashboardSummary(entity)),
+      this.tokenAiSummary.generateSummary(entity),
+      this.tokenDeepAnalysis.getDeepAnalysis(
+        entity.contractAddress,
+        entity.chain,
+      ),
+    ]);
+
+    return res.json({
+      ...dashboard,
+      aiSummary,
+      deepAnalysis,
+      shareId: entity.shareId,
+      contractAddress: entity.contractAddress,
+      chain: entity.chain,
+    });
+  }
+
   // GET /token/:address?chain=ethereum
   // Returns analysis result - poll this until status=done
   @Get(':address')
@@ -315,7 +369,7 @@ export class TokenController {
   async getTokenDashboard(
     @Param('address') address: string,
     @Query('chain') chain: string = 'ethereum',
-  ): Promise<DashboardSummaryResponse | DashboardProcessingResponse> {
+  ): Promise<SharedDashboardResponse | DashboardProcessingResponse> {
     const result = await this.tokenAnalysis.getResult(address, chain);
 
     if (!result) {
@@ -350,7 +404,12 @@ export class TokenController {
         Promise.resolve(this.dashboardSummary.buildDashboardSummary(result)),
         this.tokenAiSummary.generateSummary(result),
       ]);
-      return { ...dashboard, aiSummary };
+      return {
+        ...dashboard,
+        aiSummary,
+        shareId: result.shareId,
+        shareUrl: this.buildShareUrl(result.shareId),
+      };
     } catch (err: unknown) {
       // DashboardSummaryService is designed to never throw, but if a bug or
       // an unexpected JSONB shape ever causes one to escape, we surface a
