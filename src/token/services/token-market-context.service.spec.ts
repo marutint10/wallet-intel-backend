@@ -188,7 +188,7 @@ describe('buildMarketContextReport', () => {
 
     expect(holderReport.riskLevel).toBe('high');
     expect(holderReport.trustScore).toBeLessThanOrEqual(60);
-    expect(holderReport.availableModules).toContain('market_maturity');
+    expect(holderReport.availableModules).toContain('market_context');
   });
 });
 
@@ -269,9 +269,9 @@ describe('dashboard marketContext integration', () => {
     expect(summary.marketContext).not.toBeNull();
     expect(summary.marketContext?.riskLevel).toBe('low');
     expect(summary.tokenTrust.availableModules).toEqual(
-      expect.arrayContaining(['holder_structure', 'contract_safety', 'market_maturity']),
+      expect.arrayContaining(['holder_structure', 'contract_safety', 'market_context']),
     );
-    expect(summary.tokenTrust.missingScoreInputs).not.toContain('market_maturity');
+    expect(summary.tokenTrust.missingScoreInputs).not.toContain('market_context');
     expect(summary.tokenTrust.missingScoreInputs).not.toContain('liquidity_depth');
     expect(summary.tokenTrust.missingScoreInputs).toContain('off_chain_credibility');
     expect(summary.tokenTrust.scoreStatus).toBe('partial');

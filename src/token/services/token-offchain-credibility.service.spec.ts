@@ -185,6 +185,21 @@ function pepeLikeData(): OffChainCredibilityCollectedData {
 }
 
 describe('buildOffChainCredibilityReport', () => {
+  it('includes required limitations copy', () => {
+    const report = buildOffChainCredibilityReport(linkLikeData());
+    expect(
+      report.limitations.some((line) =>
+        line.includes('not yet merged into the visible on-chain score'),
+      ),
+    ).toBe(true);
+    expect(
+      report.limitations.some((line) =>
+        line.includes('does not prove investment safety'),
+      ),
+    ).toBe(true);
+    expect(report.verdict.toLowerCase()).not.toMatch(/\b(safe|scam|buy|sell)\b/);
+  });
+
   it('LINK-like project scores high with infrastructure signals', () => {
     const report = buildOffChainCredibilityReport(linkLikeData());
 
@@ -209,16 +224,48 @@ describe('buildOffChainCredibilityReport', () => {
     const report = buildOffChainCredibilityReport(pepeLikeData());
 
     expect(report.riskLevel).not.toBe('severe');
-    expect(['limited', 'credible']).toContain(report.credibilityTier);
+    expect(['limited', 'moderate', 'high']).toContain(report.riskLevel);
+    expect(report.score).toBeLessThanOrEqual(69);
+    expect(report.credibilityTier).toBe('limited');
     expect(report.projectProfile.category).toBe('meme');
     expect(report.projectProfile.hasDocs).toBe(false);
     expect(report.projectProfile.hasGithub).toBe(false);
+    expect(report.projectProfile.hasClearUseCase).toBe(false);
     expect(report.verdict.toLowerCase()).toMatch(/community|limited|documentation/);
     expect(
       report.credibilitySignals.some(
         (signal) => signal.title === 'Clear Meme/Community Positioning',
       ),
     ).toBe(true);
+    expect(
+      report.credibilitySignals.some((signal) => signal.title === 'Clear Project Use Case'),
+    ).toBe(false);
+  });
+
+  it('meme pretending infrastructure utility receives unsupported claim penalty', () => {
+    const report = buildOffChainCredibilityReport({
+      ...pepeLikeData(),
+      crawl: makeCrawl({
+        homepageUrl: 'https://www.pepe.vip/',
+        extractedText:
+          'Pepe PEPE revolutionary AI infrastructure used by major banks globally with enterprise adoption.',
+        mentions: { tokenName: true, tokenSymbol: true, contractAddress: false },
+        signals: {
+          hasDocs: false,
+          hasWhitepaper: false,
+          hasGithub: false,
+          hasAuditsMentioned: false,
+          hasTeamInfo: false,
+          hasClearUseCase: false,
+          suspiciousPhrases: [],
+          adoptionClaims: [],
+        },
+      }),
+    });
+
+    expect(report.claimChecks.some((check) => check.status === 'unsupported')).toBe(true);
+    expect(report.riskFlags.some((flag) => flag.title === 'Unsupported Major Claim')).toBe(true);
+    expect(report.score).toBeLessThan(60);
   });
 
   it('no official website applies penalty and flags', () => {
@@ -322,6 +369,50 @@ describe('buildOffChainCredibilityReport', () => {
     ).toBe(true);
     expect(report.riskFlags.some((flag) => flag.title === 'Unsupported Major Claim')).toBe(true);
     expect(report.score).toBeLessThan(85);
+  });
+
+  it('audit claim without audit link requires review', () => {
+    const report = buildOffChainCredibilityReport({
+      tokenName: 'AuditToken',
+      tokenSymbol: 'AUD',
+      contractAddress: null,
+      discovery: makeDiscovery({
+        discoveredLinks: {
+          website: 'https://audit.example/',
+          docs: null,
+          whitepaper: null,
+          github: null,
+          twitter: null,
+          telegram: null,
+          discord: null,
+          blog: null,
+        },
+        officialLinkConfidence: { level: 'medium', reasons: ['Website discovered'] },
+      }),
+      crawl: makeCrawl({
+        extractedText: 'AuditToken AUD was audited by a leading security firm.',
+        mentions: { tokenName: true, tokenSymbol: true, contractAddress: false },
+        links: {
+          docs: null,
+          whitepaper: null,
+          github: null,
+          twitter: null,
+          telegram: null,
+          discord: null,
+          blog: null,
+          tokenomics: null,
+          security: null,
+          audit: null,
+          about: null,
+        },
+      }),
+      fetchErrors: [],
+    });
+
+    expect(
+      report.riskFlags.some((flag) => flag.title === 'Audit Claim Requires Review'),
+    ).toBe(true);
+    expect(report.verdict.toLowerCase()).not.toContain('scam');
   });
 
   it('misleading investment language applies severe penalty without scam wording', () => {
@@ -457,7 +548,7 @@ describe('tokenTrust modules with offChainCredibility', () => {
       expect.arrayContaining([
         'holder_structure',
         'contract_safety',
-        'market_maturity',
+        'market_context',
         'off_chain_credibility',
       ]),
     );

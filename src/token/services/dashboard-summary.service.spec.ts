@@ -173,7 +173,7 @@ describe('dashboard wording cleanup', () => {
     expect(summary.tokenTrust.scoreStatus).toBe('partial');
     expect(summary.tokenTrust.availableModules).toContain('contract_safety');
     expect(summary.tokenTrust.missingScoreInputs).not.toContain('contract_safety');
-    expect(summary.tokenTrust.missingScoreInputs).toContain('market_maturity');
+    expect(summary.tokenTrust.missingScoreInputs).toContain('market_context');
     expect(summary.offChainCredibility).toBeNull();
     expect(
       summary.tokenTrust.limitations.some((line) =>

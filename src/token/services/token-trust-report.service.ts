@@ -273,12 +273,12 @@ export class TokenTrustReportService {
       availableModules: [
         'holder_structure',
         ...(hasContractSafety ? (['contract_safety'] as const) : []),
-        ...(hasMarketContext ? (['market_maturity'] as const) : []),
+        ...(hasMarketContext ? (['market_context'] as const) : []),
         ...(hasOffChainCredibility ? (['off_chain_credibility'] as const) : []),
       ],
       missingScoreInputs: [
         ...(hasContractSafety ? [] : (['contract_safety'] as const)),
-        ...(hasMarketContext ? [] : (['market_maturity', 'liquidity_depth'] as const)),
+        ...(hasMarketContext ? [] : (['market_context', 'liquidity_depth'] as const)),
         ...(hasOffChainCredibility ? [] : (['off_chain_credibility'] as const)),
       ],
       riskLevel,

@@ -38,6 +38,7 @@ import {
 } from './token-contract-safety.service';
 import { TokenMarketContextService } from './token-market-context.service';
 import { TokenOffchainCredibilityService } from './token-offchain-credibility.service';
+import { resolveOffchainConfig } from './offchain-config';
 
 // FAST_MODE = true enables the B2B holder-intelligence path:
 //   * skip LitePnlService entirely (no realized PnL reconstruction)
@@ -587,27 +588,40 @@ export class TokenAnalysisService {
     );
 
     let offChainCredibilityReport = null;
-    try {
-      offChainCredibilityReport = await this.offChainCredibility.buildReport({
-        tokenName: tokenMetadata.name,
-        tokenSymbol: tokenMetadata.symbol,
-        contractAddress: address,
-        chain,
-        existingMetadata: {
-          website: null,
-          liquidityUsd: tokenMetadata.liquidityUsd,
-          liquidityPairs: tokenMetadata.liquidityPairs,
-          metadataSource: tokenMetadata.source,
-        },
-      });
-      this.logger.log(
-        `Off-chain credibility: score=${offChainCredibilityReport.score ?? 'n/a'} ` +
-          `tier=${offChainCredibilityReport.credibilityTier} risk=${offChainCredibilityReport.riskLevel}`,
-      );
-    } catch (err: unknown) {
-      this.logger.warn(
-        `Off-chain credibility failed for ${address}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    const offchainRuntime = resolveOffchainConfig(this.config);
+    if (offchainRuntime.credibilityEnabled) {
+      try {
+        const offchainProfiles = await this.intelligence.getOffchainMetadataProfiles(
+          address,
+          chain,
+        );
+        offChainCredibilityReport = await this.offChainCredibility.buildReport({
+          tokenName: tokenMetadata.name,
+          tokenSymbol: tokenMetadata.symbol,
+          contractAddress: address,
+          chain,
+          dexScreenerProfile: offchainProfiles.dexScreenerProfile,
+          coinGeckoMetadata: offchainProfiles.coinGeckoMetadata,
+          explorerMetadata: offchainProfiles.explorerMetadata,
+          existingMetadata: {
+            liquidityUsd: tokenMetadata.liquidityUsd,
+            liquidityPairs: tokenMetadata.liquidityPairs,
+            metadataSource: tokenMetadata.source,
+            deployer: tokenMetadata.deployer,
+            owner: tokenMetadata.owner,
+          },
+        });
+        this.logger.log(
+          `Off-chain credibility: score=${offChainCredibilityReport.score ?? 'n/a'} ` +
+            `tier=${offChainCredibilityReport.credibilityTier} risk=${offChainCredibilityReport.riskLevel}`,
+        );
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Off-chain credibility failed for ${address}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } else {
+      this.logger.log(`Off-chain credibility skipped (disabled) for ${address}`);
     }
 
     const qualityWithPrice = {

@@ -45,6 +45,12 @@ export interface HolderFilterResult {
   teamConnectionScore: number;
 }
 
+export interface OffchainMetadataProfiles {
+  dexScreenerProfile: Record<string, unknown> | null;
+  coinGeckoMetadata: Record<string, unknown> | null;
+  explorerMetadata: Record<string, unknown> | null;
+}
+
 export interface TokenMetadata {
   name: string | null;
   symbol: string | null;
@@ -99,6 +105,11 @@ interface DexScreenerPair {
   priceUsd?: string;
   fdv?: number;
   liquidity?: { usd?: number };
+  info?: {
+    websites?: string[];
+    socials?: Array<{ type?: string; url?: string }>;
+    imageUrl?: string;
+  };
 }
 
 interface DexScreenerResponse {
@@ -142,6 +153,7 @@ interface AlchemyAssetTransfersResponse {
 interface CoinGeckoTokenResponse {
   name?: string;
   symbol?: string;
+  links?: Record<string, unknown>;
   market_data?: {
     total_supply?: number | string | null;
     circulating_supply?: number | string | null;
@@ -318,6 +330,23 @@ export class TokenIntelligenceService {
       deployer,
       owner,
       source,
+    };
+  }
+
+  async getOffchainMetadataProfiles(
+    contractAddress: string,
+    chain: string,
+  ): Promise<OffchainMetadataProfiles> {
+    const address = contractAddress.toLowerCase();
+    const [dexScreenerProfile, coinGeckoMetadata] = await Promise.all([
+      this.fetchDexScreenerOffchainProfile(address, chain),
+      this.fetchCoinGeckoOffchainProfile(address, chain),
+    ]);
+
+    return {
+      dexScreenerProfile,
+      coinGeckoMetadata,
+      explorerMetadata: null,
     };
   }
 
@@ -576,6 +605,72 @@ export class TokenIntelligenceService {
       return payload.status === '1' && creator ? creator.toLowerCase() : null;
     } catch (err: unknown) {
       this.logger.warn(`Deployer lookup failed: ${this.getErrorMessage(err)}`);
+      return null;
+    }
+  }
+
+  private async fetchDexScreenerOffchainProfile(
+    contractAddress: string,
+    chain: string,
+  ): Promise<Record<string, unknown> | null> {
+    try {
+      const dexChain = this.getDexScreenerChainId(chain);
+      if (!dexChain) {
+        return null;
+      }
+
+      const response = await fetch(
+        `https://api.dexscreener.com/latest/dex/tokens/${contractAddress}`,
+      );
+      if (!response.ok) {
+        return null;
+      }
+
+      const payload = (await response.json()) as DexScreenerResponse;
+      const pairs = (payload.pairs ?? []).filter((pair) => pair.chainId === dexChain);
+      if (pairs.length === 0) {
+        return null;
+      }
+
+      const bestPair = [...pairs].sort(
+        (left, right) => (right.liquidity?.usd ?? 0) - (left.liquidity?.usd ?? 0),
+      )[0];
+
+      return {
+        info: bestPair.info ?? null,
+        pairs,
+      };
+    } catch (err: unknown) {
+      this.logger.warn(
+        `DexScreener off-chain profile failed: ${this.getErrorMessage(err)}`,
+      );
+      return null;
+    }
+  }
+
+  private async fetchCoinGeckoOffchainProfile(
+    contractAddress: string,
+    chain: string,
+  ): Promise<Record<string, unknown> | null> {
+    const platform = this.getCoinGeckoPlatform(chain);
+    if (!platform) {
+      return null;
+    }
+
+    try {
+      const response = await fetch(
+        `https://api.coingecko.com/api/v3/coins/${platform}/contract/${contractAddress}`,
+      );
+      if (!response.ok) {
+        return null;
+      }
+
+      const payload = (await response.json()) as CoinGeckoTokenResponse;
+      return payload as unknown as Record<string, unknown>;
+    } catch (err: unknown) {
+      this.logger.warn(
+        `CoinGecko off-chain profile failed: ${this.getErrorMessage(err)}`,
+      );
       return null;
     }
   }

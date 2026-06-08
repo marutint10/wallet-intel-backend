@@ -1,4 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { resolveOffchainConfig } from './offchain-config';
 import {
   TokenOffchainDiscoveryService,
   type OffchainDiscoveryResult,
@@ -104,6 +106,7 @@ export interface OffChainCredibilityCollectedData {
   discovery: OffchainDiscoveryResult;
   crawl: TokenWebsiteCrawlResult | null;
   fetchErrors: string[];
+  runtimeLimitations?: string[];
 }
 
 interface CategoryMatch {
@@ -226,11 +229,22 @@ const CATEGORY_RULES: Array<{
   },
 ];
 
+const FUNCTIONAL_CATEGORIES = new Set<ProjectCategory>([
+  'infrastructure',
+  'defi',
+  'rwa',
+  'stablecoin',
+  'gaming',
+  'ai',
+  'other',
+]);
+
 @Injectable()
 export class TokenOffchainCredibilityService {
   private readonly logger = new Logger(TokenOffchainCredibilityService.name);
 
   constructor(
+    private readonly config: ConfigService,
     private readonly discovery: TokenOffchainDiscoveryService,
     private readonly webCrawler: TokenWebCrawlerService,
   ) {}
@@ -245,6 +259,21 @@ export class TokenOffchainCredibilityService {
     explorerMetadata?: unknown;
     existingMetadata?: unknown;
   }): Promise<OffChainCredibilityReport> {
+    const runtime = resolveOffchainConfig(this.config);
+    const runtimeLimitations: string[] = [];
+
+    if (!runtime.credibilityEnabled) {
+      return buildOffChainCredibilityReport({
+        tokenName: safeString(input.tokenName),
+        tokenSymbol: safeString(input.tokenSymbol),
+        contractAddress: safeString(input.contractAddress)?.toLowerCase() ?? null,
+        discovery: emptyDiscoveryResult(),
+        crawl: null,
+        fetchErrors: ['Off-chain credibility disabled by configuration'],
+        runtimeLimitations: ['Off-chain credibility analysis is disabled by configuration.'],
+      });
+    }
+
     const fetchErrors: string[] = [];
 
     try {
@@ -261,15 +290,22 @@ export class TokenOffchainCredibilityService {
 
       fetchErrors.push(...discovery.errors);
 
+      if (!runtime.crawlEnabled) {
+        runtimeLimitations.push('Website crawling is disabled; report may be metadata-only.');
+      }
+      if (!runtime.braveEnabled) {
+        runtimeLimitations.push('Brave search fallback is disabled.');
+      }
+
       let crawl: TokenWebsiteCrawlResult | null = null;
-      if (discovery.discoveredLinks.website) {
+      if (discovery.discoveredLinks.website && runtime.crawlEnabled) {
         try {
           crawl = await this.webCrawler.crawlOfficialWebsite({
             websiteUrl: discovery.discoveredLinks.website,
             tokenName: input.tokenName,
             tokenSymbol: input.tokenSymbol,
             contractAddress: input.contractAddress,
-            maxPages: 5,
+            maxPages: runtime.maxPages,
           });
           fetchErrors.push(...crawl.errors);
         } catch (err: unknown) {
@@ -284,6 +320,7 @@ export class TokenOffchainCredibilityService {
         discovery,
         crawl,
         fetchErrors,
+        runtimeLimitations,
       });
     } catch (err: unknown) {
       this.logger.warn(`Off-chain credibility failed: ${getErrorMessage(err)}`);
@@ -306,8 +343,10 @@ export function buildOffChainCredibilityReport(
   const unknowns: string[] = [];
   const limitations: string[] = [
     'Off-chain credibility is shown separately and is not yet merged into the visible on-chain score.',
-    'This module uses official links, website crawl text, and metadata only; it does not verify every claim independently.',
-    'Website content may change and crawl coverage is limited to a small number of pages.',
+    'Off-chain credibility is based on publicly available project metadata and website signals.',
+    'Website crawling may miss content hidden behind scripts, captchas, login pages, or blocked requests.',
+    'This module does not prove investment safety.',
+    ...(data.runtimeLimitations ?? []),
   ];
 
   const discoveredLinks = { ...data.discovery.discoveredLinks };
@@ -464,7 +503,9 @@ export function buildClaimChecks(
     }
 
     let status: OffChainCredibilityReport['claimChecks'][number]['status'] = 'unknown';
-    if (evidence.length >= 2) {
+    if (item.claim === 'audited by' && !data.crawl?.links.audit && !data.crawl?.links.security) {
+      status = evidence.length > 0 ? 'partially_supported' : 'unsupported';
+    } else if (evidence.length >= 2) {
       status = 'supported';
     } else if (evidence.length === 1) {
       status = 'partially_supported';
@@ -527,7 +568,11 @@ export function scoreOffChainCredibility(input: {
     linkMismatch = true;
   }
 
-  if (projectProfile.hasClearUseCase) {
+  if (categoryMatch.category === 'meme') {
+    if (hasMemePositioning(combinedText)) {
+      score += 5;
+    }
+  } else if (projectProfile.hasClearUseCase) {
     score += 15;
   }
   if (projectProfile.hasDocs) {
@@ -562,15 +607,40 @@ export function scoreOffChainCredibility(input: {
     }
   }
 
-  if (!projectProfile.hasDocs && !projectProfile.hasClearUseCase) {
+  if (
+    !projectProfile.hasDocs &&
+    !projectProfile.hasClearUseCase &&
+    categoryMatch.category !== 'meme'
+  ) {
     score -= 15;
+  } else if (
+    categoryMatch.category === 'meme' &&
+    !projectProfile.hasDocs &&
+    !links.twitter &&
+    !links.telegram &&
+    !links.discord
+  ) {
+    score -= 8;
   }
   if (crawl?.brokenWebsite) {
     score -= 20;
   }
-  if (linkMismatch || (crawl && !hasTokenVerification(crawl, data) && confidence === 'low')) {
+  const untrustedWebsite =
+    data.discovery.officialLinkConfidence.level === 'low' &&
+    Boolean(links.website) &&
+    crawl &&
+    !hasTokenVerification(crawl, data);
+
+  if (linkMismatch || untrustedWebsite) {
     score -= 20;
     linkMismatch = true;
+  } else if (
+    crawl &&
+    !hasTokenVerification(crawl, data) &&
+    confidence === 'medium' &&
+    (data.tokenName || data.tokenSymbol)
+  ) {
+    score -= 8;
   }
 
   const unsupportedClaims = claimChecks.filter((check) => check.status === 'unsupported');
@@ -615,14 +685,22 @@ function buildProjectProfile(
   );
   const hasTeamInfo = Boolean(crawl?.signals.hasTeamInfo);
   const hasClearUseCase =
-    Boolean(crawl?.signals.hasClearUseCase) ||
-    categoryMatch.category !== 'unknown' ||
-    combinedText.trim().length > 120;
+    FUNCTIONAL_CATEGORIES.has(categoryMatch.category) &&
+    (Boolean(crawl?.signals.hasClearUseCase) ||
+      categoryMatch.score > 0 ||
+      hasDocs);
 
   return {
     category: categoryMatch.category,
     claimedUseCase: categoryMatch.claimedUseCase,
-    hasClearUseCase: crawl ? hasClearUseCase : hasClearUseCase ? true : null,
+    hasClearUseCase:
+      categoryMatch.category === 'meme'
+        ? false
+        : crawl
+          ? hasClearUseCase
+          : hasClearUseCase
+            ? true
+            : null,
     hasDocs: hasDocs ? true : crawl ? false : null,
     hasWhitepaper: hasWhitepaper ? true : crawl ? false : null,
     hasGithub: hasGithub ? true : crawl ? false : null,
@@ -642,7 +720,7 @@ function buildCredibilitySignals(
     signals.push({
       strength: 'high',
       title: 'Clear Project Use Case',
-      description: 'Official materials suggest a recognizable project purpose or category.',
+      description: 'Official materials suggest a recognizable functional project purpose.',
       evidence: categoryMatch.claimedUseCase ?? undefined,
       sourceUrl: data.discovery.discoveredLinks.website ?? undefined,
     });
@@ -688,7 +766,7 @@ function buildCredibilitySignals(
       sourceUrl: data.discovery.discoveredLinks.website ?? undefined,
     });
   }
-  if (categoryMatch.category === 'meme') {
+  if (categoryMatch.category === 'meme' && hasMemePositioning(combinedTextFromData(data))) {
     signals.push({
       strength: 'low',
       title: 'Clear Meme/Community Positioning',
@@ -716,7 +794,13 @@ function buildRiskFlags(
       description: 'No official website could be discovered from available metadata or search.',
     });
   }
-  if (scoring.linkMismatch || data.discovery.officialLinkConfidence.level === 'low') {
+  if (
+    scoring.linkMismatch ||
+    (data.discovery.officialLinkConfidence.level === 'low' &&
+      data.discovery.officialLinkConfidence.reasons.some((reason) =>
+        reason.toLowerCase().includes('verify'),
+      ))
+  ) {
     flags.push({
       severity: 'high',
       title: 'Official Link Mismatch',
@@ -931,4 +1015,14 @@ function safeString(value: unknown): string | null {
 
 function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function hasMemePositioning(text: string): boolean {
+  return /meme|community token|pepe|doge|shib|frog|mascot|entertainment|community positioning/i.test(
+    text,
+  );
+}
+
+function combinedTextFromData(data: OffChainCredibilityCollectedData): string {
+  return buildCombinedText(data);
 }
