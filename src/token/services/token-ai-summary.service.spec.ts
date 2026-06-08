@@ -65,4 +65,56 @@ describe('TokenAiSummaryService', () => {
     expect(input.hasRealizedPnl).toBe(false);
     expect(input.qualityLabel).not.toContain('Community');
   });
+
+  it('buildInput includes contractSafety when persisted', () => {
+    const config = { get: jest.fn(() => '') } as unknown as ConfigService;
+    const cache = {
+      get: jest.fn(),
+      set: jest.fn(),
+    } as unknown as Cache;
+    const trust = new TokenTrustReportService();
+    const service = new TokenAiSummaryService(config, trust, cache);
+
+    const analysis = makeAnalysis();
+    analysis.qualityMetrics = {
+      ...analysis.qualityMetrics,
+      contractSafety: {
+        status: 'done',
+        score: 88,
+        riskLevel: 'low',
+        verdict: 'No major contract permission risks detected from available contract data',
+        confidence: 'high',
+        verifiedSource: true,
+        sourceProvider: 'etherscan',
+        contractType: 'erc20',
+        isProxy: false,
+        proxyType: null,
+        implementationAddress: null,
+        proxyAdminAddress: null,
+        owner: {
+          ownerAddress: null,
+          isRenounced: true,
+          ownerType: null,
+          adminAddresses: [],
+        },
+        permissions: {},
+        taxes: { status: 'not_detected', buyTaxPct: null, sellTaxPct: null, transferTaxPct: null, evidence: [] },
+        honeypot: { status: 'not_checked', reason: null, evidence: [] },
+        flags: [],
+        positiveSignals: [],
+        unknowns: [],
+        limitations: [],
+        checkedAt: new Date().toISOString(),
+      },
+    };
+
+    const input = (service as any).buildInput(analysis);
+    expect(input.contractSafetyAvailable).toBe(true);
+    expect(input.contractSafetyScore).toBe(88);
+    expect(input.contractSafetyRiskLevel).toBe('low');
+
+    const fallback = (service as any).buildFallbackSummary(input);
+    expect(fallback.toLowerCase()).not.toContain('safe');
+    expect(fallback.toLowerCase()).toContain('contract permission risk');
+  });
 });

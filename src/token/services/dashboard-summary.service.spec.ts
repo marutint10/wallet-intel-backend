@@ -133,6 +133,57 @@ describe('dashboard wording cleanup', () => {
     );
   });
 
+  it('dashboard includes contractSafety and updates tokenTrust limitation', () => {
+    const analysis = pepeAnalysis();
+    analysis.qualityMetrics = {
+      ...analysis.qualityMetrics,
+      contractSafety: {
+        status: 'done',
+        score: 82,
+        riskLevel: 'low',
+        verdict: 'No major contract permission risks detected from available contract data',
+        confidence: 'high',
+        verifiedSource: true,
+        sourceProvider: 'etherscan',
+        contractType: 'erc20',
+        isProxy: false,
+        proxyType: null,
+        implementationAddress: null,
+        proxyAdminAddress: null,
+        owner: {
+          ownerAddress: '0x000000000000000000000000000000000000dead',
+          isRenounced: true,
+          ownerType: 'eoa',
+          adminAddresses: [],
+        },
+        permissions: {},
+        taxes: { status: 'not_detected', buyTaxPct: null, sellTaxPct: null, transferTaxPct: null, evidence: [] },
+        honeypot: { status: 'not_checked', reason: null, evidence: [] },
+        flags: [],
+        positiveSignals: [{ strength: 'high', title: 'Verified Source Code', description: 'ok' }],
+        unknowns: [],
+        limitations: [],
+        checkedAt: new Date().toISOString(),
+      },
+    };
+
+    const summary = dashboard.buildDashboardSummary(analysis);
+    expect(summary.contractSafety?.riskLevel).toBe('low');
+    expect(summary.tokenTrust.scoreType).toBe('visible_onchain_score');
+    expect(summary.tokenTrust.scoreStatus).toBe('partial');
+    expect(summary.tokenTrust.availableModules).toContain('contract_safety');
+    expect(
+      summary.tokenTrust.limitations.some((line) =>
+        line.includes('shown separately and is not yet merged'),
+      ),
+    ).toBe(true);
+    expect(
+      summary.tokenTrust.limitations.some((line) =>
+        line.includes('Contract safety analysis is not included yet'),
+      ),
+    ).toBe(false);
+  });
+
   it('LINK dashboard uses moderate concentration wording', () => {
     const summary = dashboard.buildDashboardSummary(linkAnalysis());
     expect(summary.holderQuality.qualityLabel).toBe('Strong Holder Strength');

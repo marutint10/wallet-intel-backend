@@ -10,11 +10,13 @@ import {
   computeHolderQualityBreakdown,
   computeSmartMoneyPct,
   mapQualityLabelForRetail,
+  parseContractSafety,
   type RawHolder,
   safeNumber,
   safeNumberOrNull,
   safeString,
 } from './dashboard-summary.service';
+import type { ContractSafetyRiskLevel } from './token-contract-safety.service';
 import { TokenTrustReportService } from './token-trust-report.service';
 
 export interface TokenSummaryInput {
@@ -70,6 +72,14 @@ export interface TokenSummaryInput {
 
   riskSignals: string[];
   positiveSignals: string[];
+
+  contractSafetyAvailable: boolean;
+  contractSafetyScore: number | null;
+  contractSafetyRiskLevel: ContractSafetyRiskLevel | null;
+  contractSafetyVerdict: string | null;
+  contractSafetyVerified: boolean | null;
+  contractSafetyFlags: string[];
+  contractSafetyLimitations: string[];
 }
 
 type GeminiOnceResult = { text: string; finishReason: string };
@@ -83,6 +93,10 @@ Hard rules:
 - Do not invent facts or percentages.
 - Do not say buy, sell, scam, rug, guaranteed safe, or healthy.
 - Do not describe the score as final full token trust; it is a partial visible on-chain score only.
+- Contract safety is a separate module and is not merged into the visible on-chain score yet.
+- Mention severe/high contract risk flags when present; if contract safety is low risk say no major contract permission risk was detected from available source/ABI data.
+- If contract source is unverified or scan is incomplete, say contract safety could not be fully verified.
+- Do not invent contract functions or permissions.
 - Always distinguish retail-scoped concentration from total-supply impact when both are provided.
 - Do not overstate risk when total-supply impact is low even if retail-scoped concentration is higher.
 - Avoid: conviction holders, strong community commitment, community conviction, profitable traders, smart money (unless realized PnL is explicitly available).
@@ -93,7 +107,7 @@ Hard rules:
 
 @Injectable()
 export class TokenAiSummaryService {
-  private static readonly CACHE_PREFIX = 'token:summary:v5:';
+  private static readonly CACHE_PREFIX = 'token:summary:v6:';
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly FALLBACK_CACHE_TTL_SECONDS = 1_800;
   private static readonly GEMINI_PRIMARY_MODEL = 'gemini-2.5-flash';
@@ -216,6 +230,7 @@ export class TokenAiSummaryService {
       unknown
     >;
     const tokenTrust = this.tokenTrustReport.buildReport(analysis);
+    const contractSafety = parseContractSafety(quality.contractSafety);
 
     const { riskSignals, positiveSignals } = this.partitionCalloutTitles(riskCallouts);
 
@@ -299,6 +314,13 @@ export class TokenAiSummaryService {
       hasRealizedPnl: safeNumber(pnlAggregation.holdersWithPnlData) > 0,
       riskSignals,
       positiveSignals,
+      contractSafetyAvailable: contractSafety !== null,
+      contractSafetyScore: contractSafety?.score ?? null,
+      contractSafetyRiskLevel: contractSafety?.riskLevel ?? null,
+      contractSafetyVerdict: contractSafety?.verdict ?? null,
+      contractSafetyVerified: contractSafety?.verifiedSource ?? null,
+      contractSafetyFlags: contractSafety?.flags.map((flag) => flag.title) ?? [],
+      contractSafetyLimitations: contractSafety?.limitations ?? [],
     };
   }
 
@@ -329,6 +351,10 @@ export class TokenAiSummaryService {
       input.tokenTrustPositiveSignals.length > 0
         ? `Positive signals: ${input.tokenTrustPositiveSignals.join(', ')}.`
         : 'Positive signals are limited in the current snapshot.';
+
+    const contractSafetyLine = input.contractSafetyAvailable
+      ? `Contract safety (separate module): score ${input.contractSafetyScore ?? 'n/a'}/100, risk ${input.contractSafetyRiskLevel}, verdict: ${input.contractSafetyVerdict}. Verified source: ${input.contractSafetyVerified === true ? 'yes' : input.contractSafetyVerified === false ? 'no' : 'unknown'}. Flags: ${input.contractSafetyFlags.join(', ') || 'none'}.`
+      : 'Contract safety: not available in this analysis snapshot.';
 
     const sampleSizeNote =
       input.retailHolderCount < 100
@@ -401,15 +427,26 @@ SIGNALS
 ${riskLine}
 ${positiveLine}
 
+CONTRACT SAFETY (separate from visible on-chain score)
+${contractSafetyLine}
+${input.contractSafetyLimitations.length > 0 ? `Contract safety limitations: ${input.contractSafetyLimitations.join(' | ')}` : ''}
+
 Write a 4-6 sentence cautious retail risk summary now.
 `.trim();
   }
 
   private buildFallbackSummary(input: TokenSummaryInput): string {
+    const contractLine = input.contractSafetyAvailable
+      ? input.contractSafetyRiskLevel === 'low' || input.contractSafetyRiskLevel === 'moderate'
+        ? 'No major contract permission risk was detected from available source/ABI data. '
+        : `Contract safety flags: ${input.contractSafetyFlags.join(', ') || 'review required'}. `
+      : 'Contract safety could not be fully verified in this snapshot. ';
+
     return (
       `${input.tokenName} (${input.tokenSymbol}) shows ${input.tokenTrustRiskLevel} visible risk with a partial ${input.scoreLabel} of ${input.tokenTrustScore}/100. ` +
       `${input.tokenTrustVerdict}. ` +
       `${input.concentrationContextExplanation} ` +
+      `${contractLine}` +
       `${input.whoCanDumpSummary} ` +
       `Research only, not financial advice.`
     );

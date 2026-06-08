@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { TokenAnalysisEntity } from '../entities/token-analysis.entity';
 import type { RiskCallout } from './holder-aggregation.service';
 import { UNSCORED_SCORE_BANDS } from './lite-scorer.service';
+import type { ContractSafetyReport } from './token-contract-safety.service';
 import {
   TokenTrustReport,
   TokenTrustReportService,
@@ -162,6 +163,7 @@ export interface DashboardSummaryResponse {
 
   distribution: DistributionSummary;
   tokenTrust: TokenTrustReport;
+  contractSafety: ContractSafetyReport | null;
 
   holderTable: {
     total: number;
@@ -281,6 +283,7 @@ export class DashboardSummaryService {
     const exchangePctOfSupply = safeNumber(exchangesEntry.pctOfSupply);
 
     const tokenTrust = this.tokenTrustReport.buildReport(analysis);
+    const contractSafety = parseContractSafety(quality.contractSafety);
 
     const summaryCards = buildSummaryCards({
       avgScore: avgScoreRaw,
@@ -322,6 +325,7 @@ export class DashboardSummaryService {
       holderQualityBreakdown,
       distribution: distributionSummary,
       tokenTrust,
+      contractSafety,
       holderTable: {
         total: holderTableRows.length,
         rows: holderTableRows,
@@ -355,6 +359,18 @@ export function formatPercent(value: unknown, digits = 1): string {
   }
 
   return `${roundTo(num, digits)}%`;
+}
+
+export function parseContractSafety(value: unknown): ContractSafetyReport | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const status = safeString(record.status, '');
+  if (!status || status === 'unknown') {
+    return null;
+  }
+  return record as unknown as ContractSafetyReport;
 }
 
 export function safeNumber(value: unknown, fallback = 0): number {
