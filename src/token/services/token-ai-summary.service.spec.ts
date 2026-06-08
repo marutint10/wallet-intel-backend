@@ -220,4 +220,91 @@ describe('TokenAiSummaryService', () => {
     expect(fallback.toLowerCase()).toContain('market access');
     expect(fallback.toLowerCase()).toContain('holder concentration');
   });
+
+  it('buildInput includes offChainCredibility when persisted', () => {
+    const config = { get: jest.fn(() => '') } as unknown as ConfigService;
+    const cache = {
+      get: jest.fn(),
+      set: jest.fn(),
+    } as unknown as Cache;
+    const trust = new TokenTrustReportService();
+    const service = new TokenAiSummaryService(config, trust, cache);
+
+    const analysis = makeAnalysis();
+    analysis.qualityMetrics = {
+      ...analysis.qualityMetrics,
+      offChainCredibility: {
+        status: 'done',
+        score: 92,
+        riskLevel: 'low',
+        credibilityTier: 'institutional_grade',
+        verdict:
+          'Off-chain credibility appears strong based on official project, documentation, developer, and infrastructure use-case signals.',
+        confidence: 'high',
+        discoveredLinks: {
+          website: 'https://chain.link/',
+          docs: 'https://docs.chain.link/',
+          whitepaper: null,
+          github: 'https://github.com/smartcontractkit/chainlink',
+          twitter: 'https://twitter.com/chainlink',
+          telegram: null,
+          discord: null,
+          blog: null,
+        },
+        officialLinkConfidence: { level: 'high', reasons: ['Verified'] },
+        projectProfile: {
+          category: 'infrastructure',
+          claimedUseCase: 'Decentralized infrastructure or data services',
+          hasClearUseCase: true,
+          hasDocs: true,
+          hasWhitepaper: false,
+          hasGithub: true,
+          hasAuditsMentioned: true,
+          hasTeamInfo: true,
+        },
+        credibilitySignals: [],
+        riskFlags: [],
+        claimChecks: [],
+        unknowns: [],
+        limitations: [],
+        checkedAt: new Date().toISOString(),
+      },
+    };
+
+    const input = (service as any).buildInput(analysis);
+    expect(input.offChainCredibilityAvailable).toBe(true);
+    expect(input.offChainCredibilityScore).toBe(92);
+    expect(input.offChainCredibilityCategory).toBe('infrastructure');
+
+    const fallback = (service as any).buildFallbackSummary(input);
+    expect(fallback.toLowerCase()).toContain('off-chain credibility');
+    expect(fallback.toLowerCase()).toContain('partial');
+    expect(fallback.toLowerCase()).not.toContain('final trust score');
+    expect(fallback.toLowerCase()).not.toMatch(/\bguaranteed safe\b/);
+    expect(fallback.toLowerCase()).not.toContain('scam');
+  });
+
+  it('PEPE-like off-chain fallback mentions community-driven credibility', () => {
+    const config = { get: jest.fn(() => '') } as unknown as ConfigService;
+    const cache = {
+      get: jest.fn(),
+      set: jest.fn(),
+    } as unknown as Cache;
+    const trust = new TokenTrustReportService();
+    const service = new TokenAiSummaryService(config, trust, cache);
+
+    const input = (service as any).buildInput(makeAnalysis());
+    input.offChainCredibilityAvailable = true;
+    input.offChainCredibilityScore = 58;
+    input.offChainCredibilityRiskLevel = 'high';
+    input.offChainCredibilityTier = 'limited';
+    input.offChainCredibilityCategory = 'meme';
+    input.offChainCredibilityVerdict =
+      'Off-chain credibility appears community-driven. Official links may exist, but project documentation and utility evidence are limited compared with infrastructure or DeFi protocols.';
+    input.offChainCredibilityFlags = [];
+
+    const fallback = (service as any).buildFallbackSummary(input);
+    expect(fallback.toLowerCase()).toContain('community-driven');
+    expect(fallback.toLowerCase()).toContain('holder concentration');
+  });
 });

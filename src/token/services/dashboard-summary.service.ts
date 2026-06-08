@@ -4,6 +4,7 @@ import type { RiskCallout } from './holder-aggregation.service';
 import { UNSCORED_SCORE_BANDS } from './lite-scorer.service';
 import type { ContractSafetyReport } from './token-contract-safety.service';
 import type { MarketContextReport } from './token-market-context.service';
+import type { OffChainCredibilityReport } from './token-offchain-credibility.service';
 import {
   TokenTrustReport,
   TokenTrustReportService,
@@ -166,6 +167,7 @@ export interface DashboardSummaryResponse {
   tokenTrust: TokenTrustReport;
   contractSafety: ContractSafetyReport | null;
   marketContext: MarketContextReport | null;
+  offChainCredibility: OffChainCredibilityReport | null;
 
   holderTable: {
     total: number;
@@ -287,6 +289,7 @@ export class DashboardSummaryService {
     const tokenTrust = this.tokenTrustReport.buildReport(analysis);
     const contractSafety = parseContractSafety(quality.contractSafety);
     const marketContext = parseMarketContext(quality.marketContext);
+    const offChainCredibility = parseOffChainCredibility(quality.offChainCredibility);
 
     const summaryCards = buildSummaryCards({
       avgScore: avgScoreRaw,
@@ -330,6 +333,7 @@ export class DashboardSummaryService {
       tokenTrust,
       contractSafety,
       marketContext,
+      offChainCredibility,
       holderTable: {
         total: holderTableRows.length,
         rows: holderTableRows,
@@ -375,6 +379,20 @@ export function parseMarketContext(value: unknown): MarketContextReport | null {
     return null;
   }
   return record as unknown as MarketContextReport;
+}
+
+export function parseOffChainCredibility(
+  value: unknown,
+): OffChainCredibilityReport | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const status = safeString(record.status, '');
+  if (!status || status === 'unknown') {
+    return null;
+  }
+  return record as unknown as OffChainCredibilityReport;
 }
 
 export function parseContractSafety(value: unknown): ContractSafetyReport | null {

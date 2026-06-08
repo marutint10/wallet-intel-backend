@@ -174,6 +174,7 @@ describe('dashboard wording cleanup', () => {
     expect(summary.tokenTrust.availableModules).toContain('contract_safety');
     expect(summary.tokenTrust.missingScoreInputs).not.toContain('contract_safety');
     expect(summary.tokenTrust.missingScoreInputs).toContain('market_maturity');
+    expect(summary.offChainCredibility).toBeNull();
     expect(
       summary.tokenTrust.limitations.some((line) =>
         line.includes('shown separately and is not yet merged'),

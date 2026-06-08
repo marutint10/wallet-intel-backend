@@ -237,11 +237,13 @@ export class TokenTrustReportService {
     const positiveSignals = this.buildPositiveSignals(ctx);
     const hasContractSafety = this.hasContractSafetyModule(quality);
     const hasMarketContext = this.hasMarketContextModule(quality);
+    const hasOffChainCredibility = this.hasOffChainCredibilityModule(quality);
     const limitations = this.buildLimitations(
       reportMode,
       analyzedRetail,
       hasContractSafety,
       hasMarketContext,
+      hasOffChainCredibility,
     );
 
     const whoCanDump: WhoCanDumpSummary = {
@@ -272,11 +274,12 @@ export class TokenTrustReportService {
         'holder_structure',
         ...(hasContractSafety ? (['contract_safety'] as const) : []),
         ...(hasMarketContext ? (['market_maturity'] as const) : []),
+        ...(hasOffChainCredibility ? (['off_chain_credibility'] as const) : []),
       ],
       missingScoreInputs: [
         ...(hasContractSafety ? [] : (['contract_safety'] as const)),
         ...(hasMarketContext ? [] : (['market_maturity', 'liquidity_depth'] as const)),
-        'off_chain_credibility',
+        ...(hasOffChainCredibility ? [] : (['off_chain_credibility'] as const)),
       ],
       riskLevel,
       verdict,
@@ -795,30 +798,44 @@ export class TokenTrustReportService {
     return status === 'done' || status === 'partial';
   }
 
+  private hasOffChainCredibilityModule(quality: Record<string, unknown>): boolean {
+    const offChainCredibility = asRecord(quality.offChainCredibility);
+    const status = safeString(offChainCredibility.status).toLowerCase();
+    return status === 'done' || status === 'partial';
+  }
+
   private buildLimitations(
     reportMode: 'fast' | 'standard',
     analyzedRetail: number,
     hasContractSafety: boolean,
     hasMarketContext: boolean,
+    hasOffChainCredibility: boolean,
   ): string[] {
+    const hasSupplementalModules =
+      hasContractSafety || hasMarketContext || hasOffChainCredibility;
     const limitations = [
-      hasContractSafety && hasMarketContext
-        ? 'This is a partial visible on-chain score. Full trust scoring will require off-chain credibility analysis.'
-        : hasContractSafety
-          ? 'This is a partial visible on-chain score. Full trust scoring will require market maturity, liquidity depth, and off-chain credibility analysis.'
-          : hasMarketContext
-            ? 'This is a partial visible on-chain score. Full trust scoring will require contract safety and off-chain credibility analysis.'
-            : 'This is a partial visible on-chain score. Full trust scoring will require contract safety, market maturity, liquidity depth, and off-chain credibility analysis.',
+      hasSupplementalModules
+        ? 'Visible score is currently based on on-chain holder structure.'
+        : 'This is a partial visible on-chain score. Full trust scoring will require contract safety, market maturity, liquidity depth, and off-chain credibility analysis.',
+      hasContractSafety || hasMarketContext || hasOffChainCredibility
+        ? 'Contract safety, market context, and off-chain credibility are shown as separate modules.'
+        : 'Supplemental trust modules are not included yet.',
       hasContractSafety
         ? 'Contract safety is shown separately and is not yet merged into the visible on-chain score.'
         : 'Contract safety analysis is not included yet.',
       hasMarketContext
         ? 'Market maturity and liquidity context are shown separately and are not yet merged into the visible on-chain score.'
         : 'Market maturity and liquidity depth analysis is not included yet.',
-      'Off-chain credibility analysis is not included yet.',
+      hasOffChainCredibility
+        ? 'Off-chain credibility is shown separately and is not yet merged into the visible on-chain score.'
+        : 'Off-chain credibility analysis is not included yet.',
       'Holder classifications are based on available on-chain data and may be incomplete.',
       'Exchange custody is treated as liquidity context, not direct sell pressure.',
-      `Visible on-chain score is capped at ${MAX_TRUST_SCORE_WITHOUT_FULL_AUDIT}/100 until missing inputs are added.`,
+      hasOffChainCredibility &&
+      hasContractSafety &&
+      hasMarketContext
+        ? `Visible on-chain score remains partial and is capped at ${MAX_TRUST_SCORE_WITHOUT_FULL_AUDIT}/100 until modules are merged into one score.`
+        : `Visible on-chain score is capped at ${MAX_TRUST_SCORE_WITHOUT_FULL_AUDIT}/100 until missing inputs are added.`,
     ];
 
     if (reportMode === 'fast') {

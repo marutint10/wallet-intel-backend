@@ -12,6 +12,7 @@ import {
   mapQualityLabelForRetail,
   parseContractSafety,
   parseMarketContext,
+  parseOffChainCredibility,
   type RawHolder,
   safeNumber,
   safeNumberOrNull,
@@ -19,6 +20,10 @@ import {
 } from './dashboard-summary.service';
 import type { ContractSafetyRiskLevel } from './token-contract-safety.service';
 import type { MarketContextRiskLevel, MaturityTier } from './token-market-context.service';
+import type {
+  CredibilityTier,
+  OffChainCredibilityRiskLevel,
+} from './token-offchain-credibility.service';
 import { TokenTrustReportService } from './token-trust-report.service';
 
 export interface TokenSummaryInput {
@@ -90,6 +95,14 @@ export interface TokenSummaryInput {
   marketContextMaturityTier: MaturityTier | null;
   marketContextVerdict: string | null;
   marketContextFlags: string[];
+
+  offChainCredibilityAvailable: boolean;
+  offChainCredibilityScore: number | null;
+  offChainCredibilityRiskLevel: OffChainCredibilityRiskLevel | null;
+  offChainCredibilityTier: CredibilityTier | null;
+  offChainCredibilityVerdict: string | null;
+  offChainCredibilityCategory: string | null;
+  offChainCredibilityFlags: string[];
 }
 
 type GeminiOnceResult = { text: string; finishReason: string };
@@ -111,6 +124,10 @@ Hard rules:
 - Mention holder/visible on-chain risk, contract safety, and market maturity as separate layers.
 - For mature tokens, note that market maturity may be strong while the visible on-chain score remains partial because off-chain credibility is not merged yet.
 - For meme/high-liquidity tokens, note that market access may be strong while holder concentration risk can remain elevated.
+- Off-chain credibility is a separate module and is not merged into the visible on-chain score yet.
+- Mention holder/visible on-chain risk, contract safety, market maturity, and off-chain credibility as separate layers.
+- For infrastructure tokens, note that off-chain credibility may be strong based on official project/docs/use-case signals.
+- For meme/community tokens, note that off-chain credibility may be limited or community-driven and market maturity does not remove holder concentration risk.
 - If contract source is unverified or scan is incomplete, say contract safety could not be fully verified.
 - Do not invent contract functions or permissions.
 - Always distinguish retail-scoped concentration from total-supply impact when both are provided.
@@ -123,7 +140,7 @@ Hard rules:
 
 @Injectable()
 export class TokenAiSummaryService {
-  private static readonly CACHE_PREFIX = 'token:summary:v8:';
+  private static readonly CACHE_PREFIX = 'token:summary:v9:';
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly FALLBACK_CACHE_TTL_SECONDS = 1_800;
   private static readonly GEMINI_PRIMARY_MODEL = 'gemini-2.5-flash';
@@ -248,6 +265,7 @@ export class TokenAiSummaryService {
     const tokenTrust = this.tokenTrustReport.buildReport(analysis);
     const contractSafety = parseContractSafety(quality.contractSafety);
     const marketContext = parseMarketContext(quality.marketContext);
+    const offChainCredibility = parseOffChainCredibility(quality.offChainCredibility);
 
     const { riskSignals, positiveSignals } = this.partitionCalloutTitles(riskCallouts);
 
@@ -345,6 +363,13 @@ export class TokenAiSummaryService {
       marketContextMaturityTier: marketContext?.maturityTier ?? null,
       marketContextVerdict: marketContext?.verdict ?? null,
       marketContextFlags: marketContext?.riskFlags.map((flag) => flag.title) ?? [],
+      offChainCredibilityAvailable: offChainCredibility !== null,
+      offChainCredibilityScore: offChainCredibility?.score ?? null,
+      offChainCredibilityRiskLevel: offChainCredibility?.riskLevel ?? null,
+      offChainCredibilityTier: offChainCredibility?.credibilityTier ?? null,
+      offChainCredibilityVerdict: offChainCredibility?.verdict ?? null,
+      offChainCredibilityCategory: offChainCredibility?.projectProfile.category ?? null,
+      offChainCredibilityFlags: offChainCredibility?.riskFlags.map((flag) => flag.title) ?? [],
     };
   }
 
@@ -462,6 +487,13 @@ ${
     : 'Market context: not available in this analysis snapshot.'
 }
 
+OFF-CHAIN CREDIBILITY (separate from visible on-chain score)
+${
+  input.offChainCredibilityAvailable
+    ? `Off-chain credibility: score ${input.offChainCredibilityScore ?? 'n/a'}/100, risk ${input.offChainCredibilityRiskLevel}, tier ${input.offChainCredibilityTier}, category ${input.offChainCredibilityCategory}, verdict: ${input.offChainCredibilityVerdict}. Flags: ${input.offChainCredibilityFlags.join(', ') || 'none'}.`
+    : 'Off-chain credibility: not available in this analysis snapshot.'
+}
+
 Write a 4-6 sentence cautious retail risk summary now.
 `.trim();
   }
@@ -469,6 +501,7 @@ Write a 4-6 sentence cautious retail risk summary now.
   private buildFallbackSummary(input: TokenSummaryInput): string {
     const contractLine = this.buildContractSafetyFallbackLine(input);
     const marketLine = this.buildMarketContextFallbackLine(input);
+    const offChainLine = this.buildOffChainCredibilityFallbackLine(input);
 
     return (
       `${input.tokenName} (${input.tokenSymbol}) shows ${input.tokenTrustRiskLevel} visible risk with a partial ${input.scoreLabel} of ${input.tokenTrustScore}/100. ` +
@@ -476,9 +509,41 @@ Write a 4-6 sentence cautious retail risk summary now.
       `${input.concentrationContextExplanation} ` +
       `${contractLine}` +
       `${marketLine}` +
+      `${offChainLine}` +
       `${input.whoCanDumpSummary} ` +
       `Research only, not financial advice.`
     );
+  }
+
+  private buildOffChainCredibilityFallbackLine(input: TokenSummaryInput): string {
+    if (!input.offChainCredibilityAvailable) {
+      return '';
+    }
+
+    if (
+      input.offChainCredibilityTier === 'institutional_grade' ||
+      input.offChainCredibilityTier === 'strong' ||
+      input.offChainCredibilityCategory === 'infrastructure'
+    ) {
+      return (
+        'Off-chain credibility appears strong based on official project, documentation, and use-case signals, but the visible on-chain score remains partial. '
+      );
+    }
+
+    if (input.offChainCredibilityCategory === 'meme') {
+      return (
+        'Off-chain credibility may be limited or community-driven; market maturity does not remove holder concentration risk. '
+      );
+    }
+
+    if (
+      input.offChainCredibilityRiskLevel === 'high' ||
+      input.offChainCredibilityRiskLevel === 'severe'
+    ) {
+      return `Off-chain credibility flags: ${input.offChainCredibilityFlags.join(', ') || 'review recommended'}. `;
+    }
+
+    return 'Off-chain credibility is available as a separate module and is not merged into the visible on-chain score yet. ';
   }
 
   private buildMarketContextFallbackLine(input: TokenSummaryInput): string {
