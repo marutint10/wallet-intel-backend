@@ -236,10 +236,12 @@ export class TokenTrustReportService {
     const redFlags = this.buildRedFlags(ctx);
     const positiveSignals = this.buildPositiveSignals(ctx);
     const hasContractSafety = this.hasContractSafetyModule(quality);
+    const hasMarketContext = this.hasMarketContextModule(quality);
     const limitations = this.buildLimitations(
       reportMode,
       analyzedRetail,
       hasContractSafety,
+      hasMarketContext,
     );
 
     const whoCanDump: WhoCanDumpSummary = {
@@ -266,17 +268,16 @@ export class TokenTrustReportService {
         'wallet_concentration',
         'team_treasury_exposure',
       ],
-      availableModules: hasContractSafety
-        ? ['holder_structure', 'contract_safety']
-        : ['holder_structure'],
-      missingScoreInputs: hasContractSafety
-        ? ['market_maturity', 'liquidity_depth', 'off_chain_credibility']
-        : [
-            'contract_safety',
-            'market_maturity',
-            'liquidity_depth',
-            'off_chain_credibility',
-          ],
+      availableModules: [
+        'holder_structure',
+        ...(hasContractSafety ? (['contract_safety'] as const) : []),
+        ...(hasMarketContext ? (['market_maturity'] as const) : []),
+      ],
+      missingScoreInputs: [
+        ...(hasContractSafety ? [] : (['contract_safety'] as const)),
+        ...(hasMarketContext ? [] : (['market_maturity', 'liquidity_depth'] as const)),
+        'off_chain_credibility',
+      ],
       riskLevel,
       verdict,
       confidence: this.resolveConfidence(analyzedRetail),
@@ -788,18 +789,32 @@ export class TokenTrustReportService {
     return status === 'done' || status === 'partial';
   }
 
+  private hasMarketContextModule(quality: Record<string, unknown>): boolean {
+    const marketContext = asRecord(quality.marketContext);
+    const status = safeString(marketContext.status).toLowerCase();
+    return status === 'done' || status === 'partial';
+  }
+
   private buildLimitations(
     reportMode: 'fast' | 'standard',
     analyzedRetail: number,
     hasContractSafety: boolean,
+    hasMarketContext: boolean,
   ): string[] {
     const limitations = [
-      hasContractSafety
-        ? 'This is a partial visible on-chain score. Full trust scoring will require market maturity, liquidity depth, and off-chain credibility analysis.'
-        : 'This is a partial visible on-chain score. Full trust scoring will require contract safety, market maturity, liquidity depth, and off-chain credibility analysis.',
+      hasContractSafety && hasMarketContext
+        ? 'This is a partial visible on-chain score. Full trust scoring will require off-chain credibility analysis.'
+        : hasContractSafety
+          ? 'This is a partial visible on-chain score. Full trust scoring will require market maturity, liquidity depth, and off-chain credibility analysis.'
+          : hasMarketContext
+            ? 'This is a partial visible on-chain score. Full trust scoring will require contract safety and off-chain credibility analysis.'
+            : 'This is a partial visible on-chain score. Full trust scoring will require contract safety, market maturity, liquidity depth, and off-chain credibility analysis.',
       hasContractSafety
         ? 'Contract safety is shown separately and is not yet merged into the visible on-chain score.'
         : 'Contract safety analysis is not included yet.',
+      hasMarketContext
+        ? 'Market maturity and liquidity context are shown separately and are not yet merged into the visible on-chain score.'
+        : 'Market maturity and liquidity depth analysis is not included yet.',
       'Off-chain credibility analysis is not included yet.',
       'Holder classifications are based on available on-chain data and may be incomplete.',
       'Exchange custody is treated as liquidity context, not direct sell pressure.',

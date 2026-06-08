@@ -3,6 +3,7 @@ import { TokenAnalysisEntity } from '../entities/token-analysis.entity';
 import type { RiskCallout } from './holder-aggregation.service';
 import { UNSCORED_SCORE_BANDS } from './lite-scorer.service';
 import type { ContractSafetyReport } from './token-contract-safety.service';
+import type { MarketContextReport } from './token-market-context.service';
 import {
   TokenTrustReport,
   TokenTrustReportService,
@@ -164,6 +165,7 @@ export interface DashboardSummaryResponse {
   distribution: DistributionSummary;
   tokenTrust: TokenTrustReport;
   contractSafety: ContractSafetyReport | null;
+  marketContext: MarketContextReport | null;
 
   holderTable: {
     total: number;
@@ -284,6 +286,7 @@ export class DashboardSummaryService {
 
     const tokenTrust = this.tokenTrustReport.buildReport(analysis);
     const contractSafety = parseContractSafety(quality.contractSafety);
+    const marketContext = parseMarketContext(quality.marketContext);
 
     const summaryCards = buildSummaryCards({
       avgScore: avgScoreRaw,
@@ -326,6 +329,7 @@ export class DashboardSummaryService {
       distribution: distributionSummary,
       tokenTrust,
       contractSafety,
+      marketContext,
       holderTable: {
         total: holderTableRows.length,
         rows: holderTableRows,
@@ -359,6 +363,18 @@ export function formatPercent(value: unknown, digits = 1): string {
   }
 
   return `${roundTo(num, digits)}%`;
+}
+
+export function parseMarketContext(value: unknown): MarketContextReport | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const status = safeString(record.status, '');
+  if (!status || status === 'unknown') {
+    return null;
+  }
+  return record as unknown as MarketContextReport;
 }
 
 export function parseContractSafety(value: unknown): ContractSafetyReport | null {

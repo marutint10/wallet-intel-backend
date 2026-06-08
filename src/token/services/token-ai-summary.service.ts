@@ -11,12 +11,14 @@ import {
   computeSmartMoneyPct,
   mapQualityLabelForRetail,
   parseContractSafety,
+  parseMarketContext,
   type RawHolder,
   safeNumber,
   safeNumberOrNull,
   safeString,
 } from './dashboard-summary.service';
 import type { ContractSafetyRiskLevel } from './token-contract-safety.service';
+import type { MarketContextRiskLevel, MaturityTier } from './token-market-context.service';
 import { TokenTrustReportService } from './token-trust-report.service';
 
 export interface TokenSummaryInput {
@@ -81,6 +83,13 @@ export interface TokenSummaryInput {
   contractSafetyFlags: string[];
   contractSafetyLimitations: string[];
   contractSafetyOwnerRenounced: boolean | null;
+
+  marketContextAvailable: boolean;
+  marketContextScore: number | null;
+  marketContextRiskLevel: MarketContextRiskLevel | null;
+  marketContextMaturityTier: MaturityTier | null;
+  marketContextVerdict: string | null;
+  marketContextFlags: string[];
 }
 
 type GeminiOnceResult = { text: string; finishReason: string };
@@ -98,6 +107,10 @@ Hard rules:
 - Mention severe/high contract risk flags when present.
 - If ownership appears renounced and a blacklist/mint/tax function exists with onlyOwner access, explain that active admin risk may be reduced but review is still required; do not say no major permission risks while also mentioning active blacklist controls.
 - Only say no major contract permission risk was detected when contract safety flags do not include blacklist, mint, tax, pause, or trading gate signals.
+- Market maturity and liquidity are a separate module and are not merged into the visible on-chain score yet.
+- Mention holder/visible on-chain risk, contract safety, and market maturity as separate layers.
+- For mature tokens, note that market maturity may be strong while the visible on-chain score remains partial because off-chain credibility is not merged yet.
+- For meme/high-liquidity tokens, note that market access may be strong while holder concentration risk can remain elevated.
 - If contract source is unverified or scan is incomplete, say contract safety could not be fully verified.
 - Do not invent contract functions or permissions.
 - Always distinguish retail-scoped concentration from total-supply impact when both are provided.
@@ -110,7 +123,7 @@ Hard rules:
 
 @Injectable()
 export class TokenAiSummaryService {
-  private static readonly CACHE_PREFIX = 'token:summary:v7:';
+  private static readonly CACHE_PREFIX = 'token:summary:v8:';
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly FALLBACK_CACHE_TTL_SECONDS = 1_800;
   private static readonly GEMINI_PRIMARY_MODEL = 'gemini-2.5-flash';
@@ -234,6 +247,7 @@ export class TokenAiSummaryService {
     >;
     const tokenTrust = this.tokenTrustReport.buildReport(analysis);
     const contractSafety = parseContractSafety(quality.contractSafety);
+    const marketContext = parseMarketContext(quality.marketContext);
 
     const { riskSignals, positiveSignals } = this.partitionCalloutTitles(riskCallouts);
 
@@ -325,6 +339,12 @@ export class TokenAiSummaryService {
       contractSafetyFlags: contractSafety?.flags.map((flag) => flag.title) ?? [],
       contractSafetyLimitations: contractSafety?.limitations ?? [],
       contractSafetyOwnerRenounced: contractSafety?.owner?.isRenounced ?? null,
+      marketContextAvailable: marketContext !== null,
+      marketContextScore: marketContext?.score ?? null,
+      marketContextRiskLevel: marketContext?.riskLevel ?? null,
+      marketContextMaturityTier: marketContext?.maturityTier ?? null,
+      marketContextVerdict: marketContext?.verdict ?? null,
+      marketContextFlags: marketContext?.riskFlags.map((flag) => flag.title) ?? [],
     };
   }
 
@@ -435,21 +455,57 @@ CONTRACT SAFETY (separate from visible on-chain score)
 ${contractSafetyLine}
 ${input.contractSafetyLimitations.length > 0 ? `Contract safety limitations: ${input.contractSafetyLimitations.join(' | ')}` : ''}
 
+MARKET MATURITY / LIQUIDITY (separate from visible on-chain score)
+${
+  input.marketContextAvailable
+    ? `Market context: score ${input.marketContextScore ?? 'n/a'}/100, risk ${input.marketContextRiskLevel}, maturity tier ${input.marketContextMaturityTier}, verdict: ${input.marketContextVerdict}. Flags: ${input.marketContextFlags.join(', ') || 'none'}.`
+    : 'Market context: not available in this analysis snapshot.'
+}
+
 Write a 4-6 sentence cautious retail risk summary now.
 `.trim();
   }
 
   private buildFallbackSummary(input: TokenSummaryInput): string {
     const contractLine = this.buildContractSafetyFallbackLine(input);
+    const marketLine = this.buildMarketContextFallbackLine(input);
 
     return (
       `${input.tokenName} (${input.tokenSymbol}) shows ${input.tokenTrustRiskLevel} visible risk with a partial ${input.scoreLabel} of ${input.tokenTrustScore}/100. ` +
       `${input.tokenTrustVerdict}. ` +
       `${input.concentrationContextExplanation} ` +
       `${contractLine}` +
+      `${marketLine}` +
       `${input.whoCanDumpSummary} ` +
       `Research only, not financial advice.`
     );
+  }
+
+  private buildMarketContextFallbackLine(input: TokenSummaryInput): string {
+    if (!input.marketContextAvailable) {
+      return '';
+    }
+
+    if (
+      input.marketContextMaturityTier === 'bluechip' ||
+      (input.marketContextMaturityTier === 'established' &&
+        input.marketContextRiskLevel === 'low')
+    ) {
+      return (
+        'Market maturity appears strong, but the visible on-chain score remains partial because off-chain credibility is not merged yet. '
+      );
+    }
+
+    if (
+      input.marketContextRiskLevel === 'low' ||
+      input.marketContextRiskLevel === 'moderate'
+    ) {
+      return (
+        'Market access and liquidity may be supportive, but holder concentration and visible on-chain risk remain separate concerns. '
+      );
+    }
+
+    return `Market context flags: ${input.marketContextFlags.join(', ') || 'review recommended'}. `;
   }
 
   private buildContractSafetyFallbackLine(input: TokenSummaryInput): string {

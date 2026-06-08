@@ -139,4 +139,85 @@ describe('TokenAiSummaryService', () => {
     expect(fallback.toLowerCase()).toContain('blacklist function exists');
     expect(fallback.toLowerCase()).not.toContain('no major contract permission risk');
   });
+
+  it('buildInput includes marketContext when persisted', () => {
+    const config = { get: jest.fn(() => '') } as unknown as ConfigService;
+    const cache = {
+      get: jest.fn(),
+      set: jest.fn(),
+    } as unknown as Cache;
+    const trust = new TokenTrustReportService();
+    const service = new TokenAiSummaryService(config, trust, cache);
+
+    const analysis = makeAnalysis();
+    analysis.qualityMetrics = {
+      ...analysis.qualityMetrics,
+      marketContext: {
+        status: 'done',
+        score: 92,
+        riskLevel: 'low',
+        maturityTier: 'bluechip',
+        verdict: 'Market maturity appears strong based on available market and liquidity data',
+        confidence: 'high',
+        marketCapUsd: 12_000_000_000,
+        fdvUsd: null,
+        liquidityUsd: 85_000_000,
+        volume24hUsd: 420_000_000,
+        priceChange24hPct: null,
+        tokenAgeDays: 2555,
+        firstSeenAt: '2017-09-19T00:00:00.000Z',
+        exchangeContext: {
+          cexSignals: {
+            exchangeSupplyPct: 30,
+            exchangeWalletCount: 12,
+            interpretation: 'ok',
+          },
+          dexSignals: {
+            pairCount: 8,
+            topPairLiquidityUsd: 45_000_000,
+            totalDexLiquidityUsd: 85_000_000,
+            mainDex: 'uniswap',
+          },
+        },
+        liquidityRisk: { level: 'low', reason: 'Liquidity depth appears supportive for broader market access' },
+        maturitySignals: [],
+        riskFlags: [],
+        unknowns: [],
+        limitations: [],
+        checkedAt: new Date().toISOString(),
+      },
+    };
+
+    const input = (service as any).buildInput(analysis);
+    expect(input.marketContextAvailable).toBe(true);
+    expect(input.marketContextScore).toBe(92);
+    expect(input.marketContextMaturityTier).toBe('bluechip');
+
+    const fallback = (service as any).buildFallbackSummary(input);
+    expect(fallback.toLowerCase()).toContain('market maturity appears strong');
+    expect(fallback.toLowerCase()).toContain('partial');
+    expect(fallback.toLowerCase()).not.toContain('final trust score');
+  });
+
+  it('PEPE-like fallback mentions holder concentration separately from market access', () => {
+    const config = { get: jest.fn(() => '') } as unknown as ConfigService;
+    const cache = {
+      get: jest.fn(),
+      set: jest.fn(),
+    } as unknown as Cache;
+    const trust = new TokenTrustReportService();
+    const service = new TokenAiSummaryService(config, trust, cache);
+
+    const input = (service as any).buildInput(makeAnalysis());
+    input.marketContextAvailable = true;
+    input.marketContextScore = 78;
+    input.marketContextRiskLevel = 'moderate';
+    input.marketContextMaturityTier = 'established';
+    input.marketContextVerdict = 'Market access and liquidity appear supportive, but holder risk remains separate';
+    input.marketContextFlags = [];
+
+    const fallback = (service as any).buildFallbackSummary(input);
+    expect(fallback.toLowerCase()).toContain('market access');
+    expect(fallback.toLowerCase()).toContain('holder concentration');
+  });
 });
