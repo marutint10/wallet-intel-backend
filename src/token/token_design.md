@@ -1433,26 +1433,43 @@ It does **not** add off-chain crawling, contract-audit logic, or chat behavior.
   - data confidence
 - `limitations[]`
 
-### Trust score formula (deterministic)
+### Trust score formula (deterministic, recalibrated)
 
-Start from `100`, subtract penalties, clamp to `0..100`.
+**Baseline:** start at `70` (not 100). Contract safety and off-chain credibility are not yet in scope, so scores are capped at **82** until those layers ship.
 
-Penalty buckets:
+**Derived concentration metrics:**
 
-1. retail concentration (`distribution.supplyConcentration.top10Pct`)
-2. decentralization (`distribution.decentralizationScore`)
-3. largest retail wallet exit risk (from `holders_data`, retail EOAs only)
-4. team/insider concentration (`supplyBreakdown.team`, category concentration, team detection)
-5. weak holder strength (low-weight use of `qualityMetrics.avgScore`)
-6. data confidence penalty (`classifiableRetailCount` / EOA sample size)
+- `top10RetailPctOfRetail` = `distribution.supplyConcentration.top10Pct` (retail-scoped)
+- `top10RetailPctOfTotal` = `retailSupplyPct * top10RetailPctOfRetail / 100`
+- Same pattern for top50/top100 when available
+- `largestRetailWalletPctOfTotal` from retail EOA holder balances / supply
 
-Risk mapping:
+Severity is driven primarily by **total-supply impact**, not retail-scoped % alone.
+
+**Adjustments (added to baseline 70):**
+
+1. Holder concentration — primarily `top10RetailPctOfTotal`; secondary modifier from `top10RetailPctOfRetail`
+2. Largest retail wallet — `largestRetailWalletPctOfTotal`
+3. Team/treasury — team % with treasury/vesting cap (`-8` max) unless deployer/owner/team_connected EOAs or high team risk
+4. Holder strength — `qualityMetrics.avgScore` (can add points for strong bases)
+5. Decentralization — `distribution.decentralizationScore`
+6. Exchange custody — neutral/slightly positive for 20–60%; penalty only if >70% or <2%
+7. Data confidence — `classifiableRetailCount`
+
+**Risk mapping:**
 
 - 80-100: low
-- 60-79: moderate
-- 40-59: high
-- 0-39: severe
-- insufficient sample/coverage: unknown
+- 65-79: moderate
+- 45-64: high
+- 0-44: severe
+- insufficient sample: unknown
+
+**Hard severe triggers** (override score band):
+
+- largest retail wallet ≥ 10% of total supply
+- `top10RetailPctOfTotal` ≥ 35%
+- deployer/owner/team_connected EOA exposure ≥ 20%
+- very weak data + high concentration
 
 The verdict deliberately avoids "Healthy" language by default.
 
