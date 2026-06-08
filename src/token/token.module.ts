@@ -24,6 +24,7 @@ import { TokenChartService } from './services/token-chart.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
 import { TokenDeepAnalysisService } from './services/token-deep-analysis.service';
 import { TokenIntelligenceService } from './services/token-intelligence.service';
+import { TokenTrustReportService } from './services/token-trust-report.service';
 import { WalletFilterService } from './services/wallet-filter.service';
 import { ExportPdfController } from './export-pdf.controller';
 import { TokenController } from './token.controller';
@@ -56,6 +57,7 @@ import { TokenTargetValidatorService } from './services/token-target-validator.s
     HolderAggregationService,
     TokenAnalysisService,
     TokenIntelligenceService,
+    TokenTrustReportService,
     DashboardSummaryService,
     TokenAiSummaryService,
     TokenChartService,
