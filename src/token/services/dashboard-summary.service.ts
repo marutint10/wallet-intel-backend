@@ -558,7 +558,8 @@ export function buildSummaryCards(inputs: SummaryCardInputs): SummaryCard[] {
     {
       title: 'Holder Strength Score',
       value: avgScore !== null ? `${Math.round(avgScore)}/100` : 'N/A',
-      subtitle: `Risk ${tokenTrust.riskLevel}; not a safety guarantee`,
+      subtitle:
+        'Portfolio strength of analyzed retail wallets; not a safety guarantee',
       sentiment: avgScoreSentiment,
     },
     {

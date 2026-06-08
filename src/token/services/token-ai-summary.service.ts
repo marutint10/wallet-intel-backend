@@ -61,6 +61,8 @@ export interface TokenSummaryInput {
   tokenTrustPositiveSignals: string[];
   whoCanDumpSummary: string;
   trustLimitations: string[];
+  concentrationContextExplanation: string;
+  top10RetailPctOfTotal: number;
 
   riskSignals: string[];
   positiveSignals: string[];
@@ -76,13 +78,15 @@ Hard rules:
 - Use only the provided structured metrics.
 - Do not invent facts or percentages.
 - Do not say buy, sell, scam, rug, guaranteed safe, or healthy.
+- Always distinguish retail-scoped concentration from total-supply impact when both are provided.
+- Do not overstate risk when total-supply impact is low even if retail-scoped concentration is higher.
 - Mention both risks and positives when present.
 - Mention uncertainty when sample coverage is limited.
 - Keep output to 4-6 sentences in plain text.`;
 
 @Injectable()
 export class TokenAiSummaryService {
-  private static readonly CACHE_PREFIX = 'token:summary:v3:';
+  private static readonly CACHE_PREFIX = 'token:summary:v4:';
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly FALLBACK_CACHE_TTL_SECONDS = 1_800;
   private static readonly GEMINI_PRIMARY_MODEL = 'gemini-2.5-flash';
@@ -279,6 +283,8 @@ export class TokenAiSummaryService {
       ),
       whoCanDumpSummary: tokenTrust.whoCanDump.summary,
       trustLimitations: tokenTrust.limitations,
+      concentrationContextExplanation: tokenTrust.concentrationContext.explanation,
+      top10RetailPctOfTotal: safeNumber(tokenTrust.concentrationContext.top10RetailPctOfTotal),
       riskSignals,
       positiveSignals,
     };
@@ -355,6 +361,8 @@ TOKEN TRUST REPORT
 - Risk Level: ${input.tokenTrustRiskLevel}
 - Verdict: ${input.tokenTrustVerdict}
 - Summary: ${input.tokenTrustSummary}
+- Concentration context: ${input.concentrationContextExplanation}
+- Top 10 retail impact on total supply: ${input.top10RetailPctOfTotal}%
 - Who Can Dump: ${input.whoCanDumpSummary}
 - Limitations: ${input.trustLimitations.join(' | ')}
 
@@ -385,7 +393,7 @@ Write a 4-6 sentence cautious retail risk summary now.
     return (
       `${input.tokenName} (${input.tokenSymbol}) shows ${input.tokenTrustRiskLevel} visible risk with a token trust score of ${input.tokenTrustScore}/100. ` +
       `${input.tokenTrustVerdict}. ` +
-      `Top 10 retail wallets hold ${input.top10PctOfRetail}% of retail-held supply (~${input.top10PctOfTotal}% of total supply). ` +
+      `${input.concentrationContextExplanation} ` +
       `${input.whoCanDumpSummary} ` +
       `Research only, not financial advice.`
     );

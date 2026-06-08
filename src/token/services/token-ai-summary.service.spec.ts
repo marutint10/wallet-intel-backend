@@ -59,5 +59,7 @@ describe('TokenAiSummaryService', () => {
     expect(typeof input.tokenTrustVerdict).toBe('string');
     expect(Array.isArray(input.tokenTrustRedFlags)).toBe(true);
     expect(typeof input.whoCanDumpSummary).toBe('string');
+    expect(typeof input.concentrationContextExplanation).toBe('string');
+    expect(input.concentrationContextExplanation.length).toBeGreaterThan(0);
   });
 });
