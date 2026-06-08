@@ -25,6 +25,90 @@ function makeAnalysis(
   };
 }
 
+function pepeLikeAnalysis(): TokenAnalysisEntity {
+  return makeAnalysis({
+    tokenName: 'Pepe',
+    tokenSymbol: 'PEPE',
+    qualityMetrics: {
+      avgScore: 35,
+      classifiableRetailCount: 78,
+      totalAnalyzedEOAs: 78,
+      totalSupply: '100000000',
+      pnlAggregation: { holdersWithPnlData: 0 },
+      teamDetection: { teamTotalPctOfSupply: 1.2, riskLevel: 'low' },
+    },
+    distribution: {
+      decentralizationScore: 41,
+      supplyConcentration: { top10Pct: 66, top50Pct: 91, top100Pct: 100 },
+      supplyBreakdown: {
+        retail: { pctOfSupply: 28.5 },
+        exchange: { pctOfSupply: 45 },
+        team: { pctOfSupply: 1.2 },
+        contract: { pctOfSupply: 1.8 },
+        lp: { pctOfSupply: 0 },
+      },
+    },
+    holdersData: [
+      {
+        walletAddress: '0xwhale0000000000000000000000000000000001',
+        walletLabel: 'eoa',
+        isTeamLinked: false,
+        balance: '6700000',
+        usdValue: 2_500_000,
+      },
+      ...Array.from({ length: 9 }).map((_, index) => ({
+        walletAddress: `0x${String(index + 2).padStart(40, '2')}`,
+        walletLabel: 'eoa',
+        isTeamLinked: false,
+        balance: '500000',
+        usdValue: 50_000,
+      })),
+    ],
+  });
+}
+
+function linkLikeAnalysis(): TokenAnalysisEntity {
+  return makeAnalysis({
+    tokenName: 'Chainlink',
+    tokenSymbol: 'LINK',
+    qualityMetrics: {
+      avgScore: 65,
+      classifiableRetailCount: 70,
+      totalAnalyzedEOAs: 70,
+      totalSupply: '100000000',
+      pnlAggregation: { holdersWithPnlData: 0 },
+      teamDetection: { teamTotalPctOfSupply: 18.7, riskLevel: 'medium' },
+    },
+    distribution: {
+      decentralizationScore: 76,
+      supplyConcentration: { top10Pct: 36, top50Pct: 72, top100Pct: 100 },
+      supplyBreakdown: {
+        retail: { pctOfSupply: 16.75 },
+        exchange: { pctOfSupply: 30 },
+        team: { pctOfSupply: 18.7 },
+        contract: { pctOfSupply: 4 },
+        lp: { pctOfSupply: 2 },
+      },
+    },
+    holdersData: [
+      {
+        walletAddress: '0xretail00000000000000000000000000000001',
+        walletLabel: 'eoa',
+        isTeamLinked: false,
+        balance: '500000',
+        usdValue: 1_200_000,
+      },
+      {
+        walletAddress: '0xtreasury00000000000000000000000000001',
+        walletLabel: 'treasury',
+        isTeamLinked: false,
+        balance: '18700000',
+        usdValue: 50_000_000,
+      },
+    ],
+  });
+}
+
 describe('TokenTrustReportService', () => {
   let service: TokenTrustReportService;
 
@@ -32,39 +116,17 @@ describe('TokenTrustReportService', () => {
     service = new TokenTrustReportService();
   });
 
-  it('flags PEPE-like concentration as high/severe and never healthy', () => {
-    const analysis = makeAnalysis({
-      qualityMetrics: {
-        avgScore: 35,
-        classifiableRetailCount: 78,
-        totalAnalyzedEOAs: 78,
-        pnlAggregation: { holdersWithPnlData: 0 },
-        teamDetection: { teamTotalPctOfSupply: 1.2, riskLevel: 'low' },
-      },
-      distribution: {
-        decentralizationScore: 41,
-        supplyConcentration: { top10Pct: 67, top50Pct: 91, top100Pct: 100 },
-        supplyBreakdown: {
-          retail: { pctOfSupply: 52 },
-          exchange: { pctOfSupply: 45 },
-          team: { pctOfSupply: 1.2 },
-          contract: { pctOfSupply: 1.8 },
-          lp: { pctOfSupply: 0 },
-        },
-      },
-      holdersData: Array.from({ length: 20 }).map((_, index) => ({
-        walletAddress: `0x${String(index).padStart(40, '1')}`,
-        walletLabel: 'eoa',
-        isTeamLinked: false,
-        balance: index === 0 ? '12000000' : '500000',
-        usdValue: index === 0 ? 2_500_000 : 50_000,
-      })),
-    });
+  it('PEPE-like: high risk, not severe from retail-scope alone', () => {
+    const report = service.buildReport(pepeLikeAnalysis());
 
-    const report = service.buildReport(analysis);
-    expect(['high', 'severe']).toContain(report.riskLevel);
-    expect(report.verdict.toLowerCase()).toContain('risk');
-    expect(report.verdict.toLowerCase()).not.toContain('healthy');
+    expect(report.concentrationContext.top10RetailPctOfRetail).toBe(66);
+    expect(report.concentrationContext.retailSupplyPct).toBe(28.5);
+    expect(report.concentrationContext.top10RetailPctOfTotal).toBeCloseTo(18.8, 1);
+    expect(report.riskLevel).toBe('high');
+    expect(report.riskLevel).not.toBe('severe');
+    expect(report.trustScore).toBeGreaterThanOrEqual(45);
+    expect(report.trustScore).toBeLessThanOrEqual(60);
+    expect(report.verdict.toLowerCase()).toMatch(/meme|concentration|exit/);
     expect(
       report.redFlags.some((flag) => flag.title === 'High Retail Concentration'),
     ).toBe(true);
@@ -76,90 +138,144 @@ describe('TokenTrustReportService', () => {
     expect(
       report.positiveSignals.some((signal) => signal.title === 'Broad Exchange Access'),
     ).toBe(true);
+    expect(report.verdict.toLowerCase()).not.toContain('healthy');
   });
 
-  it('returns moderate risk for LINK-like profile', () => {
-    const analysis = makeAnalysis({
-      qualityMetrics: {
-        avgScore: 66,
-        classifiableRetailCount: 70,
-        totalAnalyzedEOAs: 70,
-        totalSupply: '100000000',
-        pnlAggregation: { holdersWithPnlData: 0 },
-        teamDetection: { teamTotalPctOfSupply: 6, riskLevel: 'medium' },
-      },
-      distribution: {
-        decentralizationScore: 76,
-        supplyConcentration: { top10Pct: 36, top50Pct: 72, top100Pct: 100 },
-        supplyBreakdown: {
-          retail: { pctOfSupply: 58 },
-          exchange: { pctOfSupply: 30 },
-          team: { pctOfSupply: 6 },
-          contract: { pctOfSupply: 4 },
-          lp: { pctOfSupply: 2 },
-        },
-      },
-      holdersData: [
-        {
-          walletAddress: '0x1234000000000000000000000000000000000000',
-          walletLabel: 'eoa',
-          isTeamLinked: false,
-          balance: '1000000',
-          usdValue: 1_200_000,
-        },
-      ],
-    });
+  it('LINK-like: moderate risk with treasury review, score 68-78', () => {
+    const report = service.buildReport(linkLikeAnalysis());
 
-    const report = service.buildReport(analysis);
+    expect(report.concentrationContext.top10RetailPctOfRetail).toBe(36);
+    expect(report.concentrationContext.retailSupplyPct).toBe(16.75);
+    expect(report.concentrationContext.top10RetailPctOfTotal).toBeCloseTo(6, 1);
     expect(report.riskLevel).toBe('moderate');
-    expect(report.verdict.toLowerCase()).toContain('moderate');
-    expect(report.whoCanDump.summary.length).toBeGreaterThan(0);
+    expect(report.trustScore).toBeGreaterThanOrEqual(68);
+    expect(report.trustScore).toBeLessThanOrEqual(78);
+    expect(report.verdict.toLowerCase()).toMatch(/established|treasury|review|moderate/);
+    expect(
+      report.positiveSignals.some((signal) => signal.title === 'Strong Holder Strength'),
+    ).toBe(true);
+    expect(
+      report.positiveSignals.some(
+        (signal) => signal.title === 'Strong Retail Decentralization',
+      ),
+    ).toBe(true);
+
+    const concentrationFlag = report.redFlags.find(
+      (flag) => flag.title === 'High Retail Concentration',
+    );
+    if (concentrationFlag) {
+      expect(['low', 'medium']).toContain(concentrationFlag.severity);
+    }
+
+    const teamFlag = report.redFlags.find((flag) =>
+      flag.title.includes('Treasury'),
+    );
+    expect(teamFlag).toBeDefined();
+    expect(teamFlag?.severity).toBe('medium');
   });
 
-  it('raises risk when team-linked allocation is severe', () => {
-    const analysis = makeAnalysis({
-      qualityMetrics: {
-        avgScore: 55,
-        classifiableRetailCount: 60,
-        totalAnalyzedEOAs: 60,
-        pnlAggregation: { holdersWithPnlData: 0 },
-        teamDetection: { teamTotalPctOfSupply: 23, riskLevel: 'high' },
-      },
-      distribution: {
-        decentralizationScore: 62,
-        supplyConcentration: { top10Pct: 42 },
-        supplyBreakdown: { team: { pctOfSupply: 23 }, retail: { pctOfSupply: 50 } },
-      },
-    });
+  it('does not mark severe for 66% retail-scope with 18.8% total impact', () => {
+    const report = service.buildReport(pepeLikeAnalysis());
+    expect(report.concentrationContext.top10RetailPctOfTotal).toBeCloseTo(18.8, 1);
+    expect(report.riskLevel).not.toBe('severe');
+  });
 
-    const report = service.buildReport(analysis);
-    expect(['high', 'severe']).toContain(report.riskLevel);
+  it('marks low total-supply impact for 36% retail-scope with 6% total impact', () => {
+    const report = service.buildReport(linkLikeAnalysis());
+    expect(report.concentrationContext.top10RetailPctOfTotal).toBeCloseTo(6, 1);
+    expect(report.riskLevel).toBe('moderate');
+  });
+
+  it('severe team only when deployer/owner EOA exposure is very high', () => {
+    const treasuryOnly = service.buildReport(
+      makeAnalysis({
+        qualityMetrics: {
+          avgScore: 55,
+          classifiableRetailCount: 60,
+          totalAnalyzedEOAs: 60,
+          totalSupply: '100000000',
+          teamDetection: { teamTotalPctOfSupply: 23, riskLevel: 'medium' },
+        },
+        distribution: {
+          decentralizationScore: 62,
+          supplyConcentration: { top10Pct: 30 },
+          supplyBreakdown: {
+            team: { pctOfSupply: 23 },
+            retail: { pctOfSupply: 50 },
+          },
+        },
+        holdersData: [
+          {
+            walletAddress: '0xtreasury00000000000000000000000000001',
+            walletLabel: 'treasury',
+            balance: '23000000',
+          },
+        ],
+      }),
+    );
+
+    expect(['moderate', 'high']).toContain(treasuryOnly.riskLevel);
+    expect(treasuryOnly.riskLevel).not.toBe('severe');
+
+    const suspiciousEoa = service.buildReport(
+      makeAnalysis({
+        qualityMetrics: {
+          avgScore: 50,
+          classifiableRetailCount: 60,
+          totalAnalyzedEOAs: 60,
+          totalSupply: '100000000',
+          teamDetection: { teamTotalPctOfSupply: 25, riskLevel: 'high' },
+        },
+        distribution: {
+          decentralizationScore: 50,
+          supplyConcentration: { top10Pct: 40 },
+          supplyBreakdown: {
+            team: { pctOfSupply: 25 },
+            retail: { pctOfSupply: 45 },
+          },
+        },
+        holdersData: [
+          {
+            walletAddress: '0xdeployer00000000000000000000000000001',
+            walletLabel: 'deployer',
+            balance: '22000000',
+          },
+        ],
+      }),
+    );
+
+    expect(['high', 'severe']).toContain(suspiciousEoa.riskLevel);
     expect(
-      report.redFlags.some((flag) => flag.title === 'Team-Linked Supply Detected'),
+      suspiciousEoa.redFlags.some((flag) =>
+        flag.title.includes('Suspicious Team'),
+      ),
     ).toBe(true);
   });
 
   it('returns low confidence for small retail sample', () => {
-    const analysis = makeAnalysis({
-      qualityMetrics: {
-        avgScore: 52,
-        classifiableRetailCount: 12,
-        totalAnalyzedEOAs: 12,
-        pnlAggregation: { holdersWithPnlData: 0 },
-      },
-      distribution: {
-        decentralizationScore: 80,
-        supplyConcentration: { top10Pct: 25 },
-      },
-    });
+    const report = service.buildReport(
+      makeAnalysis({
+        qualityMetrics: {
+          avgScore: 52,
+          classifiableRetailCount: 12,
+          totalAnalyzedEOAs: 12,
+          pnlAggregation: { holdersWithPnlData: 0 },
+        },
+        distribution: {
+          decentralizationScore: 80,
+          supplyConcentration: { top10Pct: 25 },
+          supplyBreakdown: { retail: { pctOfSupply: 40 } },
+        },
+      }),
+    );
 
-    const report = service.buildReport(analysis);
     expect(report.confidence).toBe('low');
     expect(
       report.limitations.some((limitation) =>
         limitation.toLowerCase().includes('contract safety'),
       ),
     ).toBe(true);
+    expect(report.trustScore).toBeLessThanOrEqual(82);
   });
 });
 

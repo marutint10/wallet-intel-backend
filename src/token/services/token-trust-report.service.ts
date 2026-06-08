@@ -4,6 +4,10 @@ import { TokenAnalysisEntity } from '../entities/token-analysis.entity';
 export type TrustRiskLevel = 'low' | 'moderate' | 'high' | 'severe' | 'unknown';
 export type TrustConfidence = 'low' | 'medium' | 'high';
 
+/** Max score until contract safety + off-chain credibility are implemented. */
+const MAX_TRUST_SCORE_WITHOUT_FULL_AUDIT = 82;
+const SCORE_BASELINE = 70;
+
 export interface TokenTrustFlag {
   severity: 'low' | 'medium' | 'high' | 'severe';
   title: string;
@@ -16,6 +20,16 @@ export interface TokenTrustPositiveSignal {
   title: string;
   description: string;
   evidence?: string;
+}
+
+export interface ConcentrationContext {
+  retailSupplyPct: number | null;
+  top10RetailPctOfRetail: number | null;
+  top10RetailPctOfTotal: number | null;
+  top50RetailPctOfTotal: number | null;
+  top100RetailPctOfTotal: number | null;
+  largestRetailWalletPctOfTotal: number | null;
+  explanation: string;
 }
 
 export interface WhoCanDumpSummary {
@@ -46,6 +60,7 @@ export interface TokenTrustReport {
   summary: string;
   redFlags: TokenTrustFlag[];
   positiveSignals: TokenTrustPositiveSignal[];
+  concentrationContext: ConcentrationContext;
   whoCanDump: WhoCanDumpSummary;
   trustBreakdown: {
     holderConcentration: TokenTrustBreakdownItem;
@@ -64,6 +79,32 @@ interface RawHolder {
   usdValue?: unknown;
   walletLabel?: unknown;
   isTeamLinked?: unknown;
+  knownLabel?: unknown;
+}
+
+interface TeamExposureAnalysis {
+  teamLinkedPct: number | null;
+  treasuryVestingPct: number;
+  suspiciousEoaPct: number;
+  mostlyTreasuryVesting: boolean;
+}
+
+interface ScoringContext {
+  hasEnoughData: boolean;
+  analyzedRetail: number;
+  avgHolderStrength: number;
+  decentralizationScore: number;
+  exchangePct: number | null;
+  retailSupplyPct: number | null;
+  top10RetailPctOfRetail: number | null;
+  top10RetailPctOfTotal: number | null;
+  top50RetailPctOfTotal: number | null;
+  top100RetailPctOfTotal: number | null;
+  largestRetailWalletPctOfTotal: number | null;
+  largestRetailWalletUsd: number | null;
+  team: TeamExposureAnalysis;
+  teamRiskLevel: string;
+  reportMode: 'fast' | 'standard';
 }
 
 @Injectable()
@@ -81,13 +122,13 @@ export class TokenTrustReportService {
     const teamDetection = asRecord(quality.teamDetection);
     const categoryConcentration = asRecord(quality.categoryConcentration);
 
-    const top10RetailPct = safeNumberOrNull(supplyConcentration.top10Pct);
     const decentralizationScore = safeNumber(distribution.decentralizationScore);
     const avgHolderStrength = safeNumber(quality.avgScore);
     const classifiableRetailCount = safeNumber(quality.classifiableRetailCount);
     const totalAnalyzedEOAs = safeNumber(quality.totalAnalyzedEOAs);
     const reportMode: 'fast' | 'standard' =
       safeNumber(pnlAggregation.holdersWithPnlData) > 0 ? 'standard' : 'fast';
+    const teamRiskLevel = safeString(teamDetection.riskLevel).toLowerCase();
 
     const supply = this.resolveSupply(quality);
     const retailHolders = holders.filter(
@@ -97,188 +138,641 @@ export class TokenTrustReportService {
       .map((holder) => ({
         address: safeStringOrNull(holder.walletAddress),
         usdValue: safeNumberOrNull(holder.usdValue),
-        percentSupply:
-          supply !== null && supply > 0
-            ? (safeNumber(holder.balance) / supply) * 100
-            : null,
+        percentSupply: holderPercentOfSupply(holder, supply),
       }))
       .filter((holder) => holder.percentSupply !== null)
       .sort((left, right) => (right.percentSupply ?? 0) - (left.percentSupply ?? 0));
 
     const largestRetail = retailWithPct[0] ?? null;
-    const largestRetailWalletPct = largestRetail?.percentSupply ?? null;
+    const largestRetailWalletPctOfTotal = largestRetail?.percentSupply ?? null;
     const largestRetailWalletUsd = largestRetail?.usdValue ?? null;
     const largestRetailWalletAddress = largestRetail?.address ?? null;
     const retailWhaleCount = retailWithPct.filter(
       (holder) => (holder.percentSupply ?? 0) >= 1,
     ).length;
 
-    const top10RetailResolved =
-      top10RetailPct !== null
-        ? top10RetailPct
-        : retailWithPct.slice(0, 10).reduce((sum, holder) => sum + (holder.percentSupply ?? 0), 0);
+    const retailSupplyPct = safeNumberOrNull(asRecord(supplyBreakdown.retail).pctOfSupply);
+    const top10RetailPctOfRetail =
+      safeNumberOrNull(supplyConcentration.top10Pct) ??
+      (retailWithPct.length > 0
+        ? retailWithPct
+            .slice(0, 10)
+            .reduce((sum, holder) => sum + (holder.percentSupply ?? 0), 0)
+        : null);
 
-    const teamLinkedPct = this.resolveTeamPct(supplyBreakdown, categoryConcentration, teamDetection);
+    const top50RetailPctOfRetail = safeNumberOrNull(supplyConcentration.top50Pct);
+    const top100RetailPctOfRetail = safeNumberOrNull(supplyConcentration.top100Pct);
+
+    const top10RetailPctOfTotal = retailPctOfTotal(retailSupplyPct, top10RetailPctOfRetail);
+    const top50RetailPctOfTotal = retailPctOfTotal(retailSupplyPct, top50RetailPctOfRetail);
+    const top100RetailPctOfTotal = retailPctOfTotal(retailSupplyPct, top100RetailPctOfRetail);
+
+    const team = this.analyzeTeamExposure(
+      holders,
+      supply,
+      this.resolveTeamPct(supplyBreakdown, categoryConcentration, teamDetection),
+    );
     const exchangePct = safeNumberOrNull(asRecord(supplyBreakdown.exchange).pctOfSupply);
     const contractPct = safeNumberOrNull(asRecord(supplyBreakdown.contract).pctOfSupply);
     const lpPct = safeNumberOrNull(asRecord(supplyBreakdown.lp).pctOfSupply);
 
+    const analyzedRetail = Math.max(
+      classifiableRetailCount,
+      totalAnalyzedEOAs,
+      retailWithPct.length,
+    );
+
     const hasEnoughData =
-      (classifiableRetailCount > 0 || totalAnalyzedEOAs > 0 || retailWithPct.length > 0) &&
-      top10RetailResolved !== null &&
-      Number.isFinite(top10RetailResolved);
+      analyzedRetail > 0 &&
+      top10RetailPctOfRetail !== null &&
+      Number.isFinite(top10RetailPctOfRetail);
 
-    const concentrationPenalty = !hasEnoughData
-      ? 12
-      : top10RetailResolved >= 70
-        ? 30
-        : top10RetailResolved >= 50
-          ? 22
-          : top10RetailResolved >= 35
-            ? 14
-            : top10RetailResolved >= 20
-              ? 7
-              : 2;
+    const concentrationContext = this.buildConcentrationContext({
+      retailSupplyPct,
+      top10RetailPctOfRetail,
+      top10RetailPctOfTotal,
+      top50RetailPctOfTotal,
+      top100RetailPctOfTotal,
+      largestRetailWalletPctOfTotal,
+    });
 
-    const decentralizationPenalty =
-      decentralizationScore < 25
-        ? 20
-        : decentralizationScore < 45
-          ? 14
-          : decentralizationScore < 65
-            ? 8
-            : 2;
-
-    const whalePenalty =
-      largestRetailWalletPct === null
-        ? 12
-        : largestRetailWalletPct >= 10
-          ? 25
-          : largestRetailWalletPct >= 5
-            ? 18
-            : largestRetailWalletPct >= 2
-              ? 10
-              : largestRetailWalletPct >= 1
-                ? 5
-                : 1;
-
-    const teamPenaltyBase =
-      teamLinkedPct === null
-        ? 10
-        : teamLinkedPct >= 20
-          ? 30
-          : teamLinkedPct >= 10
-            ? 22
-            : teamLinkedPct >= 5
-              ? 12
-              : teamLinkedPct >= 2
-                ? 6
-                : 1;
-    const teamRiskLevel = safeString(teamDetection.riskLevel).toLowerCase();
-    const teamPenaltyExtra =
-      teamRiskLevel === 'critical' ? 10 : teamRiskLevel === 'high' ? 8 : teamRiskLevel === 'medium' ? 5 : 0;
-    const teamPenalty = teamPenaltyBase + teamPenaltyExtra;
-
-    const holderStrengthPenalty =
-      avgHolderStrength < 30 ? 10 : avgHolderStrength < 45 ? 7 : avgHolderStrength < 60 ? 4 : 1;
-
-    const analyzedRetail = Math.max(classifiableRetailCount, totalAnalyzedEOAs, retailWithPct.length);
-    const dataPenalty = analyzedRetail < 20 ? 12 : analyzedRetail < 50 ? 6 : 1;
-
-    const trustScore = clamp(
-      100 -
-        concentrationPenalty -
-        decentralizationPenalty -
-        whalePenalty -
-        teamPenalty -
-        holderStrengthPenalty -
-        dataPenalty,
-      0,
-      100,
-    );
-
-    const riskLevel: TrustRiskLevel = !hasEnoughData
-      ? 'unknown'
-      : trustScore >= 80
-        ? 'low'
-        : trustScore >= 60
-          ? 'moderate'
-          : trustScore >= 40
-            ? 'high'
-            : 'severe';
-
-    const confidence: TrustConfidence =
-      analyzedRetail < 20 ? 'low' : analyzedRetail < 50 ? 'medium' : 'high';
-
-    const verdict = this.resolveVerdict(riskLevel, top10RetailResolved, teamLinkedPct);
-    const whoCanDumpRiskLevel = this.resolveWhoCanDumpRiskLevel(
-      top10RetailResolved,
-      largestRetailWalletPct,
-      teamLinkedPct,
+    const ctx: ScoringContext = {
       hasEnoughData,
-    );
-
-    const redFlags = this.buildRedFlags({
-      top10RetailPct: top10RetailResolved,
-      largestRetailWalletPct,
-      largestRetailWalletUsd,
-      teamLinkedPct,
       analyzedRetail,
       avgHolderStrength,
-    });
-    const positiveSignals = this.buildPositiveSignals({
-      teamLinkedPct,
+      decentralizationScore,
       exchangePct,
-      top10RetailPct: top10RetailResolved,
-      avgHolderStrength,
-    });
+      retailSupplyPct,
+      top10RetailPctOfRetail,
+      top10RetailPctOfTotal,
+      top50RetailPctOfTotal,
+      top100RetailPctOfTotal,
+      largestRetailWalletPctOfTotal,
+      largestRetailWalletUsd,
+      team,
+      teamRiskLevel,
+      reportMode,
+    };
+
+    const adjustments = this.computeAdjustments(ctx);
+    const trustScore = clamp(
+      Math.round(SCORE_BASELINE + adjustments.total),
+      0,
+      MAX_TRUST_SCORE_WITHOUT_FULL_AUDIT,
+    );
+
+    const hardSevere = this.hasHardSevereTrigger(ctx);
+    const riskLevel = this.resolveRiskLevel(trustScore, hardSevere, hasEnoughData);
+
+    const verdict = this.resolveVerdict(ctx, riskLevel, hardSevere);
+    const whoCanDumpRiskLevel = this.resolveWhoCanDumpRiskLevel(ctx);
+
+    const redFlags = this.buildRedFlags(ctx);
+    const positiveSignals = this.buildPositiveSignals(ctx);
     const limitations = this.buildLimitations(reportMode, analyzedRetail);
 
     const whoCanDump: WhoCanDumpSummary = {
-      largestRetailWalletPct: nullableRound(largestRetailWalletPct, 2),
+      largestRetailWalletPct: nullableRound(largestRetailWalletPctOfTotal, 2),
       largestRetailWalletUsd: nullableRound(largestRetailWalletUsd, 2),
       largestRetailWalletAddress,
-      top10RetailPct: nullableRound(top10RetailResolved, 2),
+      top10RetailPct: nullableRound(top10RetailPctOfTotal, 2),
       retailWhaleCount,
-      teamLinkedPct: nullableRound(teamLinkedPct, 2),
+      teamLinkedPct: nullableRound(team.teamLinkedPct, 2),
       exchangePct: nullableRound(exchangePct, 2),
       contractPct: nullableRound(contractPct, 2),
       lpPct: nullableRound(lpPct, 2),
       riskLevel: whoCanDumpRiskLevel,
-      summary: this.buildWhoCanDumpSummary(
-        whoCanDumpRiskLevel,
-        top10RetailResolved,
-        largestRetailWalletPct,
-        teamLinkedPct,
-        exchangePct,
-      ),
+      summary: this.buildWhoCanDumpSummary(ctx, whoCanDumpRiskLevel),
     };
 
     return {
       trustScore,
       riskLevel,
       verdict,
-      confidence,
+      confidence: this.resolveConfidence(analyzedRetail),
       reportMode,
-      summary: `${verdict}. Concentration, team exposure, and wallet exit pressure are weighted more heavily than holder profile quality.`,
+      summary: `${verdict}. ${concentrationContext.explanation}`,
       redFlags,
       positiveSignals,
+      concentrationContext,
       whoCanDump,
       trustBreakdown: {
-        holderConcentration: scoreItem(30 - concentrationPenalty, this.riskLabelFromPenalty(concentrationPenalty)),
-        whaleExitRisk: scoreItem(25 - whalePenalty, this.riskLabelFromPenalty(whalePenalty)),
-        teamOrInsiderRisk: scoreItem(30 - teamPenalty, this.riskLabelFromPenalty(teamPenalty)),
+        holderConcentration: scoreItem(
+          70 + adjustments.concentrationTotal,
+          adjustmentRiskLabel(adjustments.concentrationTotal),
+        ),
+        whaleExitRisk: scoreItem(
+          70 + adjustments.whale,
+          adjustmentRiskLabel(adjustments.whale),
+        ),
+        teamOrInsiderRisk: scoreItem(
+          70 + adjustments.teamTotal,
+          adjustmentRiskLabel(adjustments.teamTotal),
+        ),
         exchangeLiquidityContext: scoreItem(
-          exchangePct !== null ? 70 : 50,
+          70 + adjustments.exchange,
           exchangePct !== null
             ? 'Exchange custody is liquidity context, not direct sell pressure.'
             : 'Exchange custody data is limited.',
         ),
-        holderStrength: scoreItem(20 - holderStrengthPenalty, this.riskLabelFromPenalty(holderStrengthPenalty)),
-        dataConfidence: scoreItem(20 - dataPenalty, this.riskLabelFromPenalty(dataPenalty)),
+        holderStrength: scoreItem(
+          70 + adjustments.holderStrength,
+          adjustmentRiskLabel(adjustments.holderStrength),
+        ),
+        dataConfidence: scoreItem(
+          70 + adjustments.dataConfidence,
+          adjustmentRiskLabel(adjustments.dataConfidence),
+        ),
       },
       limitations,
     };
+  }
+
+  private buildConcentrationContext(input: {
+    retailSupplyPct: number | null;
+    top10RetailPctOfRetail: number | null;
+    top10RetailPctOfTotal: number | null;
+    top50RetailPctOfTotal: number | null;
+    top100RetailPctOfTotal: number | null;
+    largestRetailWalletPctOfTotal: number | null;
+  }): ConcentrationContext {
+    const retail = input.top10RetailPctOfRetail;
+    const total = input.top10RetailPctOfTotal;
+
+    let explanation = 'Retail concentration metrics are unavailable for this snapshot.';
+    if (retail !== null && total !== null) {
+      explanation =
+        `Top 10 retail wallets control ${roundTo(retail, 1)}% of retail-held supply, ` +
+        `equal to roughly ${roundTo(total, 1)}% of total supply.`;
+    } else if (retail !== null) {
+      explanation = `Top 10 retail wallets control ${roundTo(retail, 1)}% of retail-held supply.`;
+    }
+
+    return {
+      retailSupplyPct: nullableRound(input.retailSupplyPct, 2),
+      top10RetailPctOfRetail: nullableRound(input.top10RetailPctOfRetail, 2),
+      top10RetailPctOfTotal: nullableRound(input.top10RetailPctOfTotal, 2),
+      top50RetailPctOfTotal: nullableRound(input.top50RetailPctOfTotal, 2),
+      top100RetailPctOfTotal: nullableRound(input.top100RetailPctOfTotal, 2),
+      largestRetailWalletPctOfTotal: nullableRound(
+        input.largestRetailWalletPctOfTotal,
+        2,
+      ),
+      explanation,
+    };
+  }
+
+  private computeAdjustments(ctx: ScoringContext): {
+    concentrationTotal: number;
+    whale: number;
+    teamTotal: number;
+    exchange: number;
+    holderStrength: number;
+    decentralization: number;
+    dataConfidence: number;
+    total: number;
+  } {
+    const top10Total = ctx.top10RetailPctOfTotal;
+    const top10Retail = ctx.top10RetailPctOfRetail;
+    const largest = ctx.largestRetailWalletPctOfTotal;
+    const teamPct = ctx.team.teamLinkedPct ?? 0;
+
+    let concentrationTotal = 0;
+    if (!ctx.hasEnoughData) {
+      concentrationTotal = -8;
+    } else if (top10Total === null) {
+      concentrationTotal -= 4;
+    } else if (top10Total >= 35) concentrationTotal -= 25;
+    else if (top10Total >= 25) concentrationTotal -= 18;
+    else if (top10Total >= 15) concentrationTotal -= 10;
+    else if (top10Total >= 8) concentrationTotal -= 5;
+    else if (top10Total >= 3) concentrationTotal -= 2;
+    else concentrationTotal += 2;
+
+    if (top10Retail === null) {
+      concentrationTotal -= 1;
+    } else if (top10Retail >= 70) concentrationTotal -= 6;
+    else if (top10Retail >= 50) concentrationTotal -= 4;
+    else if (top10Retail >= 35) concentrationTotal -= 2;
+    else concentrationTotal += 1;
+
+    let whale = 0;
+    if (largest === null) {
+      whale -= 2;
+    } else if (largest >= 10) whale -= 20;
+    else if (largest >= 5) whale -= 10;
+    else if (largest >= 2) whale -= 5;
+    else if (largest >= 1) whale -= 2;
+    else whale += 1;
+
+    let teamBase = 0;
+    if (teamPct >= 30) teamBase -= 20;
+    else if (teamPct >= 20) teamBase -= 12;
+    else if (teamPct >= 10) teamBase -= 6;
+    else if (teamPct >= 5) teamBase -= 3;
+    else teamBase += 2;
+
+    const treasuryHeavy =
+      ctx.team.mostlyTreasuryVesting &&
+      !['high', 'critical', 'severe'].includes(ctx.teamRiskLevel) &&
+      ctx.team.suspiciousEoaPct < 5;
+
+    if (treasuryHeavy && teamBase < -8) {
+      teamBase = -8;
+    }
+
+    let suspiciousExtra = 0;
+    const suspicious = ctx.team.suspiciousEoaPct;
+    if (suspicious >= 15) suspiciousExtra -= 15;
+    else if (suspicious >= 10) suspiciousExtra -= 10;
+    else if (suspicious >= 5) suspiciousExtra -= 5;
+
+    const teamTotal = teamBase + suspiciousExtra;
+
+    let holderStrength = 0;
+    if (ctx.avgHolderStrength >= 70) holderStrength += 8;
+    else if (ctx.avgHolderStrength >= 60) holderStrength += 5;
+    else if (ctx.avgHolderStrength >= 45) holderStrength += 1;
+    else if (ctx.avgHolderStrength >= 30) holderStrength -= 3;
+    else holderStrength -= 6;
+
+    let decentralization = 0;
+    if (ctx.decentralizationScore >= 75) decentralization += 6;
+    else if (ctx.decentralizationScore >= 60) decentralization += 3;
+    else if (ctx.decentralizationScore >= 40) decentralization -= 3;
+    else if (ctx.decentralizationScore >= 25) decentralization -= 7;
+    else decentralization -= 12;
+
+    let exchange = 0;
+    const ex = ctx.exchangePct ?? 0;
+    if (ex >= 20 && ex <= 60) exchange += 3;
+    else if (ex > 70) exchange -= 3;
+    else if (ex < 2) exchange -= 2;
+
+    let dataConfidence = 0;
+    if (!ctx.hasEnoughData) dataConfidence -= 4;
+    else if (ctx.analyzedRetail >= 50) dataConfidence += 3;
+    else if (ctx.analyzedRetail >= 25) dataConfidence += 0;
+    else dataConfidence -= 6;
+
+    const total =
+      concentrationTotal +
+      whale +
+      teamTotal +
+      holderStrength +
+      decentralization +
+      exchange +
+      dataConfidence;
+
+    return {
+      concentrationTotal,
+      whale,
+      teamTotal,
+      exchange,
+      holderStrength,
+      decentralization,
+      dataConfidence,
+      total,
+    };
+  }
+
+  private hasHardSevereTrigger(ctx: ScoringContext): boolean {
+    const top10Total = ctx.top10RetailPctOfTotal ?? 0;
+    const largest = ctx.largestRetailWalletPctOfTotal ?? 0;
+    const suspiciousTeam = ctx.team.suspiciousEoaPct;
+
+    if (largest >= 10) return true;
+    if (top10Total >= 35) return true;
+    if (suspiciousTeam >= 20) return true;
+
+    const weakData = ctx.analyzedRetail < 20;
+    const highConcentration = top10Total >= 25 || largest >= 5;
+    if (weakData && highConcentration) return true;
+
+    return false;
+  }
+
+  private resolveRiskLevel(
+    trustScore: number,
+    hardSevere: boolean,
+    hasEnoughData: boolean,
+  ): TrustRiskLevel {
+    if (!hasEnoughData) return 'unknown';
+    if (hardSevere) return 'severe';
+    if (trustScore >= 80) return 'low';
+    if (trustScore >= 65) return 'moderate';
+    if (trustScore >= 45) return 'high';
+    return 'severe';
+  }
+
+  private resolveConfidence(analyzedRetail: number): TrustConfidence {
+    if (analyzedRetail < 20) return 'low';
+    if (analyzedRetail < 50) return 'medium';
+    return 'high';
+  }
+
+  private resolveVerdict(
+    ctx: ScoringContext,
+    riskLevel: TrustRiskLevel,
+    hardSevere: boolean,
+  ): string {
+    if (riskLevel === 'unknown') {
+      return 'Insufficient data for a confident verdict';
+    }
+
+    const top10Total = ctx.top10RetailPctOfTotal ?? 0;
+    const suspiciousTeam = ctx.team.suspiciousEoaPct;
+    const teamPct = ctx.team.teamLinkedPct ?? 0;
+    const isMemeLike = ctx.avgHolderStrength < 45 && top10Total >= 15;
+
+    if (hardSevere) {
+      if (suspiciousTeam >= 20) {
+        return 'Severe insider-control risk';
+      }
+      if ((ctx.largestRetailWalletPctOfTotal ?? 0) >= 10) {
+        return 'Severe whale-control risk';
+      }
+      return 'Severe concentration and exit-pressure risk';
+    }
+
+    if (isMemeLike && riskLevel === 'high') {
+      return 'Meme token with high retail concentration and elevated exit-pressure risk';
+    }
+
+    if (riskLevel === 'high') {
+      return 'High holder concentration risk';
+    }
+
+    if (riskLevel === 'moderate') {
+      if (teamPct >= 10 && ctx.team.mostlyTreasuryVesting) {
+        return 'Established token with treasury exposure and concentration to review';
+      }
+      return 'Moderate visible risk — treasury exposure and large wallets should be reviewed';
+    }
+
+    if (riskLevel === 'low') {
+      return 'Low visible risk, but still requires review';
+    }
+
+    return 'Moderate-to-high risk; concentration and wallet exits need review';
+  }
+
+  private resolveWhoCanDumpRiskLevel(ctx: ScoringContext): TrustRiskLevel {
+    if (!ctx.hasEnoughData) return 'unknown';
+
+    const top10Total = ctx.top10RetailPctOfTotal ?? 0;
+    const largest = ctx.largestRetailWalletPctOfTotal ?? 0;
+    const suspiciousTeam = ctx.team.suspiciousEoaPct;
+
+    if (top10Total >= 35 || largest >= 10 || suspiciousTeam >= 20) {
+      return 'severe';
+    }
+    if (top10Total >= 20 || largest >= 5 || suspiciousTeam >= 10) {
+      return 'high';
+    }
+    if (top10Total >= 10 || largest >= 2 || suspiciousTeam >= 5) {
+      return 'moderate';
+    }
+    return 'low';
+  }
+
+  private buildWhoCanDumpSummary(
+    ctx: ScoringContext,
+    riskLevel: TrustRiskLevel,
+  ): string {
+    if (riskLevel === 'unknown') {
+      return 'Retail holder coverage is limited, so exit-pressure analysis is uncertain.';
+    }
+
+    const top10Total = ctx.top10RetailPctOfTotal ?? 0;
+    const largest = ctx.largestRetailWalletPctOfTotal ?? 0;
+    const teamPct = ctx.team.teamLinkedPct ?? 0;
+    const exchangePct = ctx.exchangePct ?? 0;
+
+    if (riskLevel === 'severe') {
+      return 'A small number of wallets can create meaningful sell pressure on total supply.';
+    }
+    if (riskLevel === 'high') {
+      return 'Large wallets can influence price, and concentration should be monitored closely.';
+    }
+    if (teamPct >= 10 && ctx.team.mostlyTreasuryVesting) {
+      return 'Treasury or vesting wallets hold a meaningful share of supply and should be reviewed alongside retail whales.';
+    }
+    if (exchangePct >= 30) {
+      return 'Exchange custody is high; treat this as liquidity access, not direct sell pressure.';
+    }
+    if (top10Total >= 8 || largest >= 2) {
+      return 'No single retail wallet dominates total supply, but top-holder concentration still needs monitoring.';
+    }
+    return 'No single retail wallet appears dominant in total-supply terms.';
+  }
+
+  private buildRedFlags(ctx: ScoringContext): TokenTrustFlag[] {
+    const flags: TokenTrustFlag[] = [];
+    const retail = ctx.top10RetailPctOfRetail ?? 0;
+    const total = ctx.top10RetailPctOfTotal ?? 0;
+    const largest = ctx.largestRetailWalletPctOfTotal ?? 0;
+    const teamPct = ctx.team.teamLinkedPct ?? 0;
+
+    if (retail >= 35 || total >= 8) {
+      let severity: TokenTrustFlag['severity'] = 'low';
+      if (total >= 35) severity = 'severe';
+      else if (total >= 20) severity = 'high';
+      else if (total >= 10) severity = 'medium';
+      else if (retail >= 70) severity = 'medium';
+
+      flags.push({
+        severity,
+        title: 'High Retail Concentration',
+        description:
+          `Top 10 retail wallets control ${roundTo(retail, 1)}% of retail-held supply, ` +
+          `equal to roughly ${roundTo(total, 1)}% of total supply.`,
+      });
+    }
+
+    if (largest >= 1) {
+      const severity: TokenTrustFlag['severity'] =
+        largest >= 10 ? 'severe' : largest >= 5 ? 'high' : largest >= 2 ? 'medium' : 'low';
+      flags.push({
+        severity,
+        title: 'Large Wallet Can Move Price',
+        description: `The largest retail wallet controls ${roundTo(largest, 2)}% of total supply, worth approximately ${formatUsd(ctx.largestRetailWalletUsd ?? 0)}.`,
+      });
+    }
+
+    if (teamPct >= 5) {
+      const suspicious = ctx.team.suspiciousEoaPct;
+      const treasuryHeavy = ctx.team.mostlyTreasuryVesting;
+      let severity: TokenTrustFlag['severity'] = 'medium';
+      let title = 'Treasury / Team Supply Requires Review';
+
+      if (suspicious >= 10 || ['high', 'critical', 'severe'].includes(ctx.teamRiskLevel)) {
+        severity = suspicious >= 20 || teamPct >= 30 ? 'severe' : 'high';
+        title = 'Suspicious Team or Insider Supply Detected';
+      } else if (treasuryHeavy && teamPct < 25) {
+        severity = 'medium';
+      } else if (teamPct >= 25) {
+        severity = 'high';
+        title = 'Suspicious Team or Insider Supply Detected';
+      }
+
+      flags.push({
+        severity,
+        title,
+        description: treasuryHeavy
+          ? `Treasury or vesting wallets account for ${roundTo(teamPct, 1)}% of supply and should be reviewed.`
+          : `Team-linked or insider wallets account for ${roundTo(teamPct, 1)}% of supply.`,
+      });
+    }
+
+    if (ctx.analyzedRetail < 50) {
+      flags.push({
+        severity: ctx.analyzedRetail < 20 ? 'high' : 'medium',
+        title: 'Limited Retail Sample',
+        description: `Only ${ctx.analyzedRetail} retail wallets were classifiable in the top 100 holders.`,
+      });
+    }
+
+    if (ctx.avgHolderStrength < 45) {
+      flags.push({
+        severity: ctx.avgHolderStrength < 30 ? 'high' : 'medium',
+        title: 'Weak Holder Strength',
+        description: `Average holder strength is ${roundTo(ctx.avgHolderStrength, 1)}/100.`,
+      });
+    }
+
+    return flags;
+  }
+
+  private buildPositiveSignals(ctx: ScoringContext): TokenTrustPositiveSignal[] {
+    const positives: TokenTrustPositiveSignal[] = [];
+    const teamPct = ctx.team.teamLinkedPct ?? 100;
+    const exchangePct = ctx.exchangePct ?? 0;
+    const top10Total = ctx.top10RetailPctOfTotal ?? 100;
+    const largest = ctx.largestRetailWalletPctOfTotal ?? 100;
+
+    if (teamPct < 5) {
+      positives.push({
+        strength: teamPct < 2 ? 'high' : 'medium',
+        title: 'Low Detected Team Allocation',
+        description: `Team-linked wallets appear to control only ${roundTo(teamPct, 1)}% of supply.`,
+      });
+    }
+
+    if (exchangePct >= 20) {
+      positives.push({
+        strength: exchangePct >= 40 ? 'high' : 'medium',
+        title: 'Broad Exchange Access',
+        description: `${roundTo(exchangePct, 1)}% of supply is held in exchange custody. This can support liquidity access but is not direct sell pressure.`,
+      });
+    }
+
+    if (top10Total < 15) {
+      positives.push({
+        strength: top10Total < 8 ? 'high' : 'medium',
+        title: 'Well Distributed Retail Supply',
+        description: `Top 10 retail wallets control roughly ${roundTo(top10Total, 1)}% of total supply.`,
+      });
+    }
+
+    if (ctx.decentralizationScore >= 75) {
+      positives.push({
+        strength: ctx.decentralizationScore >= 85 ? 'high' : 'medium',
+        title: 'Strong Retail Decentralization',
+        description: `Decentralization score is ${roundTo(ctx.decentralizationScore, 0)}/100 across analyzed retail wallets.`,
+      });
+    }
+
+    if (ctx.avgHolderStrength >= 60) {
+      positives.push({
+        strength: ctx.avgHolderStrength >= 75 ? 'high' : 'medium',
+        title: 'Strong Holder Strength',
+        description: `Average holder strength is ${roundTo(ctx.avgHolderStrength, 1)}/100 across analyzed retail wallets.`,
+      });
+    }
+
+    if (largest < 2 && ctx.team.suspiciousEoaPct < 5) {
+      positives.push({
+        strength: 'medium',
+        title: 'No Dominant Single Retail Wallet',
+        description: 'No single analyzed retail wallet controls a large share of total supply.',
+      });
+    }
+
+    if (ctx.team.suspiciousEoaPct < 2) {
+      positives.push({
+        strength: 'medium',
+        title: 'Low Detected Deployer/Owner Control',
+        description: 'Deployer, owner, and team-connected EOAs control little detected supply.',
+      });
+    }
+
+    return positives;
+  }
+
+  private analyzeTeamExposure(
+    holders: RawHolder[],
+    supply: number | null,
+    teamLinkedPct: number | null,
+  ): TeamExposureAnalysis {
+    const treasuryLabels = new Set(['treasury', 'vesting', 'staking']);
+    const suspiciousLabels = new Set(['deployer', 'owner', 'team_connected']);
+
+    let treasuryVestingPct = 0;
+    let suspiciousEoaPct = 0;
+
+    for (const holder of holders) {
+      const label = safeString(holder.walletLabel).toLowerCase();
+      const pct = holderPercentOfSupply(holder, supply) ?? 0;
+
+      if (treasuryLabels.has(label)) {
+        treasuryVestingPct += pct;
+        continue;
+      }
+
+      if (suspiciousLabels.has(label)) {
+        suspiciousEoaPct += pct;
+        continue;
+      }
+
+      if (label === 'eoa' && holder.isTeamLinked === true) {
+        suspiciousEoaPct += pct;
+      }
+    }
+
+    const resolvedTeamPct = teamLinkedPct ?? treasuryVestingPct + suspiciousEoaPct;
+    const mostlyTreasuryVesting =
+      resolvedTeamPct > 0 && treasuryVestingPct / resolvedTeamPct >= 0.7;
+
+    return {
+      teamLinkedPct: resolvedTeamPct > 0 ? resolvedTeamPct : teamLinkedPct,
+      treasuryVestingPct,
+      suspiciousEoaPct,
+      mostlyTreasuryVesting,
+    };
+  }
+
+  private buildLimitations(
+    reportMode: 'fast' | 'standard',
+    analyzedRetail: number,
+  ): string[] {
+    const limitations = [
+      'Contract safety analysis is not included yet.',
+      'Off-chain credibility analysis is not included yet.',
+      'Holder classifications are based on available on-chain data and may be incomplete.',
+      'Exchange custody is treated as liquidity context, not direct sell pressure.',
+      `Trust score is capped at ${MAX_TRUST_SCORE_WITHOUT_FULL_AUDIT}/100 until contract and off-chain review are added.`,
+    ];
+
+    if (reportMode === 'fast') {
+      limitations.push(
+        'FAST_MODE uses recent transfer history only; long-term trading PnL is not calculated.',
+      );
+    }
+    if (analyzedRetail < 20) {
+      limitations.push('Retail sample coverage is limited; confidence is low.');
+    }
+    return limitations;
   }
 
   private resolveSupply(quality: Record<string, unknown>): number | null {
@@ -300,213 +794,28 @@ export class TokenTrustReportService {
     const byTeamDetection = safeNumberOrNull(teamDetection.teamTotalPctOfSupply);
     return bySupplyBreakdown ?? byCategory ?? byTeamDetection;
   }
+}
 
-  private resolveVerdict(
-    riskLevel: TrustRiskLevel,
-    top10RetailPct: number | null,
-    teamLinkedPct: number | null,
-  ): string {
-    if (riskLevel === 'unknown') {
-      return 'Insufficient data for a confident verdict';
-    }
-    if (riskLevel === 'severe' && (teamLinkedPct ?? 0) >= 20) {
-      return 'Severe insider or whale-control risk';
-    }
-    if (riskLevel === 'severe' || (top10RetailPct ?? 0) >= 70) {
-      return 'High concentration risk with elevated exit pressure';
-    }
-    if (riskLevel === 'high') {
-      return 'Moderate-to-high risk; concentration and wallet exits need review';
-    }
-    if (riskLevel === 'moderate') {
-      return 'Moderate risk — watch holder concentration and large wallet behavior';
-    }
-    return 'Low visible risk, but still requires review';
-  }
+function holderPercentOfSupply(holder: RawHolder, supply: number | null): number | null {
+  if (supply === null || supply <= 0) return null;
+  const balance = safeNumber(holder.balance);
+  return (balance / supply) * 100;
+}
 
-  private resolveWhoCanDumpRiskLevel(
-    top10RetailPct: number | null,
-    largestRetailPct: number | null,
-    teamLinkedPct: number | null,
-    hasEnoughData: boolean,
-  ): TrustRiskLevel {
-    if (!hasEnoughData) {
-      return 'unknown';
-    }
-    if ((top10RetailPct ?? 0) >= 70 || (largestRetailPct ?? 0) >= 10 || (teamLinkedPct ?? 0) >= 20) {
-      return 'severe';
-    }
-    if ((top10RetailPct ?? 0) >= 50 || (largestRetailPct ?? 0) >= 5 || (teamLinkedPct ?? 0) >= 10) {
-      return 'high';
-    }
-    if ((top10RetailPct ?? 0) >= 30 || (largestRetailPct ?? 0) >= 2 || (teamLinkedPct ?? 0) >= 5) {
-      return 'moderate';
-    }
-    return 'low';
-  }
+function retailPctOfTotal(
+  retailSupplyPct: number | null,
+  retailScopedPct: number | null,
+): number | null {
+  if (retailSupplyPct === null || retailScopedPct === null) return null;
+  return (retailSupplyPct * retailScopedPct) / 100;
+}
 
-  private buildWhoCanDumpSummary(
-    riskLevel: TrustRiskLevel,
-    top10RetailPct: number | null,
-    largestRetailPct: number | null,
-    teamLinkedPct: number | null,
-    exchangePct: number | null,
-  ): string {
-    if (riskLevel === 'unknown') {
-      return 'Retail holder coverage is limited, so exit-pressure analysis is uncertain.';
-    }
-    if (riskLevel === 'severe') {
-      return 'Retail concentration is high. A small number of wallets can create meaningful sell pressure.';
-    }
-    if (riskLevel === 'high') {
-      return 'Large wallets can influence price, and concentration should be monitored closely.';
-    }
-    if ((teamLinkedPct ?? 0) >= 5) {
-      return 'Team-linked wallets control a meaningful share of supply and should be monitored alongside retail whales.';
-    }
-    if ((exchangePct ?? 0) >= 30) {
-      return 'Exchange custody is high; treat this as liquidity access, not direct sell pressure.';
-    }
-    if ((top10RetailPct ?? 0) >= 30 || (largestRetailPct ?? 0) >= 2) {
-      return 'No single wallet dominates, but top-holder concentration still needs monitoring.';
-    }
-    return 'No single retail wallet appears dominant in the analyzed holder set.';
-  }
-
-  private buildRedFlags(input: {
-    top10RetailPct: number | null;
-    largestRetailWalletPct: number | null;
-    largestRetailWalletUsd: number | null;
-    teamLinkedPct: number | null;
-    analyzedRetail: number;
-    avgHolderStrength: number;
-  }): TokenTrustFlag[] {
-    const flags: TokenTrustFlag[] = [];
-
-    if ((input.top10RetailPct ?? 0) >= 35) {
-      const severity: TokenTrustFlag['severity'] =
-        (input.top10RetailPct ?? 0) >= 70 ? 'severe' : (input.top10RetailPct ?? 0) >= 50 ? 'high' : 'medium';
-      flags.push({
-        severity,
-        title: 'High Retail Concentration',
-        description: `Top 10 retail wallets control ${roundTo(input.top10RetailPct ?? 0, 1)}% of retail-held supply.`,
-      });
-    }
-
-    if ((input.largestRetailWalletPct ?? 0) >= 1) {
-      const severity: TokenTrustFlag['severity'] =
-        (input.largestRetailWalletPct ?? 0) >= 10
-          ? 'severe'
-          : (input.largestRetailWalletPct ?? 0) >= 5
-            ? 'high'
-            : 'medium';
-      flags.push({
-        severity,
-        title: 'Large Wallet Can Move Price',
-        description: `The largest retail wallet controls ${roundTo(input.largestRetailWalletPct ?? 0, 2)}% of supply, worth approximately ${formatUsd(input.largestRetailWalletUsd ?? 0)}.`,
-      });
-    }
-
-    if ((input.teamLinkedPct ?? 0) >= 5) {
-      const severity: TokenTrustFlag['severity'] =
-        (input.teamLinkedPct ?? 0) >= 20 ? 'severe' : (input.teamLinkedPct ?? 0) >= 10 ? 'high' : 'medium';
-      flags.push({
-        severity,
-        title: 'Team-Linked Supply Detected',
-        description: `Team-linked or treasury wallets account for ${roundTo(input.teamLinkedPct ?? 0, 1)}% of supply.`,
-      });
-    }
-
-    if (input.analyzedRetail < 50) {
-      flags.push({
-        severity: input.analyzedRetail < 20 ? 'high' : 'medium',
-        title: 'Limited Retail Sample',
-        description: `Only ${input.analyzedRetail} retail wallets were classifiable in the top 100 holders.`,
-      });
-    }
-
-    if (input.avgHolderStrength < 45) {
-      flags.push({
-        severity: input.avgHolderStrength < 30 ? 'high' : 'medium',
-        title: 'Weak Holder Strength',
-        description: `Average holder strength is ${roundTo(input.avgHolderStrength, 1)}/100.`,
-      });
-    }
-
-    return flags;
-  }
-
-  private buildPositiveSignals(input: {
-    teamLinkedPct: number | null;
-    exchangePct: number | null;
-    top10RetailPct: number | null;
-    avgHolderStrength: number;
-  }): TokenTrustPositiveSignal[] {
-    const positives: TokenTrustPositiveSignal[] = [];
-
-    if ((input.teamLinkedPct ?? 100) < 5) {
-      positives.push({
-        strength: (input.teamLinkedPct ?? 0) < 2 ? 'high' : 'medium',
-        title: 'Low Detected Team Allocation',
-        description: `Team-linked wallets appear to control only ${roundTo(input.teamLinkedPct ?? 0, 1)}% of supply.`,
-      });
-    }
-
-    if ((input.exchangePct ?? 0) >= 25) {
-      positives.push({
-        strength: (input.exchangePct ?? 0) >= 40 ? 'high' : 'medium',
-        title: 'Broad Exchange Access',
-        description: `${roundTo(input.exchangePct ?? 0, 1)}% of supply is held in exchange custody. This can support liquidity access but is not direct sell pressure.`,
-      });
-    }
-
-    if (input.top10RetailPct !== null && input.top10RetailPct < 30) {
-      positives.push({
-        strength: input.top10RetailPct < 20 ? 'high' : 'medium',
-        title: 'Well Distributed Retail Supply',
-        description: 'Retail concentration appears lower than many small-cap tokens.',
-      });
-    }
-
-    if (input.avgHolderStrength >= 60) {
-      positives.push({
-        strength: input.avgHolderStrength >= 75 ? 'high' : 'medium',
-        title: 'Stronger Holder Base',
-        description: `Average holder strength is ${roundTo(input.avgHolderStrength, 1)}/100 across analyzed retail wallets.`,
-      });
-    }
-
-    return positives;
-  }
-
-  private buildLimitations(
-    reportMode: 'fast' | 'standard',
-    analyzedRetail: number,
-  ): string[] {
-    const limitations = [
-      'Contract safety analysis is not included yet.',
-      'Off-chain credibility analysis is not included yet.',
-      'Holder classifications are based on available on-chain data and may be incomplete.',
-      'Exchange custody is treated as liquidity context, not direct sell pressure.',
-    ];
-
-    if (reportMode === 'fast') {
-      limitations.push(
-        'FAST_MODE uses recent transfer history only; long-term trading PnL is not calculated.',
-      );
-    }
-    if (analyzedRetail < 20) {
-      limitations.push('Retail sample coverage is limited; confidence is low.');
-    }
-    return limitations;
-  }
-
-  private riskLabelFromPenalty(penalty: number): string {
-    if (penalty >= 25) return 'Severe risk';
-    if (penalty >= 15) return 'High risk';
-    if (penalty >= 7) return 'Moderate risk';
-    return 'Lower risk';
-  }
+function adjustmentRiskLabel(adjustment: number): string {
+  if (adjustment <= -15) return 'Severe risk';
+  if (adjustment <= -8) return 'High risk';
+  if (adjustment < 0) return 'Moderate risk';
+  if (adjustment > 0) return 'Favorable signal';
+  return 'Neutral';
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
