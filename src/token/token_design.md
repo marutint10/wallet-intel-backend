@@ -1383,3 +1383,138 @@ Current integration status:
 
 - service is registered in TokenModule
 - TokenAnalysisService now invokes it as the active pre-analysis intelligence layer
+
+## 12. Retail Token Trust Report Layer
+
+### Why this layer exists
+
+The legacy token dashboard emphasized B2B holder-intelligence framing (community health and holder quality).
+Retail users need a different interpretation layer: "what can hurt me, and why?".
+
+The Token Trust Report is an additive deterministic layer that reinterprets existing on-chain outputs into:
+
+- Token Trust Score (0-100)
+- risk level (`low | moderate | high | severe | unknown`)
+- red flags and positive signals
+- "who can dump?" exit-pressure summary
+- evidence/limitations for confidence context
+
+It does **not** change core holder fetching, classification, scoring, or aggregation.
+It does **not** add off-chain crawling, contract-audit logic, or chat behavior.
+
+### Implementation
+
+- Service: `src/token/services/token-trust-report.service.ts`
+- Consumer: `DashboardSummaryService.buildDashboardSummary()`
+- DTO field: `DashboardSummaryResponse.tokenTrust`
+- Returned by:
+  - `GET /token/:address/dashboard`
+  - `GET /token/share/:shareId` (same dashboard payload path)
+
+### TokenTrust output shape
+
+`tokenTrust` includes:
+
+- `trustScore`, `riskLevel`, `verdict`, `confidence`, `reportMode`, `summary`
+- `redFlags[]` (severity + title + description + optional evidence)
+- `positiveSignals[]` (strength + title + description + optional evidence)
+- `whoCanDump`:
+  - largest retail wallet `%`, USD, address
+  - top-10 retail concentration
+  - retail whale count (wallets >= 1% supply)
+  - team/exchange/contract/lp percentages
+  - risk level + summary
+- `trustBreakdown` sub-scores:
+  - holder concentration
+  - whale exit risk
+  - team/insider risk
+  - exchange liquidity context
+  - holder strength
+  - data confidence
+- `limitations[]`
+
+### Trust score formula (deterministic)
+
+Start from `100`, subtract penalties, clamp to `0..100`.
+
+Penalty buckets:
+
+1. retail concentration (`distribution.supplyConcentration.top10Pct`)
+2. decentralization (`distribution.decentralizationScore`)
+3. largest retail wallet exit risk (from `holders_data`, retail EOAs only)
+4. team/insider concentration (`supplyBreakdown.team`, category concentration, team detection)
+5. weak holder strength (low-weight use of `qualityMetrics.avgScore`)
+6. data confidence penalty (`classifiableRetailCount` / EOA sample size)
+
+Risk mapping:
+
+- 80-100: low
+- 60-79: moderate
+- 40-59: high
+- 0-39: severe
+- insufficient sample/coverage: unknown
+
+The verdict deliberately avoids "Healthy" language by default.
+
+### Red flags and positives
+
+Red flags are deterministic from concentration/team/sample/strength conditions, including:
+
+- High Retail Concentration
+- Large Wallet Can Move Price
+- Team-Linked Supply Detected
+- Limited Retail Sample
+- Weak Holder Strength
+
+Positive signals are also deterministic and non-overriding:
+
+- Low Detected Team Allocation
+- Broad Exchange Access (liquidity context only)
+- Well Distributed Retail Supply
+- Stronger Holder Base
+
+A severe concentration signal is never neutralized by a positive exchange-liquidity signal.
+
+### Who can dump calculation
+
+Holder groups are derived from existing labels:
+
+- Retail: `walletLabel === 'eoa' && !isTeamLinked`
+- Team: `isTeamLinked` or team/deployer/owner/treasury/vesting labels
+- Exchange: `exchange` / `cex_deposit`
+- Contract: `generic_contract` / `dex_router` / `bridge` / `staking`
+- LP: `dex_pool`
+- Burn: `burn`
+
+`whoCanDump` combines top retail concentration, largest wallet share, and team-linked exposure into a separate exit-pressure risk label and summary text.
+
+### Retail-facing holder labels
+
+Internal classifier outputs are preserved for backward compatibility.
+Dashboard holder rows add retail interpretation fields:
+
+- `retailType`
+- `retailRiskLabel`
+- `retailExplanation`
+
+Examples:
+
+- `Conviction Holder` -> `Concentrated Holder`
+- `Strategic Allocator` -> `Partial Allocator`
+- `Dormant Wallet` -> `Low-Activity Wallet`
+- legacy score bands map to retail strength labels (`Institutional -> Very Strong`, etc.)
+
+### Limitations (always surfaced)
+
+The Token Trust Report includes explicit limitations such as:
+
+- contract safety analysis not included yet
+- off-chain credibility analysis not included yet
+- holder classifications depend on available on-chain data
+- exchange custody is liquidity context, not direct sell pressure
+- FAST_MODE warning when recent-history analysis is used (no long-horizon PnL)
+
+### Migration guidance
+
+The legacy holder score and holder-quality blocks remain in the API for compatibility.
+Retail UI should prefer `tokenTrust` + retail holder labels as the primary interpretation path.

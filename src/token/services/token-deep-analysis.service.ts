@@ -714,10 +714,10 @@ For overallVerdict, riskAssessment, and onChainVsOffChain: cite ALL-HOLDER figur
 `.trim()
         : '';
 
-    return `You are a senior crypto investment analyst at a tier-1 venture capital firm.
+    return `You are a senior crypto token-risk analyst.
 
 Analyze this token using both on-chain intelligence and off-chain web research provided below.
-Produce a structured investment-grade deep analysis report.
+Produce a structured risk-focused token trust research report.
 
 HARD RULES:
 - Do NOT predict price movement
@@ -756,7 +756,7 @@ RETAIL CONCENTRATION (within retail-held supply only — retail = ${input.retail
 - Decentralization Score: ${input.decentralizationScore}/100 (retail-only)
 - Gini Coefficient: ${input.giniCoefficient} (retail-only)
 
-ALL-HOLDER CONCENTRATION (% of TOTAL supply — use for executive verdict)
+ALL-HOLDER CONCENTRATION (% of TOTAL supply — use for overall verdict)
 - Top 10 holders (all buckets): ${input.rawTop10PctOfTotal}% of total supply
 - Top 50 holders (all buckets): ${input.rawTop50PctOfTotal}% of total supply
 - Gini Coefficient: ${input.rawGini} (all-holder)
@@ -773,7 +773,7 @@ Return exactly this JSON structure with all fields populated:
 
 {
   "overallVerdict": {
-    "summary": "2-3 sentence executive summary. For concentration, cite ALL-HOLDER figures (e.g. top 10 = ${input.rawTop10PctOfTotal}% of total supply). Off-chain claims must cite (Source N).",
+    "summary": "2-3 sentence risk summary. For concentration, cite ALL-HOLDER figures (e.g. top 10 = ${input.rawTop10PctOfTotal}% of total supply). Off-chain claims must cite (Source N).",
     "strengthScore": <integer 0-100>,
     "confidenceLevel": "<low|medium|high>"
   },
@@ -843,8 +843,8 @@ Return exactly this JSON structure with all fields populated:
       ]
     },
     "investmentSignals": {
-      "title": "Structural Investment Signals",
-      "summary": "3-5 sentences on structural quality signals most relevant to VCs and institutional traders",
+      "title": "Structural Trust Signals",
+      "summary": "3-5 sentences on structural trust and risk signals relevant to retail users",
       "keyPoints": ["<3-5 specific points>"],
       "sentiment": "<positive|neutral|warning|critical>",
       "dataSource": "combined"
