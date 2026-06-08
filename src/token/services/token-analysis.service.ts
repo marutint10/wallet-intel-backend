@@ -36,6 +36,7 @@ import {
   ContractSafetyReport,
   TokenContractSafetyService,
 } from './token-contract-safety.service';
+import { TokenMarketContextService } from './token-market-context.service';
 
 // FAST_MODE = true enables the B2B holder-intelligence path:
 //   * skip LitePnlService entirely (no realized PnL reconstruction)
@@ -71,6 +72,7 @@ export class TokenAnalysisService {
     private readonly config: ConfigService,
     private readonly targetValidator: TokenTargetValidatorService,
     private readonly contractSafety: TokenContractSafetyService,
+    private readonly marketContext: TokenMarketContextService,
   ) {}
 
   // --- START ANALYSIS (saves status=processing, runs in background) ---
@@ -553,7 +555,7 @@ export class TokenAnalysisService {
       analyzedHolders,
       teamDetection,
     );
-    const qualityWithPrice = {
+    const qualityBase = {
       ...quality,
       tokenPriceUsd: tokenPrice.priceUsd,
       priceSource: tokenPrice.source,
@@ -568,6 +570,23 @@ export class TokenAnalysisService {
       metadataSource: tokenMetadata.source,
       teamDetection,
       contractSafety: contractSafetyReport,
+    };
+
+    const marketContextReport = await this.marketContext.buildReport({
+      contractAddress: address,
+      chain,
+      qualityMetrics: qualityBase,
+      distribution,
+      holdersData: analyzedHolders,
+    });
+    this.logger.log(
+      `Market context: score=${marketContextReport.score ?? 'n/a'} ` +
+        `tier=${marketContextReport.maturityTier} risk=${marketContextReport.riskLevel}`,
+    );
+
+    const qualityWithPrice = {
+      ...qualityBase,
+      marketContext: marketContextReport,
     };
     const qualityMetrics =
       qualityWithPrice as unknown as QueryDeepPartialEntity<
