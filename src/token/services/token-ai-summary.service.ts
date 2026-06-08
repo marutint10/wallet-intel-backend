@@ -9,6 +9,7 @@ import {
   buildDistributionSummary,
   computeHolderQualityBreakdown,
   computeSmartMoneyPct,
+  mapQualityLabelForRetail,
   type RawHolder,
   safeNumber,
   safeNumberOrNull,
@@ -63,6 +64,9 @@ export interface TokenSummaryInput {
   trustLimitations: string[];
   concentrationContextExplanation: string;
   top10RetailPctOfTotal: number;
+  scoreLabel: string;
+  scoreStatus: string;
+  hasRealizedPnl: boolean;
 
   riskSignals: string[];
   positiveSignals: string[];
@@ -78,15 +82,18 @@ Hard rules:
 - Use only the provided structured metrics.
 - Do not invent facts or percentages.
 - Do not say buy, sell, scam, rug, guaranteed safe, or healthy.
+- Do not describe the score as final full token trust; it is a partial visible on-chain score only.
 - Always distinguish retail-scoped concentration from total-supply impact when both are provided.
 - Do not overstate risk when total-supply impact is low even if retail-scoped concentration is higher.
+- Avoid: conviction holders, strong community commitment, community conviction, profitable traders, smart money (unless realized PnL is explicitly available).
+- Prefer: concentrated holders, holder strength, portfolio-qualified wallets, high token concentration, exit-pressure risk, retail concentration, treasury exposure.
 - Mention both risks and positives when present.
 - Mention uncertainty when sample coverage is limited.
 - Keep output to 4-6 sentences in plain text.`;
 
 @Injectable()
 export class TokenAiSummaryService {
-  private static readonly CACHE_PREFIX = 'token:summary:v4:';
+  private static readonly CACHE_PREFIX = 'token:summary:v5:';
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly FALLBACK_CACHE_TTL_SECONDS = 1_800;
   private static readonly GEMINI_PRIMARY_MODEL = 'gemini-2.5-flash';
@@ -243,7 +250,9 @@ export class TokenAiSummaryService {
       tokenSymbol: safeString(analysis.tokenSymbol, 'N/A'),
       chain: safeString(analysis.chain, 'ethereum'),
       avgHolderScore,
-      qualityLabel: safeString(quality.qualityLabel, 'Unknown'),
+      qualityLabel: mapQualityLabelForRetail(
+        safeString(quality.qualityLabel, 'Unknown'),
+      ),
       totalAnalyzedHolders,
       convictionPct:
         holderQualityBreakdown.convictionHolders +
@@ -285,6 +294,9 @@ export class TokenAiSummaryService {
       trustLimitations: tokenTrust.limitations,
       concentrationContextExplanation: tokenTrust.concentrationContext.explanation,
       top10RetailPctOfTotal: safeNumber(tokenTrust.concentrationContext.top10RetailPctOfTotal),
+      scoreLabel: tokenTrust.scoreLabel,
+      scoreStatus: tokenTrust.scoreStatus,
+      hasRealizedPnl: safeNumber(pnlAggregation.holdersWithPnlData) > 0,
       riskSignals,
       positiveSignals,
     };
@@ -354,10 +366,14 @@ SUPPLY COMPOSITION (% of total supply)
 
 HOLDER QUALITY (retail wallets only)
 - Holder Strength Score: ${input.avgHolderScore}/100 (${input.qualityLabel})
-- Smart Money Wallets: ${input.smartMoneyPct}%
+- ${
+      input.hasRealizedPnl
+        ? `Smart Money Wallets (PnL-proven): ${input.smartMoneyPct}%`
+        : `Portfolio-qualified wallet signals: ${input.smartMoneyPct}% (not realized PnL)`
+    }
 
-TOKEN TRUST REPORT
-- Token Trust Score: ${input.tokenTrustScore}/100
+VISIBLE ON-CHAIN TRUST REPORT (partial — not final full trust score)
+- ${input.scoreLabel}: ${input.tokenTrustScore}/100 (${input.scoreStatus})
 - Risk Level: ${input.tokenTrustRiskLevel}
 - Verdict: ${input.tokenTrustVerdict}
 - Summary: ${input.tokenTrustSummary}
@@ -366,13 +382,13 @@ TOKEN TRUST REPORT
 - Who Can Dump: ${input.whoCanDumpSummary}
 - Limitations: ${input.trustLimitations.join(' | ')}
 
-COMMUNITY COMPOSITION
-- Conviction Holders (Diamond Hands / HODLers): ${input.convictionPct}%
+HOLDER COMPOSITION (retail behavioral mix)
+- Concentrated / long-hold style holders: ${input.convictionPct}%
 - Active Traders (Swing / Day): ${input.activeTraderPct}%
 - Degen / High-Risk: ${input.degenPct}%
 - Bots / Automated: ${input.botPct}%
-- Passive conviction holders: ${input.convictionHolderArchetypePct}%
-- Dormant / no profile: ${input.dormantPct}%
+- Passive concentrated holders: ${input.convictionHolderArchetypePct}%
+- Dormant / low-activity: ${input.dormantPct}%
 
 RETAIL CONCENTRATION (within retail-held supply only)
 - Top 10 retail wallets: ${input.top10PctOfRetail}% of retail (~${input.top10PctOfTotal}% of total)
@@ -391,7 +407,7 @@ Write a 4-6 sentence cautious retail risk summary now.
 
   private buildFallbackSummary(input: TokenSummaryInput): string {
     return (
-      `${input.tokenName} (${input.tokenSymbol}) shows ${input.tokenTrustRiskLevel} visible risk with a token trust score of ${input.tokenTrustScore}/100. ` +
+      `${input.tokenName} (${input.tokenSymbol}) shows ${input.tokenTrustRiskLevel} visible risk with a partial ${input.scoreLabel} of ${input.tokenTrustScore}/100. ` +
       `${input.tokenTrustVerdict}. ` +
       `${input.concentrationContextExplanation} ` +
       `${input.whoCanDumpSummary} ` +

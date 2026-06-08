@@ -258,7 +258,10 @@ export class DashboardSummaryService {
     );
 
     const avgScoreRaw = safeNumberOrNull(quality.avgScore);
-    const qualityLabel = safeString(quality.qualityLabel, 'Unknown');
+    const qualityLabel = mapQualityLabelForRetail(
+      safeString(quality.qualityLabel, 'Unknown'),
+    );
+    const holdersWithPnlData = safeNumber(pnlAggregation.holdersWithPnlData);
 
     const convictionPct =
       holderQualityBreakdown.convictionHolders +
@@ -288,6 +291,7 @@ export class DashboardSummaryService {
       exchangePctOfSupply,
       botPct,
       tokenTrust,
+      hasRealizedPnl: holdersWithPnlData > 0,
     });
 
     return {
@@ -522,6 +526,7 @@ interface SummaryCardInputs {
   exchangePctOfSupply: number;
   botPct: number;
   tokenTrust: TokenTrustReport;
+  hasRealizedPnl: boolean;
 }
 
 export function buildSummaryCards(inputs: SummaryCardInputs): SummaryCard[] {
@@ -534,16 +539,28 @@ export function buildSummaryCards(inputs: SummaryCardInputs): SummaryCard[] {
     exchangePctOfSupply,
     botPct,
     tokenTrust,
+    hasRealizedPnl,
   } = inputs;
+
+  const top10RetailPct =
+    tokenTrust.concentrationContext.top10RetailPctOfRetail ?? top10Pct;
+  const top10TotalPct = tokenTrust.concentrationContext.top10RetailPctOfTotal;
 
   const avgScoreSentiment: SummaryCard['sentiment'] =
     avgScore !== null && avgScore >= 75 ? 'positive' : 'neutral';
 
-  const smartMoneySentiment: SummaryCard['sentiment'] =
+  const walletSignalSentiment: SummaryCard['sentiment'] =
     smartMoneyPct >= 25 ? 'positive' : botPct >= 15 ? 'warning' : 'neutral';
 
   const top10Sentiment: SummaryCard['sentiment'] =
-    top10Pct >= 50 ? 'warning' : 'neutral';
+    (top10TotalPct ?? top10RetailPct) >= 20 ? 'warning' : 'neutral';
+
+  const visibleScoreSentiment: SummaryCard['sentiment'] =
+    tokenTrust.riskLevel === 'low'
+      ? 'positive'
+      : tokenTrust.riskLevel === 'moderate'
+        ? 'neutral'
+        : 'warning';
 
   const decentralizationSentiment: SummaryCard['sentiment'] =
     decentralizationScore >= 70 ? 'positive' : 'neutral';
@@ -554,7 +571,18 @@ export function buildSummaryCards(inputs: SummaryCardInputs): SummaryCard[] {
   const exchangeSentiment: SummaryCard['sentiment'] =
     exchangePctOfSupply >= 40 ? 'warning' : 'neutral';
 
+  const top10Subtitle =
+    top10TotalPct !== null
+      ? `Of retail-held supply · ${roundTo(top10TotalPct, 1)}% of total supply`
+      : 'Of retail-held supply';
+
   return [
+    {
+      title: tokenTrust.scoreLabel,
+      value: `${Math.round(tokenTrust.trustScore)}/100`,
+      subtitle: `Partial on-chain view · ${tokenTrust.riskLevel} visible risk`,
+      sentiment: visibleScoreSentiment,
+    },
     {
       title: 'Holder Strength Score',
       value: avgScore !== null ? `${Math.round(avgScore)}/100` : 'N/A',
@@ -562,16 +590,24 @@ export function buildSummaryCards(inputs: SummaryCardInputs): SummaryCard[] {
         'Portfolio strength of analyzed retail wallets; not a safety guarantee',
       sentiment: avgScoreSentiment,
     },
+    hasRealizedPnl
+      ? {
+          title: 'Smart Money Wallets',
+          value: `${Math.round(smartMoneyPct)}%`,
+          subtitle: 'High win-rate / profitable traders',
+          sentiment: walletSignalSentiment,
+        }
+      : {
+          title: 'Strong Wallet Signals',
+          value: `${Math.round(smartMoneyPct)}%`,
+          subtitle:
+            'Based on portfolio strength and holder profile, not realized PnL',
+          sentiment: walletSignalSentiment,
+        },
     {
-      title: 'Smart Money Wallets',
-      value: `${Math.round(smartMoneyPct)}%`,
-      subtitle: 'High win-rate / profitable traders',
-      sentiment: smartMoneySentiment,
-    },
-    {
-      title: 'Top 10 Concentration',
-      value: `${Math.round(top10Pct)}%`,
-      subtitle: 'Supply held by top 10 holders',
+      title: 'Top 10 Retail Control',
+      value: `${Math.round(top10RetailPct)}%`,
+      subtitle: top10Subtitle,
       sentiment: top10Sentiment,
     },
     {
@@ -963,6 +999,26 @@ function coerceContractName(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+export function mapQualityLabelForRetail(qualityLabel: string): string {
+  const explicit: Record<string, string> = {
+    'Strong Community': 'Strong Holder Strength',
+    'Developing Community': 'Weak Holder Strength',
+    'Healthy Community': 'Strong Holder Base',
+    'Weak Community': 'Weak Holder Base',
+    'Average Community': 'Moderate Holder Strength',
+  };
+
+  if (explicit[qualityLabel]) {
+    return explicit[qualityLabel];
+  }
+
+  if (qualityLabel.includes('Community')) {
+    return qualityLabel.replace(/\bCommunity\b/g, 'Holder Base');
+  }
+
+  return qualityLabel;
+}
+
 export function mapHolderTypeForRetail(
   primaryType: string | null,
   holder: {
@@ -975,7 +1031,9 @@ export function mapHolderTypeForRetail(
   retailRiskLabel: string;
   retailExplanation: string;
 } {
-  if (holder.walletLabel === 'exchange' || holder.walletLabel === 'cex_deposit') {
+  const label = holder.walletLabel;
+
+  if (label === 'exchange' || label === 'cex_deposit') {
     return {
       retailType: 'Exchange Custody',
       retailRiskLabel: 'Liquidity Context',
@@ -984,11 +1042,102 @@ export function mapHolderTypeForRetail(
     };
   }
 
-  if (holder.walletLabel === 'burn') {
+  if (label === 'treasury') {
+    return {
+      retailType: 'Team / Treasury Wallet',
+      retailRiskLabel: 'Team / Treasury Exposure',
+      retailExplanation:
+        'Treasury or team-controlled supply should be reviewed for unlock and allocation risk.',
+    };
+  }
+
+  if (label === 'vesting') {
+    return {
+      retailType: 'Vesting / Locked Supply',
+      retailRiskLabel: 'Team / Treasury Exposure',
+      retailExplanation: 'Vesting or locked supply may unlock over time.',
+    };
+  }
+
+  if (label === 'deployer') {
+    return {
+      retailType: 'Deployer Wallet',
+      retailRiskLabel: 'Insider Exposure',
+      retailExplanation: 'Deployer-linked supply may carry insider-control risk.',
+    };
+  }
+
+  if (label === 'owner') {
+    return {
+      retailType: 'Owner Wallet',
+      retailRiskLabel: 'Insider Exposure',
+      retailExplanation: 'Contract owner-linked supply may carry insider-control risk.',
+    };
+  }
+
+  if (label === 'team_connected') {
+    return {
+      retailType: 'Team-Linked Wallet',
+      retailRiskLabel: 'Team / Treasury Exposure',
+      retailExplanation: 'Wallet shows on-chain links to team-related addresses.',
+    };
+  }
+
+  if (label === 'generic_contract') {
+    return {
+      retailType: 'Contract Wallet',
+      retailRiskLabel:
+        holder.percentSupply >= 2 ? 'Contract Supply Risk' : 'Contract Context',
+      retailExplanation:
+        'Smart-contract wallet holding supply; review contract role and controls.',
+    };
+  }
+
+  if (label === 'dex_pool') {
+    return {
+      retailType: 'Liquidity Pool',
+      retailRiskLabel: 'Liquidity Context',
+      retailExplanation: 'LP-held supply supports trading liquidity, not direct retail exit pressure.',
+    };
+  }
+
+  if (label === 'dex_router') {
+    return {
+      retailType: 'DEX Router',
+      retailRiskLabel: 'Contract Context',
+      retailExplanation: 'DEX router contract identified in holder set.',
+    };
+  }
+
+  if (label === 'bridge') {
+    return {
+      retailType: 'Bridge Contract',
+      retailRiskLabel: 'Contract Context',
+      retailExplanation: 'Bridge contract identified in holder set.',
+    };
+  }
+
+  if (label === 'staking') {
+    return {
+      retailType: 'Staking Contract',
+      retailRiskLabel: 'Contract Context',
+      retailExplanation: 'Staking contract holding supply; may include locked positions.',
+    };
+  }
+
+  if (label === 'burn') {
     return {
       retailType: 'Burn Address',
       retailRiskLabel: 'Low Exit Risk',
       retailExplanation: 'Burned supply is generally not expected to return to circulation.',
+    };
+  }
+
+  if (label === 'dust') {
+    return {
+      retailType: 'Dust Wallet',
+      retailRiskLabel: 'Low Exit Risk',
+      retailExplanation: 'Very small balance wallet with limited market impact.',
     };
   }
 
@@ -1032,22 +1181,31 @@ export function mapHolderTypeForRetail(
     };
   }
 
+  if (primaryType) {
+    return {
+      retailType: mapLegacyStrengthLabel(primaryType),
+      retailRiskLabel:
+        holder.percentSupply >= 5
+          ? 'High Exit Risk'
+          : holder.percentSupply >= 1
+            ? 'Moderate Exit Risk'
+            : 'Low Exit Risk',
+      retailExplanation:
+        'Retail-facing label mapped from current on-chain holder classification.',
+    };
+  }
+
   return {
-    retailType: mapLegacyStrengthLabel(primaryType),
-    retailRiskLabel:
-      holder.percentSupply >= 5
-        ? 'High Exit Risk'
-        : holder.percentSupply >= 1
-          ? 'Moderate Exit Risk'
-          : 'Low Exit Risk',
+    retailType: 'Unclassified Wallet',
+    retailRiskLabel: 'Needs Review',
     retailExplanation:
-      'Retail-facing label mapped from current on-chain holder classification.',
+      'Wallet type could not be confidently classified from current on-chain data.',
   };
 }
 
 function mapLegacyStrengthLabel(primaryType: string | null): string {
   if (!primaryType) {
-    return 'Unknown';
+    return 'Unclassified Wallet';
   }
   switch (primaryType) {
     case 'Institutional':

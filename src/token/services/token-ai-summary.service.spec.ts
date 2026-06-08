@@ -61,5 +61,8 @@ describe('TokenAiSummaryService', () => {
     expect(typeof input.whoCanDumpSummary).toBe('string');
     expect(typeof input.concentrationContextExplanation).toBe('string');
     expect(input.concentrationContextExplanation.length).toBeGreaterThan(0);
+    expect(input.scoreLabel).toBe('Visible On-chain Score');
+    expect(input.hasRealizedPnl).toBe(false);
+    expect(input.qualityLabel).not.toContain('Community');
   });
 });
