@@ -338,6 +338,20 @@ export class TokenController {
     });
   }
 
+  // POST /token/:address/contract-safety/refresh?chain=ethereum
+  @Post(':address/contract-safety/refresh')
+  async refreshContractSafety(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+  ) {
+    if (!this.isEvmContractAddress(address)) {
+      throw new BadRequestException('Invalid contract address');
+    }
+
+    const report = await this.tokenAnalysis.refreshContractSafety(address, chain);
+    return { contractSafety: report };
+  }
+
   // GET /token/:address?chain=ethereum
   // Returns analysis result - poll this until status=done
   @Get(':address')

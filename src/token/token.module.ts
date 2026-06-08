@@ -30,6 +30,7 @@ import { ExportPdfController } from './export-pdf.controller';
 import { TokenController } from './token.controller';
 import { TokenPdfExportService } from './services/token-pdf-export.service';
 import { TokenTargetValidatorService } from './services/token-target-validator.service';
+import { TokenContractSafetyService } from './services/token-contract-safety.service';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { TokenTargetValidatorService } from './services/token-target-validator.s
     TokenDeepAnalysisService,
     TokenPdfExportService,
     TokenTargetValidatorService,
+    TokenContractSafetyService,
   ],
 })
 export class TokenModule {}

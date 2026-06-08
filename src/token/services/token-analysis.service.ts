@@ -32,6 +32,10 @@ import {
   TokenAnalysisTargetValidation,
   TokenTargetValidatorService,
 } from './token-target-validator.service';
+import {
+  ContractSafetyReport,
+  TokenContractSafetyService,
+} from './token-contract-safety.service';
 
 // FAST_MODE = true enables the B2B holder-intelligence path:
 //   * skip LitePnlService entirely (no realized PnL reconstruction)
@@ -66,6 +70,7 @@ export class TokenAnalysisService {
     private readonly aggregation: HolderAggregationService,
     private readonly config: ConfigService,
     private readonly targetValidator: TokenTargetValidatorService,
+    private readonly contractSafety: TokenContractSafetyService,
   ) {}
 
   // --- START ANALYSIS (saves status=processing, runs in background) ---
@@ -211,6 +216,40 @@ export class TokenAnalysisService {
     });
   }
 
+  async refreshContractSafety(
+    contractAddress: string,
+    chain: string,
+  ): Promise<ContractSafetyReport> {
+    const address = contractAddress.trim().toLowerCase();
+    const existing = await this.tokenRepo.findOne({
+      where: { contractAddress: address, chain },
+    });
+    const quality = (existing?.qualityMetrics ?? {}) as Record<string, unknown>;
+
+    const report = await this.contractSafety.analyzeContract(address, chain, {
+      owner: typeof quality.owner === 'string' ? quality.owner : null,
+      name: existing?.tokenName ?? null,
+      symbol: existing?.tokenSymbol ?? null,
+    });
+
+    if (existing) {
+      const qualityMetrics = {
+        ...quality,
+        contractSafety: report,
+      } as unknown as QueryDeepPartialEntity<Record<string, unknown> | null>;
+
+      await this.tokenRepo.update(
+        { contractAddress: address, chain },
+        {
+          qualityMetrics,
+          updatedAt: new Date(),
+        },
+      );
+    }
+
+    return report;
+  }
+
   // --- CORE ANALYSIS PIPELINE ---
   private async runAnalysis(contractAddress: string, chain: string): Promise<void> {
     const address = contractAddress.toLowerCase();
@@ -250,6 +289,20 @@ export class TokenAnalysisService {
         `Liquidity: $${tokenMetadata.liquidityUsd || 0} | ` +
         `Deployer: ${tokenMetadata.deployer || 'unknown'} | ` +
         `Owner: ${tokenMetadata.owner || 'unknown'}`,
+    );
+
+    const contractSafetyReport = await this.contractSafety.analyzeContract(
+      address,
+      chain,
+      {
+        owner: tokenMetadata.owner,
+        name: tokenMetadata.name,
+        symbol: tokenMetadata.symbol,
+      },
+    );
+    this.logger.log(
+      `Contract safety: score=${contractSafetyReport.score ?? 'n/a'} ` +
+        `risk=${contractSafetyReport.riskLevel} verified=${contractSafetyReport.verifiedSource}`,
     );
 
     // Keep using LitePricingService for token price (cached)
@@ -514,6 +567,7 @@ export class TokenAnalysisService {
       owner: tokenMetadata.owner,
       metadataSource: tokenMetadata.source,
       teamDetection,
+      contractSafety: contractSafetyReport,
     };
     const qualityMetrics =
       qualityWithPrice as unknown as QueryDeepPartialEntity<
