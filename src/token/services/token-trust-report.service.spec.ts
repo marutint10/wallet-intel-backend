@@ -274,7 +274,7 @@ describe('TokenTrustReportService', () => {
     expect(report.confidence).toBe('low');
     expect(
       report.limitations.some((limitation) =>
-        limitation.toLowerCase().includes('contract safety'),
+        limitation.toLowerCase().includes('contract safety analysis is not included yet'),
       ),
     ).toBe(true);
     expect(report.trustScore).toBeLessThanOrEqual(82);

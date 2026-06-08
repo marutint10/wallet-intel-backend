@@ -57,6 +57,7 @@ export interface TokenTrustReport {
   scoreLabel: 'Visible On-chain Score';
   scoreStatus: 'partial';
   scoreCoverage: string[];
+  availableModules?: string[];
   missingScoreInputs: string[];
   riskLevel: TrustRiskLevel;
   verdict: string;
@@ -234,7 +235,12 @@ export class TokenTrustReportService {
 
     const redFlags = this.buildRedFlags(ctx);
     const positiveSignals = this.buildPositiveSignals(ctx);
-    const limitations = this.buildLimitations(reportMode, analyzedRetail);
+    const hasContractSafety = this.hasContractSafetyModule(quality);
+    const limitations = this.buildLimitations(
+      reportMode,
+      analyzedRetail,
+      hasContractSafety,
+    );
 
     const whoCanDump: WhoCanDumpSummary = {
       largestRetailWalletPct: nullableRound(largestRetailWalletPctOfTotal, 2),
@@ -260,6 +266,9 @@ export class TokenTrustReportService {
         'wallet_concentration',
         'team_treasury_exposure',
       ],
+      availableModules: hasContractSafety
+        ? ['holder_structure', 'contract_safety']
+        : ['holder_structure'],
       missingScoreInputs: [
         'contract_safety',
         'market_maturity',
@@ -771,13 +780,24 @@ export class TokenTrustReportService {
     };
   }
 
+  private hasContractSafetyModule(quality: Record<string, unknown>): boolean {
+    const contractSafety = asRecord(quality.contractSafety);
+    const status = safeString(contractSafety.status).toLowerCase();
+    return status === 'done' || status === 'partial';
+  }
+
   private buildLimitations(
     reportMode: 'fast' | 'standard',
     analyzedRetail: number,
+    hasContractSafety: boolean,
   ): string[] {
     const limitations = [
-      'This is a partial visible on-chain score. Full trust scoring will require contract safety, market maturity, liquidity depth, and off-chain credibility analysis.',
-      'Contract safety analysis is not included yet.',
+      hasContractSafety
+        ? 'This is a partial visible on-chain score. Full trust scoring will require market maturity, liquidity depth, and off-chain credibility analysis.'
+        : 'This is a partial visible on-chain score. Full trust scoring will require contract safety, market maturity, liquidity depth, and off-chain credibility analysis.',
+      hasContractSafety
+        ? 'Contract safety is shown separately and is not yet merged into the visible on-chain score.'
+        : 'Contract safety analysis is not included yet.',
       'Off-chain credibility analysis is not included yet.',
       'Holder classifications are based on available on-chain data and may be incomplete.',
       'Exchange custody is treated as liquidity context, not direct sell pressure.',

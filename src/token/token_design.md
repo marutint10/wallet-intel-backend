@@ -1400,7 +1400,18 @@ The Token Trust Report is an additive deterministic layer that reinterprets exis
 - evidence/limitations for confidence context
 
 It does **not** change core holder fetching, classification, scoring, or aggregation.
-It does **not** add off-chain crawling, contract-audit logic, or chat behavior.
+It does **not** add off-chain crawling or chat behavior.
+
+### Contract Safety Engine (Step 2)
+
+- Service: `src/token/services/token-contract-safety.service.ts`
+- Persisted at: `qualityMetrics.contractSafety` (JSONB, no migration)
+- Pipeline: runs in `TokenAnalysisService.runAnalysis()` after token metadata
+- Dashboard field: `DashboardSummaryResponse.contractSafety`
+- Refresh: `POST /token/:address/contract-safety/refresh?chain=ethereum`
+
+Contract safety is deterministic (bytecode + Etherscan source/ABI + proxy slots + owner calls).
+It is **not merged** into `tokenTrust.trustScore` yet; when present, `tokenTrust.limitations` notes that contract safety is shown separately.
 
 ### Implementation
 
