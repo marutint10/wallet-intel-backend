@@ -269,12 +269,14 @@ export class TokenTrustReportService {
       availableModules: hasContractSafety
         ? ['holder_structure', 'contract_safety']
         : ['holder_structure'],
-      missingScoreInputs: [
-        'contract_safety',
-        'market_maturity',
-        'liquidity_depth',
-        'off_chain_credibility',
-      ],
+      missingScoreInputs: hasContractSafety
+        ? ['market_maturity', 'liquidity_depth', 'off_chain_credibility']
+        : [
+            'contract_safety',
+            'market_maturity',
+            'liquidity_depth',
+            'off_chain_credibility',
+          ],
       riskLevel,
       verdict,
       confidence: this.resolveConfidence(analyzedRetail),
