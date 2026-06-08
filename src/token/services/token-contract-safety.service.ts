@@ -31,6 +31,17 @@ export type PermissionRisk =
   | 'high'
   | 'severe'
   | 'unknown';
+export type BytecodeFetchStatus =
+  | 'success'
+  | 'empty'
+  | 'rpc_error'
+  | 'chain_mismatch'
+  | 'no_provider';
+export type SourceLookupStatus =
+  | 'success'
+  | 'not_verified'
+  | 'error'
+  | 'not_checked';
 
 export interface PermissionSignal {
   detected: boolean | null;
@@ -51,6 +62,15 @@ export interface ContractSafetyPositiveSignal {
   title: string;
   description: string;
   evidence?: string;
+}
+
+export interface ContractSafetyDebugMeta {
+  chainId: string | null;
+  bytecodeLength: number | null;
+  sourceLookupStatus: SourceLookupStatus;
+  scannedAddress: string;
+  implementationScanned: boolean;
+  rpcProvider: string | null;
 }
 
 export interface ContractSafetyReport {
@@ -108,14 +128,27 @@ export interface ContractSafetyReport {
   unknowns: string[];
   limitations: string[];
   checkedAt: string;
+  debugMeta?: ContractSafetyDebugMeta;
+}
+
+export interface ParsedAbiFunction {
+  name: string;
+  stateMutability: string;
+  isStateChanging: boolean;
+  signature: string;
 }
 
 export interface ContractSafetyCollectedData {
   contractAddress: string;
   chain: string;
   bytecode: string | null;
+  bytecodeFetchStatus: BytecodeFetchStatus;
   bytecodeError: string | null;
+  chainId: string | null;
+  rpcProvider: string | null;
+  rpcBytecodeConflict: boolean;
   sourceFetchError: string | null;
+  sourceLookupStatus: SourceLookupStatus;
   verifiedSource: boolean;
   sourceProvider: SourceProvider;
   contractName: string | null;
@@ -127,10 +160,11 @@ export interface ContractSafetyCollectedData {
   proxyAdminAddress: string | null;
   proxyType: ProxyType;
   isProxy: boolean;
+  implementationScanned: boolean;
   ownerAddress: string | null;
   ownerType: OwnerType;
   adminAddresses: string[];
-  scanText: string;
+  parsedAbiFunctions: ParsedAbiFunction[];
   abiFunctionNames: string[];
 }
 
@@ -144,16 +178,23 @@ const EIP1967_ADMIN_SLOT =
 const EIP1967_BEACON_SLOT =
   '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50';
 
-const OWNER_SELECTORS = [
-  '0x8da5cb5b', // owner()
-  '0x893d20e8', // getOwner()
-  '0xf851a440', // admin()
-];
+const OWNER_SELECTORS = ['0x8da5cb5b', '0x893d20e8', '0xf851a440'];
+
+const EXPECTED_CHAIN_IDS: Record<string, string> = {
+  ethereum: '0x1',
+  polygon: '0x89',
+  base: '0x2105',
+  bsc: '0x38',
+};
+
+const BYTECODE_RETRY_ATTEMPTS = 3;
+const BYTECODE_RETRY_BACKOFF_MS = 250;
 
 interface AbiEntry {
   type?: string;
   name?: string;
   stateMutability?: string;
+  inputs?: Array<{ type?: string; name?: string }>;
 }
 
 interface EtherscanSourceResult {
@@ -164,89 +205,30 @@ interface EtherscanSourceResult {
   Implementation?: string;
 }
 
-interface PatternGroup {
-  clear: RegExp[];
-  unclear: RegExp[];
+interface RpcProvider {
+  name: string;
+  url: string;
 }
 
-const PERMISSION_PATTERNS: Record<string, PatternGroup> = {
-  mint: {
-    clear: [/\bmint\b/i, /\bownerMint\b/i, /\bincreaseSupply\b/i, /\bissue\b/i],
-    unclear: [/\b_mint\b/i],
-  },
-  burn: {
-    clear: [/\bburn\b/i, /\bburnFrom\b/i],
-    unclear: [],
-  },
-  pause: {
-    clear: [/\bpause\b/i, /\bunpause\b/i, /\bpaused\b/i],
-    unclear: [],
-  },
-  blacklist: {
-    clear: [
-      /\bblacklist\b/i,
-      /\bisBlacklisted\b/i,
-      /\bsetBlacklist\b/i,
-      /\bbotList\b/i,
-      /\bantibot\b/i,
-    ],
-    unclear: [],
-  },
-  whitelist: {
-    clear: [/\bwhitelist\b/i, /\bsetWhitelist\b/i, /\bexcludeFromMaxTransaction\b/i],
-    unclear: [],
-  },
-  tradingGate: {
-    clear: [
-      /\benableTrading\b/i,
-      /\btradingEnabled\b/i,
-      /\bopenTrading\b/i,
-      /\bsetTradingEnabled\b/i,
-    ],
-    unclear: [],
-  },
-  taxChange: {
-    clear: [
-      /\bsetTax\b/i,
-      /\bsetFees\b/i,
-      /\bsetBuyFee\b/i,
-      /\bsetSellFee\b/i,
-      /\bsetTransferFee\b/i,
-      /\bupdateFees\b/i,
-      /\btaxWallet\b/i,
-      /\bfeeReceiver\b/i,
-    ],
-    unclear: [],
-  },
-  maxTxOrMaxWallet: {
-    clear: [
-      /\bsetMaxTx\b/i,
-      /\bsetMaxWallet\b/i,
-      /\bmaxTransactionAmount\b/i,
-      /\bmaxWallet\b/i,
-    ],
-    unclear: [],
-  },
-  upgradeability: {
-    clear: [
-      /\bupgradeTo\b/i,
-      /\bupgradeToAndCall\b/i,
-      /\bimplementation\b/i,
-      /\bproxyAdmin\b/i,
-    ],
-    unclear: [],
-  },
-  rescueOrWithdraw: {
-    clear: [
-      /\brescueTokens\b/i,
-      /\bwithdrawToken\b/i,
-      /\brecoverERC20\b/i,
-      /\bsweep\b/i,
-      /\brescueETH\b/i,
-    ],
-    unclear: [],
-  },
-};
+interface BytecodeFetchResult {
+  bytecode: string | null;
+  status: BytecodeFetchStatus;
+  error: string | null;
+  provider: string | null;
+  chainId: string | null;
+}
+
+type PermissionKey =
+  | 'mint'
+  | 'burn'
+  | 'pause'
+  | 'blacklist'
+  | 'whitelist'
+  | 'tradingGate'
+  | 'taxChange'
+  | 'maxTxOrMaxWallet'
+  | 'upgradeability'
+  | 'rescueOrWithdraw';
 
 function emptyPermission(reason: string): PermissionSignal {
   return { detected: null, risk: 'unknown', reason, evidence: [] };
@@ -288,29 +270,29 @@ export class TokenContractSafetyService {
     chain: string,
     metadata?: { owner?: string | null; name?: string | null; symbol?: string | null },
   ): Promise<ContractSafetyCollectedData> {
-    const rpcUrl = this.getRpcUrl(chain);
-    let bytecode: string | null = null;
-    let bytecodeError: string | null = null;
-
-    if (!rpcUrl) {
-      bytecodeError = 'RPC unavailable';
-    } else {
-      bytecode = await this.getCode(rpcUrl, address);
-      if (!bytecode) {
-        bytecodeError = 'No contract bytecode found.';
-      }
-    }
-
+    const bytecodeResult = await this.fetchBytecode(address, chain);
     const sourceResult = await this.fetchEtherscanSource(address, chain);
+
+    const sourceLookupStatus: SourceLookupStatus = sourceResult.fetchError
+      ? 'error'
+      : sourceResult.verifiedSource
+        ? 'success'
+        : sourceResult.sourceProvider === 'none'
+          ? 'not_checked'
+          : 'not_verified';
+
     const abi = sourceResult.abi;
     const sourceText = sourceResult.sourceText;
     const verifiedSource = sourceResult.verifiedSource;
-    const abiFunctionNames = extractAbiFunctionNames(abi);
+    const rpcUrl = bytecodeResult.provider
+      ? this.getProviderUrlByName(bytecodeResult.provider, chain)
+      : null;
 
     let implementationAddress = sourceResult.implementationAddress;
     let proxyAdminAddress: string | null = null;
     let proxyType: ProxyType = null;
     let isProxy = sourceResult.etherscanProxyFlag;
+    const bytecode = bytecodeResult.bytecode;
 
     if (rpcUrl && bytecode) {
       const slotImpl = await this.getStorageAddress(rpcUrl, address, EIP1967_IMPLEMENTATION_SLOT);
@@ -343,8 +325,7 @@ export class TokenContractSafetyService {
       implementationAddress = sourceResult.implementationAddress;
     }
 
-    const proxyKeywords = detectProxyFromKeywords(sourceResult.contractName, sourceText);
-    if (proxyKeywords) {
+    if (detectProxyFromKeywords(sourceResult.contractName, sourceText)) {
       isProxy = true;
       if (!proxyType) {
         proxyType = inferProxyTypeFromName(sourceResult.contractName, sourceText);
@@ -353,18 +334,25 @@ export class TokenContractSafetyService {
 
     let implementationAbi = abi;
     let implementationSource = sourceText;
+    let implementationScanned = false;
     if (isProxy && implementationAddress && implementationAddress !== address) {
       const implSource = await this.fetchEtherscanSource(implementationAddress, chain);
       if (implSource.abi) {
         implementationAbi = implSource.abi;
         implementationSource = implSource.sourceText ?? implementationSource;
+        implementationScanned = true;
       }
     }
 
     const scanAbi = implementationAbi ?? abi;
     const scanSource = implementationSource ?? sourceText ?? '';
-    const scanAbiNames = extractAbiFunctionNames(scanAbi);
-    const scanText = [scanSource, ...scanAbiNames, sourceResult.contractName ?? ''].join('\n');
+    const parsedAbiFunctions = parseAbiFunctions(scanAbi);
+    const abiFunctionNames = parsedAbiFunctions.map((fn) => fn.name);
+
+    const rpcBytecodeConflict =
+      bytecodeResult.status === 'empty' &&
+      verifiedSource &&
+      Boolean(bytecodeResult.provider);
 
     let ownerAddress = normalizeAddress(metadata?.owner ?? null);
     if (!ownerAddress && rpcUrl) {
@@ -379,14 +367,17 @@ export class TokenContractSafetyService {
       ownerType = await this.resolveOwnerType(rpcUrl, ownerAddress, scanSource);
     }
 
-    const adminAddresses = proxyAdminAddress ? [proxyAdminAddress] : [];
-
     return {
       contractAddress: address,
       chain,
       bytecode,
-      bytecodeError,
+      bytecodeFetchStatus: bytecodeResult.status,
+      bytecodeError: bytecodeResult.error,
+      chainId: bytecodeResult.chainId,
+      rpcProvider: bytecodeResult.provider,
+      rpcBytecodeConflict,
       sourceFetchError: sourceResult.fetchError,
+      sourceLookupStatus,
       verifiedSource,
       sourceProvider: sourceResult.sourceProvider,
       contractName: sourceResult.contractName,
@@ -398,20 +389,18 @@ export class TokenContractSafetyService {
       proxyAdminAddress,
       proxyType,
       isProxy,
+      implementationScanned,
       ownerAddress,
       ownerType,
-      adminAddresses,
-      scanText,
-      abiFunctionNames: scanAbiNames,
+      adminAddresses: proxyAdminAddress ? [proxyAdminAddress] : [],
+      parsedAbiFunctions,
+      abiFunctionNames,
     };
   }
 
-  private getRpcUrl(chain: string): string | null {
+  private getRpcProviders(chain: string): RpcProvider[] {
+    const providers: RpcProvider[] = [];
     const apiKey = this.config.get<string>('ALCHEMY_API_KEY') ?? '';
-    if (apiKey.trim().length === 0) {
-      return null;
-    }
-
     const networkMap: Record<string, string> = {
       ethereum: 'eth-mainnet',
       polygon: 'polygon-mainnet',
@@ -419,7 +408,167 @@ export class TokenContractSafetyService {
       base: 'base-mainnet',
     };
     const network = networkMap[chain.toLowerCase()];
-    return network ? `https://${network}.g.alchemy.com/v2/${apiKey}` : null;
+    if (apiKey.trim().length > 0 && network) {
+      providers.push({
+        name: 'alchemy',
+        url: `https://${network}.g.alchemy.com/v2/${apiKey}`,
+      });
+    }
+
+    const rpcUrls = this.config.get<Record<string, string>>('rpc.urls') ?? {};
+    const fallbackUrl = rpcUrls[chain.toLowerCase()];
+    if (fallbackUrl && !providers.some((provider) => provider.url === fallbackUrl)) {
+      providers.push({ name: 'fallback_rpc', url: fallbackUrl });
+    }
+
+    return providers;
+  }
+
+  private getProviderUrlByName(name: string, chain: string): string | null {
+    return this.getRpcProviders(chain).find((provider) => provider.name === name)?.url ?? null;
+  }
+
+  private async fetchBytecode(address: string, chain: string): Promise<BytecodeFetchResult> {
+    const providers = this.getRpcProviders(chain);
+    const expectedChainId = EXPECTED_CHAIN_IDS[chain.toLowerCase()];
+
+    if (providers.length === 0) {
+      return {
+        bytecode: null,
+        status: 'no_provider',
+        error: 'No RPC provider configured',
+        provider: null,
+        chainId: null,
+      };
+    }
+
+    let lastRpcError: string | null = null;
+
+    for (const provider of providers) {
+      const chainId = await this.getChainId(provider.url);
+      if (expectedChainId && chainId && chainId !== expectedChainId) {
+        this.logger.warn(
+          `[contract-safety] chain mismatch provider=${provider.name} chain=${chain} expected=${expectedChainId} got=${chainId}`,
+        );
+        return {
+          bytecode: null,
+          status: 'chain_mismatch',
+          error: `RPC chain mismatch: expected ${chain} mainnet.`,
+          provider: provider.name,
+          chainId,
+        };
+      }
+
+      for (let attempt = 1; attempt <= BYTECODE_RETRY_ATTEMPTS; attempt += 1) {
+        const codeResult = await this.getCodeOnce(provider.url, address);
+        if (codeResult.kind === 'success') {
+          this.logger.debug(
+            `[contract-safety] bytecode ok provider=${provider.name} chain=${chain} len=${codeResult.bytecode.length}`,
+          );
+          return {
+            bytecode: codeResult.bytecode,
+            status: 'success',
+            error: null,
+            provider: provider.name,
+            chainId,
+          };
+        }
+        if (codeResult.kind === 'empty') {
+          return {
+            bytecode: null,
+            status: 'empty',
+            error: `No contract bytecode found at ${address} on ${chain}.`,
+            provider: provider.name,
+            chainId,
+          };
+        }
+
+        lastRpcError = codeResult.error;
+        if (attempt < BYTECODE_RETRY_ATTEMPTS) {
+          await sleep(BYTECODE_RETRY_BACKOFF_MS * attempt);
+        }
+      }
+    }
+
+    return {
+      bytecode: null,
+      status: 'rpc_error',
+      error: lastRpcError ?? 'Bytecode fetch failed due to RPC/provider error',
+      provider: providers[providers.length - 1]?.name ?? null,
+      chainId: null,
+    };
+  }
+
+  private async getChainId(rpcUrl: string): Promise<string | null> {
+    try {
+      const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_chainId',
+          params: [],
+          id: 1,
+        }),
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const payload = (await response.json()) as { result?: string; error?: { message?: string } };
+      if (payload.error?.message) {
+        return null;
+      }
+      return typeof payload.result === 'string' ? payload.result.toLowerCase() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async getCodeOnce(
+    rpcUrl: string,
+    address: string,
+  ): Promise<
+    | { kind: 'success'; bytecode: string }
+    | { kind: 'empty' }
+    | { kind: 'rpc_error'; error: string }
+  > {
+    try {
+      const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_getCode',
+          params: [address, 'latest'],
+          id: 1,
+        }),
+      });
+
+      if (!response.ok) {
+        return { kind: 'rpc_error', error: `RPC HTTP ${response.status}` };
+      }
+
+      const payload = (await response.json()) as {
+        result?: string;
+        error?: { message?: string };
+      };
+
+      if (payload.error?.message) {
+        return { kind: 'rpc_error', error: payload.error.message };
+      }
+
+      if (typeof payload.result !== 'string') {
+        return { kind: 'rpc_error', error: 'Malformed eth_getCode response' };
+      }
+
+      if (payload.result === '0x' || payload.result === '0x0') {
+        return { kind: 'empty' };
+      }
+
+      return { kind: 'success', bytecode: payload.result };
+    } catch (err: unknown) {
+      return { kind: 'rpc_error', error: getErrorMessage(err) };
+    }
   }
 
   private getEtherscanChainId(chain: string): string | null {
@@ -436,37 +585,7 @@ export class TokenContractSafetyService {
     return chainId === '8453' || chainId === '56';
   }
 
-  private async getCode(rpcUrl: string, address: string): Promise<string | null> {
-    try {
-      const response = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'eth_getCode',
-          params: [address, 'latest'],
-          id: 1,
-        }),
-      });
-      if (!response.ok) {
-        return null;
-      }
-      const payload = (await response.json()) as { result?: string };
-      if (!payload.result || payload.result === '0x' || payload.result === '0x0') {
-        return null;
-      }
-      return payload.result;
-    } catch (err: unknown) {
-      this.logger.warn(`eth_getCode failed: ${getErrorMessage(err)}`);
-      return null;
-    }
-  }
-
-  private async ethCall(
-    rpcUrl: string,
-    to: string,
-    data: string,
-  ): Promise<string | null> {
+  private async ethCall(rpcUrl: string, to: string, data: string): Promise<string | null> {
     try {
       const response = await fetch(rpcUrl, {
         method: 'POST',
@@ -532,15 +651,12 @@ export class TokenContractSafetyService {
     ownerAddress: string,
     sourceText: string,
   ): Promise<OwnerType> {
-    const code = await this.getCode(rpcUrl, ownerAddress);
-    if (!code) {
+    const codeResult = await this.getCodeOnce(rpcUrl, ownerAddress);
+    if (codeResult.kind !== 'success') {
       return 'eoa';
     }
     const lowerSource = sourceText.toLowerCase();
-    if (
-      /gnosissafe|gnosis safe|safeproxy|multisig/i.test(lowerSource) ||
-      /gnosissafe|safeproxy/i.test(ownerAddress)
-    ) {
+    if (/gnosissafe|gnosis safe|safeproxy|multisig/i.test(lowerSource)) {
       return 'multisig';
     }
     return 'contract';
@@ -672,49 +788,74 @@ export function buildContractSafetyReport(
   const flags: ContractSafetyFlag[] = [];
   const positiveSignals: ContractSafetyPositiveSignal[] = [];
 
-  if (data.bytecodeError === 'No contract bytecode found.') {
-    return {
+  const debugMeta: ContractSafetyDebugMeta = {
+    chainId: data.chainId,
+    bytecodeLength: data.bytecode ? Math.max(0, (data.bytecode.length - 2) / 2) : null,
+    sourceLookupStatus: data.sourceLookupStatus,
+    scannedAddress: data.contractAddress,
+    implementationScanned: data.implementationScanned,
+    rpcProvider: data.rpcProvider,
+  };
+
+  if (data.bytecodeFetchStatus === 'chain_mismatch') {
+    return buildBlockedReport(data, checkedAt, debugMeta, {
       status: 'error',
-      score: null,
-      riskLevel: 'unknown',
-      verdict: 'Contract safety could not be verified',
-      confidence: 'low',
-      verifiedSource: false,
-      sourceProvider: data.sourceProvider,
-      contractType: 'unknown',
-      isProxy: false,
-      proxyType: null,
-      implementationAddress: null,
-      proxyAdminAddress: null,
-      owner: {
-        ownerAddress: null,
-        isRenounced: null,
-        ownerType: null,
-        adminAddresses: [],
-      },
-      permissions: createDefaultPermissions(),
-      taxes: { status: 'unknown', buyTaxPct: null, sellTaxPct: null, transferTaxPct: null, evidence: [] },
-      honeypot: { status: 'not_checked', reason: null, evidence: [] },
-      flags: [],
-      positiveSignals: [],
-      unknowns: ['No contract bytecode found at address'],
-      limitations: ['No contract bytecode found.'],
-      checkedAt,
-    };
+      limitations: [
+        data.bytecodeError ?? 'RPC chain mismatch: expected ethereum mainnet.',
+      ],
+      unknowns: ['RPC chain mismatch prevented bytecode verification'],
+    });
   }
 
-  const hasAbi = data.abi !== null && data.abiFunctionNames.length > 0;
+  if (data.bytecodeFetchStatus === 'rpc_error' || data.bytecodeFetchStatus === 'no_provider') {
+    limitations.push(data.bytecodeError ?? 'Bytecode fetch failed due to RPC/provider error');
+    unknowns.push('Bytecode fetch failed due to RPC/provider error');
+  }
+
+  if (data.bytecodeFetchStatus === 'empty' && !data.verifiedSource) {
+    return buildBlockedReport(data, checkedAt, debugMeta, {
+      status: 'error',
+      limitations: [
+        data.bytecodeError ??
+          `No contract bytecode found at ${data.contractAddress} on ${data.chain}.`,
+      ],
+      unknowns: [
+        `No contract bytecode found at ${data.contractAddress} on ${data.chain} (checkedAt ${checkedAt})`,
+      ],
+    });
+  }
+
+  if (data.rpcBytecodeConflict) {
+    unknowns.push('RPC bytecode result conflicts with verified source lookup');
+    limitations.push(
+      'RPC returned empty bytecode but explorer source is verified; treating scan as partial.',
+    );
+    flags.push({
+      severity: 'medium',
+      title: 'RPC Bytecode Conflict',
+      description:
+        'Explorer shows verified source but RPC returned empty bytecode. Permission scan uses source/ABI only.',
+    });
+  }
+
+  const hasAbi = data.parsedAbiFunctions.length > 0;
   const hasSource = Boolean(data.sourceText && data.sourceText.length > 0);
   const canScanPermissions = hasAbi || hasSource;
 
-  const permissions = scanPermissions(data.scanText, data.abiFunctionNames, canScanPermissions);
+  const permissions = scanPermissions(
+    data.parsedAbiFunctions,
+    data.sourceText,
+    canScanPermissions,
+    data.verifiedSource,
+  );
+
   const ownerAddress = data.ownerAddress;
   const isRenounced =
     ownerAddress === null
       ? null
       : ownerAddress === ZERO_ADDRESS || ownerAddress === DEAD_ADDRESS;
 
-  const taxes = scanTaxes(data.scanText, canScanPermissions);
+  const taxes = scanTaxes(permissions.taxChange, data.verifiedSource);
   const honeypot = {
     status: 'not_checked' as const,
     reason: null,
@@ -756,7 +897,7 @@ export function buildContractSafetyReport(
     }
     if (!data.implementationAddress) {
       flags.push({
-        severity: 'high',
+        severity: data.bytecodeFetchStatus === 'rpc_error' ? 'medium' : 'high',
         title: 'Unknown Implementation Contract',
         description: 'Proxy detected but implementation address could not be resolved.',
       });
@@ -779,7 +920,19 @@ export function buildContractSafetyReport(
     });
   }
 
-  applyPermissionFlags(permissions, flags, positiveSignals);
+  const effectivePermissions = applyEffectivePermissionRisk(
+    permissions,
+    isRenounced,
+    data.verifiedSource,
+  );
+
+  applyPermissionFlags(
+    effectivePermissions,
+    flags,
+    positiveSignals,
+    isRenounced,
+    data.verifiedSource,
+  );
 
   if (data.ownerType === 'multisig' || data.ownerType === 'contract') {
     positiveSignals.push({
@@ -801,10 +954,10 @@ export function buildContractSafetyReport(
     implementationAddress: data.implementationAddress,
     implementationVerified: data.isProxy && Boolean(data.implementationAddress) && data.verifiedSource,
     proxyAdminAddress: data.proxyAdminAddress,
-    proxyAdminType: null,
-    permissions,
+    permissions: effectivePermissions,
     honeypot,
-    sellRestrictionDetected: detectSellRestriction(data.scanText),
+    sellRestrictionDetected: detectSellRestriction(data.sourceText),
+    bytecodeFetchStatus: data.bytecodeFetchStatus,
   });
 
   if (scoreResult.hardSevere) {
@@ -815,22 +968,31 @@ export function buildContractSafetyReport(
     });
   }
 
-  const riskLevel = scoreResult.score === null ? 'unknown' : scoreResult.riskLevel;
-  const verdict = resolveVerdict(riskLevel, flags, data.verifiedSource, data.isProxy);
+  const riskLevel =
+    scoreResult.score === null ||
+    data.bytecodeFetchStatus === 'rpc_error' ||
+    data.bytecodeFetchStatus === 'no_provider'
+      ? 'unknown'
+      : scoreResult.riskLevel;
+  const verdict = resolveVerdict(
+    riskLevel,
+    flags,
+    effectivePermissions,
+    data.verifiedSource,
+    data.isProxy,
+    isRenounced,
+  );
 
   let confidence: ContractSafetyConfidence = 'low';
   if (data.verifiedSource && hasAbi) {
     confidence = 'high';
-  } else if (hasAbi || hasSource || data.bytecode) {
+  } else if (hasAbi || (hasSource && data.verifiedSource)) {
     confidence = 'medium';
   }
 
   if (!canScanPermissions) {
     unknowns.push('ABI/source unavailable; permission scan incomplete');
     limitations.push('Permission scan limited without verified ABI/source.');
-  }
-  if (data.bytecodeError) {
-    limitations.push('RPC bytecode fetch was incomplete.');
   }
   if (data.sourceFetchError) {
     limitations.push(`Source lookup issue: ${data.sourceFetchError}`);
@@ -839,13 +1001,19 @@ export function buildContractSafetyReport(
     'Contract safety is deterministic and based on available bytecode, ABI, and source only.',
   );
 
-  const contractType: ContractType = data.isProxy ? 'proxy' : data.bytecode ? 'erc20' : 'unknown';
+  const contractType: ContractType = data.isProxy
+    ? 'proxy'
+    : data.bytecode || data.verifiedSource
+      ? 'erc20'
+      : 'unknown';
 
   let status: ContractSafetyStatus = 'done';
-  if (data.bytecodeError || !canScanPermissions) {
-    status = 'partial';
-  }
-  if (data.bytecodeError === 'RPC unavailable') {
+  if (
+    data.bytecodeFetchStatus === 'rpc_error' ||
+    data.bytecodeFetchStatus === 'no_provider' ||
+    data.rpcBytecodeConflict ||
+    !canScanPermissions
+  ) {
     status = 'partial';
   }
 
@@ -868,7 +1036,7 @@ export function buildContractSafetyReport(
       ownerType: data.ownerType,
       adminAddresses: data.adminAddresses,
     },
-    permissions,
+    permissions: effectivePermissions,
     taxes,
     honeypot,
     flags,
@@ -876,173 +1044,502 @@ export function buildContractSafetyReport(
     unknowns,
     limitations,
     checkedAt,
+    debugMeta,
+  };
+}
+
+function buildBlockedReport(
+  data: ContractSafetyCollectedData,
+  checkedAt: string,
+  debugMeta: ContractSafetyDebugMeta,
+  options: { status: ContractSafetyStatus; limitations: string[]; unknowns: string[] },
+): ContractSafetyReport {
+  return {
+    status: options.status,
+    score: null,
+    riskLevel: 'unknown',
+    verdict: 'Contract safety could not be verified',
+    confidence: 'low',
+    verifiedSource: data.verifiedSource,
+    sourceProvider: data.sourceProvider,
+    contractType: 'unknown',
+    isProxy: false,
+    proxyType: null,
+    implementationAddress: null,
+    proxyAdminAddress: null,
+    owner: {
+      ownerAddress: null,
+      isRenounced: null,
+      ownerType: null,
+      adminAddresses: [],
+    },
+    permissions: createDefaultPermissions(),
+    taxes: {
+      status: 'unknown',
+      buyTaxPct: null,
+      sellTaxPct: null,
+      transferTaxPct: null,
+      evidence: [],
+    },
+    honeypot: { status: 'not_checked', reason: null, evidence: [] },
+    flags: [],
+    positiveSignals: [],
+    unknowns: options.unknowns,
+    limitations: options.limitations,
+    checkedAt,
+    debugMeta,
   };
 }
 
 function scanPermissions(
-  scanText: string,
-  abiFunctionNames: string[],
+  abiFunctions: ParsedAbiFunction[],
+  sourceText: string | null,
   canScan: boolean,
+  verifiedSource: boolean,
 ): ContractSafetyReport['permissions'] {
-  const combined = `${scanText}\n${abiFunctionNames.join('\n')}`;
   const permissions = createDefaultPermissions();
-
   if (!canScan) {
     const reason = 'ABI/source unavailable';
-    for (const key of Object.keys(permissions) as Array<keyof typeof permissions>) {
+    for (const key of Object.keys(permissions) as PermissionKey[]) {
       permissions[key] = emptyPermission(reason);
     }
     return permissions;
   }
 
-  const entries: Array<keyof typeof permissions> = [
-    'mint',
-    'burn',
-    'pause',
-    'blacklist',
-    'whitelist',
-    'tradingGate',
-    'taxChange',
-    'maxTxOrMaxWallet',
-    'upgradeability',
-    'rescueOrWithdraw',
+  const sourceWithoutComments = sourceText ? stripSolidityComments(sourceText) : '';
+  const sourceHints = extractExternalSourceFunctions(sourceWithoutComments);
+
+  const rules: Array<{ key: PermissionKey; matcher: (fn: ParsedAbiFunction) => boolean }> = [
+    { key: 'mint', matcher: isExternalMintFunction },
+    { key: 'burn', matcher: isExternalBurnFunction },
+    { key: 'pause', matcher: isExternalPauseFunction },
+    { key: 'blacklist', matcher: isExternalBlacklistFunction },
+    { key: 'whitelist', matcher: isExternalWhitelistFunction },
+    { key: 'tradingGate', matcher: isExternalTradingGateFunction },
+    { key: 'taxChange', matcher: isExternalTaxFunction },
+    { key: 'maxTxOrMaxWallet', matcher: isExternalMaxLimitFunction },
+    { key: 'upgradeability', matcher: isExternalUpgradeFunction },
+    { key: 'rescueOrWithdraw', matcher: isExternalRescueFunction },
   ];
 
-  for (const key of entries) {
-    permissions[key] = detectPermission(key, combined, abiFunctionNames);
+  for (const rule of rules) {
+    permissions[rule.key] = detectPermissionFromEvidence(
+      rule.key,
+      abiFunctions.filter(rule.matcher),
+      sourceWithoutComments,
+      sourceHints,
+      verifiedSource,
+    );
   }
 
   return permissions;
 }
 
-function detectPermission(
-  key: keyof typeof PERMISSION_PATTERNS,
-  text: string,
-  abiNames: string[],
+function detectPermissionFromEvidence(
+  key: PermissionKey,
+  abiMatches: ParsedAbiFunction[],
+  sourceWithoutComments: string,
+  sourceHints: SourceFunctionHint[],
+  verifiedSource: boolean,
 ): PermissionSignal {
-  const patterns = PERMISSION_PATTERNS[key];
-  const evidence: string[] = [];
-
-  for (const name of abiNames) {
-    for (const pattern of [...patterns.clear, ...patterns.unclear]) {
-      if (pattern.test(name)) {
-        evidence.push(`ABI function: ${name}`);
-      }
-    }
-  }
-
-  const clearMatch = patterns.clear.some((pattern) => pattern.test(text));
-  const unclearMatch = patterns.unclear.some((pattern) => pattern.test(text));
-
-  if (clearMatch || evidence.length > 0) {
-    const severeKeys = new Set(['mint', 'blacklist', 'tradingGate', 'taxChange']);
-    const mediumKeys = new Set(['pause', 'maxTxOrMaxWallet', 'upgradeability', 'rescueOrWithdraw']);
-    let risk: PermissionRisk = 'medium';
-    if (severeKeys.has(key)) {
-      risk = 'high';
-    } else if (mediumKeys.has(key)) {
-      risk = 'medium';
-    } else if (key === 'burn' || key === 'whitelist') {
-      risk = 'low';
-    } else {
-      risk = 'medium';
-    }
+  if (abiMatches.length > 0) {
+    const evidence = abiMatches.map((fn) =>
+      formatAbiEvidence(fn, key, inferAccessHint(sourceWithoutComments, fn.name)),
+    );
+    const risk = resolvePermissionRisk(key, 'abi', abiMatches);
     return {
       detected: true,
       risk,
-      reason: `${key} capability pattern detected`,
-      evidence: evidence.length > 0 ? evidence : [`Pattern match in source/ABI for ${key}`],
+      reason: `External/public ${key} capability found in ABI`,
+      evidence,
     };
   }
 
-  if (unclearMatch) {
+  if (key === 'mint') {
+    const internalMintOnly =
+      /\bfunction\s+_mint\b/i.test(sourceWithoutComments) && abiMatches.length === 0;
+    if (internalMintOnly) {
+      return {
+        detected: false,
+        risk: 'none',
+        reason: 'Only internal _mint found; not treated as external mint permission',
+        evidence: ['Source contains internal _mint only; not treated as external mint permission'],
+      };
+    }
+  }
+
+  const weakSourceHints = sourceHints.filter((hint) => matchesPermissionKey(key, hint.name));
+  if (weakSourceHints.length > 0 && !verifiedSource) {
     return {
-      detected: true,
-      risk: 'medium',
-      reason: `${key} pattern detected with unclear externality`,
-      evidence: [`Unclear ${key} pattern in source`],
+      detected: null,
+      risk: 'unknown',
+      reason: `${key} term found in source without verified ABI/external evidence`,
+      evidence: weakSourceHints.map(
+        (hint) =>
+          `Source text match for ${hint.name}; visibility ${hint.visibility}; not treated as confirmed external permission`,
+      ),
     };
   }
 
+  if (hasWeakSourceTextOnly(key, sourceWithoutComments) && verifiedSource) {
+    return {
+      detected: null,
+      risk: 'low',
+      reason: `${key}-like term in source only; no external ABI evidence`,
+      evidence: [
+        `Source contains ${key}-like terms without external/public ABI function; not treated as active admin risk`,
+      ],
+    };
+  }
+
+  const negativeTitle =
+    key === 'mint' ? 'No external mint function detected' : `No ${key} pattern detected`;
   return {
     detected: false,
     risk: 'none',
-    reason: `No ${key} pattern detected`,
+    reason: negativeTitle,
     evidence: [],
   };
+}
+
+function formatAbiEvidence(
+  fn: ParsedAbiFunction,
+  key: PermissionKey,
+  accessHint: string,
+): string {
+  const visibility = fn.isStateChanging ? 'external/public state-changing' : 'external/public view';
+  return `ABI ${visibility} function ${fn.signature} matched ${key} control pattern; access ${accessHint}`;
+}
+
+function resolvePermissionRisk(
+  key: PermissionKey,
+  source: 'abi' | 'source_text',
+  abiMatches: ParsedAbiFunction[],
+): PermissionRisk {
+  if (source !== 'abi') {
+    return 'unknown';
+  }
+  const stateChanging = abiMatches.some((fn) => fn.isStateChanging);
+  if (!stateChanging) {
+    return 'low';
+  }
+
+  const highKeys = new Set<PermissionKey>(['mint', 'blacklist', 'tradingGate', 'taxChange']);
+  const mediumKeys = new Set<PermissionKey>([
+    'pause',
+    'maxTxOrMaxWallet',
+    'upgradeability',
+    'rescueOrWithdraw',
+  ]);
+
+  if (highKeys.has(key)) {
+    return 'high';
+  }
+  if (mediumKeys.has(key)) {
+    return 'medium';
+  }
+  return 'low';
+}
+
+function isExternalMintFunction(fn: ParsedAbiFunction): boolean {
+  if (!fn.isStateChanging) {
+    return false;
+  }
+  return /^(owner)?mint$|increasesupply$|^issue$/i.test(fn.name) && !fn.name.startsWith('_');
+}
+
+function isExternalBurnFunction(fn: ParsedAbiFunction): boolean {
+  return fn.isStateChanging && /^(burn|burnfrom)$/i.test(fn.name);
+}
+
+function isExternalPauseFunction(fn: ParsedAbiFunction): boolean {
+  return fn.isStateChanging && /^(pause|unpause)$/i.test(fn.name);
+}
+
+function isExternalBlacklistFunction(fn: ParsedAbiFunction): boolean {
+  if (!fn.isStateChanging) {
+    return false;
+  }
+  return /^(set)?blacklist$|setbotlist$|antibot$|addblacklist$/i.test(fn.name);
+}
+
+function isExternalWhitelistFunction(fn: ParsedAbiFunction): boolean {
+  return (
+    fn.isStateChanging &&
+    /^(set)?whitelist$|excludefrommaxtransaction$/i.test(fn.name)
+  );
+}
+
+function isExternalTradingGateFunction(fn: ParsedAbiFunction): boolean {
+  return (
+    fn.isStateChanging &&
+    /^(enabletrading|opentrading|settradingenabled)$/i.test(fn.name)
+  );
+}
+
+function isExternalTaxFunction(fn: ParsedAbiFunction): boolean {
+  return (
+    fn.isStateChanging &&
+    /^(settax|setfees|setbuyfee|setsellfee|settransferfee|updatefees)$/i.test(fn.name)
+  );
+}
+
+function isExternalMaxLimitFunction(fn: ParsedAbiFunction): boolean {
+  return (
+    fn.isStateChanging &&
+    /^(setmaxtx|setmaxwallet|setmaxtransactionamount)$/i.test(fn.name)
+  );
+}
+
+function isExternalUpgradeFunction(fn: ParsedAbiFunction): boolean {
+  return (
+    fn.isStateChanging &&
+    /^(upgradeto|upgradetoandcall)$/i.test(fn.name)
+  );
+}
+
+function isExternalRescueFunction(fn: ParsedAbiFunction): boolean {
+  return (
+    fn.isStateChanging &&
+    /^(rescuetokens|withdrawtoken|recovererc20|sweep|rescueeth)$/i.test(fn.name)
+  );
+}
+
+function hasWeakSourceTextOnly(key: PermissionKey, source: string): boolean {
+  const patterns: Record<PermissionKey, RegExp> = {
+    mint: /(?<!_)\bmint\b/i,
+    burn: /\bburn\b/i,
+    pause: /\bpaused\b/i,
+    blacklist: /\bblacklist\b|\bbotlist\b|\bantibot\b/i,
+    whitelist: /\bwhitelist\b/i,
+    tradingGate: /\btradingenabled\b|\benabletrading\b/i,
+    taxChange: /\btaxwallet\b|\bfee\b/i,
+    maxTxOrMaxWallet: /\bmaxwallet\b|\bmaxtransactionamount\b/i,
+    upgradeability: /\bproxyadmin\b|\bimplementation\b/i,
+    rescueOrWithdraw: /\brescue\b|\bsweep\b/i,
+  };
+  return patterns[key].test(source);
+}
+
+function matchesPermissionKey(key: PermissionKey, name: string): boolean {
+  const lowered = name.toLowerCase();
+  const map: Record<PermissionKey, RegExp> = {
+    mint: /mint|increasesupply|issue/,
+    burn: /burn/,
+    pause: /pause/,
+    blacklist: /blacklist|botlist|antibot/,
+    whitelist: /whitelist/,
+    tradingGate: /trading|enabletrading/,
+    taxChange: /tax|fee/,
+    maxTxOrMaxWallet: /maxwallet|maxtx/,
+    upgradeability: /upgrade|implementation|proxyadmin/,
+    rescueOrWithdraw: /rescue|sweep|recover/,
+  };
+  return map[key].test(lowered);
+}
+
+interface SourceFunctionHint {
+  name: string;
+  visibility: string;
+}
+
+function extractExternalSourceFunctions(source: string): SourceFunctionHint[] {
+  const hints: SourceFunctionHint[] = [];
+  const regex =
+    /function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*(public|external)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(source)) !== null) {
+    hints.push({ name: match[1], visibility: match[2] });
+  }
+  return hints;
+}
+
+function inferAccessHint(source: string, functionName: string): string {
+  const pattern = new RegExp(
+    `function\\s+${functionName}\\s*\\([^)]*\\)[^{;]*?(onlyOwner|onlyRole|onlyAdmin|requiresRole)`,
+    'i',
+  );
+  const match = source.match(pattern);
+  if (match?.[1]) {
+    return match[1].toLowerCase();
+  }
+  return 'unknown';
+}
+
+function hasOnlyOwnerAccess(signal: PermissionSignal): boolean {
+  return signal.evidence.some((line) => /access\s+onlyowner/i.test(line));
+}
+
+function isRenouncedOnlyOwnerPermission(
+  signal: PermissionSignal,
+  isRenounced: boolean | null,
+): boolean {
+  return signal.detected === true && isRenounced === true && hasOnlyOwnerAccess(signal);
+}
+
+function applyEffectivePermissionRisk(
+  permissions: ContractSafetyReport['permissions'],
+  isRenounced: boolean | null,
+  verifiedSource: boolean,
+): ContractSafetyReport['permissions'] {
+  if (isRenounced !== true) {
+    return permissions;
+  }
+
+  const adminKeys: PermissionKey[] = [
+    'mint',
+    'blacklist',
+    'pause',
+    'tradingGate',
+    'taxChange',
+  ];
+  const updated = { ...permissions };
+
+  for (const key of adminKeys) {
+    const signal = permissions[key];
+    if (!isRenouncedOnlyOwnerPermission(signal, isRenounced)) {
+      continue;
+    }
+    updated[key] = {
+      ...signal,
+      risk: 'medium',
+      reason: `${key} capability exists with onlyOwner access, but ownership appears renounced; effective admin risk may be reduced`,
+    };
+  }
+
+  return updated;
 }
 
 function applyPermissionFlags(
   permissions: ContractSafetyReport['permissions'],
   flags: ContractSafetyFlag[],
   positives: ContractSafetyPositiveSignal[],
+  isRenounced: boolean | null,
+  verifiedSource: boolean,
 ): void {
-  if (permissions.mint.detected) {
-    flags.push({
-      severity: permissions.mint.risk === 'high' ? 'high' : 'medium',
-      title: 'Mint Function Detected',
-      description: 'Contract appears to expose mint or supply-increase capability.',
-      evidence: permissions.mint.evidence.join('; ') || undefined,
-    });
+  if (permissions.mint.detected === true && permissions.mint.risk !== 'low') {
+    if (isRenouncedOnlyOwnerPermission(permissions.mint, isRenounced)) {
+      flags.push({
+        severity: verifiedSource ? 'low' : 'medium',
+        title: 'Mint Function Exists',
+        description:
+          'A mint function exists in the contract ABI, but ownership appears renounced, which may reduce active admin-control risk. Review source and ownership state before relying on this.',
+        evidence: permissions.mint.evidence.join('; ') || undefined,
+      });
+    } else {
+      flags.push({
+        severity: permissions.mint.risk === 'high' ? 'high' : 'medium',
+        title: 'Mint Function Detected',
+        description: 'Contract exposes an external/public mint or supply-increase capability.',
+        evidence: permissions.mint.evidence.join('; ') || undefined,
+      });
+    }
   } else if (permissions.mint.detected === false) {
     positives.push({
       strength: 'medium',
-      title: 'No Mint Function Detected',
-      description: 'No mint or supply-increase function was detected in available ABI/source.',
+      title: 'No external mint function detected',
+      description: 'No external/public mint function was detected in the verified ABI.',
+      evidence: permissions.mint.evidence.join('; ') || undefined,
     });
   }
 
-  if (permissions.blacklist.detected) {
-    flags.push({
-      severity: 'high',
-      title: 'Blacklist Controls Detected',
-      description: 'Blacklist or antibot controls appear present in the contract.',
-      evidence: permissions.blacklist.evidence.join('; ') || undefined,
-    });
+  if (permissions.blacklist.detected === true) {
+    if (isRenouncedOnlyOwnerPermission(permissions.blacklist, isRenounced)) {
+      flags.push({
+        severity: verifiedSource ? 'low' : 'medium',
+        title: 'Blacklist Function Exists',
+        description:
+          'A blacklist function exists in the contract ABI, but ownership appears renounced, which may reduce active admin-control risk. Review source and ownership state before relying on this.',
+        evidence: permissions.blacklist.evidence.join('; ') || undefined,
+      });
+    } else if (permissions.blacklist.risk !== 'low') {
+      flags.push({
+        severity: permissions.blacklist.risk === 'high' ? 'high' : 'medium',
+        title: 'Blacklist Controls Detected',
+        description: 'External/public blacklist or antibot controls appear present.',
+        evidence: permissions.blacklist.evidence.join('; ') || undefined,
+      });
+    }
   } else if (permissions.blacklist.detected === false) {
     positives.push({
       strength: 'medium',
       title: 'No Blacklist Function Detected',
-      description: 'No blacklist control pattern was detected in available ABI/source.',
+      description: 'No external/public blacklist control was detected in the verified ABI.',
     });
   }
 
-  if (permissions.pause.detected || permissions.tradingGate.detected) {
+  const pauseRenounced = isRenouncedOnlyOwnerPermission(permissions.pause, isRenounced);
+  const gateRenounced = isRenouncedOnlyOwnerPermission(permissions.tradingGate, isRenounced);
+  if (
+    (permissions.pause.detected === true && permissions.pause.risk !== 'low') ||
+    (permissions.tradingGate.detected === true && permissions.tradingGate.risk !== 'low')
+  ) {
+    const renouncedInactive = pauseRenounced || gateRenounced;
     flags.push({
-      severity: 'medium',
-      title: 'Trading Pause / Gate Controls Detected',
-      description: 'Pause or trading gate controls appear present.',
+      severity: renouncedInactive ? (verifiedSource ? 'low' : 'medium') : 'medium',
+      title: renouncedInactive
+        ? 'Trading Pause / Gate Function Exists'
+        : 'Trading Pause / Gate Controls Detected',
+      description: renouncedInactive
+        ? 'Pause or trading gate functions exist in the ABI, but ownership appears renounced, which may reduce active admin-control risk. Review source and ownership state before relying on this.'
+        : 'External/public pause or trading gate controls appear present.',
+      evidence: [
+        ...permissions.pause.evidence,
+        ...permissions.tradingGate.evidence,
+      ].join('; ') || undefined,
     });
   }
 
-  if (permissions.taxChange.detected) {
-    flags.push({
-      severity: 'high',
-      title: 'Tax or Fee Controls Detected',
-      description: 'Tax or fee change functions appear present in the contract.',
-    });
+  if (permissions.taxChange.detected === true && permissions.taxChange.risk !== 'low') {
+    if (isRenouncedOnlyOwnerPermission(permissions.taxChange, isRenounced)) {
+      flags.push({
+        severity: verifiedSource ? 'low' : 'medium',
+        title: 'Tax or Fee Function Exists',
+        description:
+          'Tax or fee setter functions exist in the ABI, but ownership appears renounced, which may reduce active admin-control risk. Review source and ownership state before relying on this.',
+        evidence: permissions.taxChange.evidence.join('; ') || undefined,
+      });
+    } else {
+      flags.push({
+        severity: permissions.taxChange.risk === 'high' ? 'high' : 'medium',
+        title: 'Tax or Fee Controls Detected',
+        description: 'External/public tax or fee setter functions appear present.',
+        evidence: permissions.taxChange.evidence.join('; ') || undefined,
+      });
+    }
   } else if (permissions.taxChange.detected === false) {
     positives.push({
       strength: 'low',
       title: 'No Tax Controls Detected',
-      description: 'No tax/fee change function pattern was detected in available ABI/source.',
+      description: 'No external/public tax/fee setter was detected in the verified ABI.',
     });
   }
 
-  if (permissions.maxTxOrMaxWallet.detected) {
+  if (permissions.maxTxOrMaxWallet.detected === true) {
     flags.push({
       severity: 'low',
       title: 'Max Wallet / Max Transaction Controls',
-      description: 'Max transaction or max wallet controls appear present.',
+      description: 'External/public max wallet or max transaction controls appear present.',
+      evidence: permissions.maxTxOrMaxWallet.evidence.join('; ') || undefined,
+    });
+  }
+
+  if (permissions.rescueOrWithdraw.detected === true) {
+    flags.push({
+      severity: permissions.rescueOrWithdraw.risk === 'high' ? 'medium' : 'low',
+      title: 'Rescue / Withdraw Functions Present',
+      description:
+        'Contract includes rescue/withdraw style functions; review whether they can affect user funds or LP balances.',
+      evidence: permissions.rescueOrWithdraw.evidence.join('; ') || undefined,
     });
   }
 }
 
 function scanTaxes(
-  text: string,
-  canScan: boolean,
+  taxPermission: PermissionSignal,
+  verifiedSource: boolean,
 ): ContractSafetyReport['taxes'] {
-  if (!canScan) {
+  if (!verifiedSource) {
     return {
       status: 'unknown',
       buyTaxPct: null,
@@ -1051,19 +1548,30 @@ function scanTaxes(
       evidence: [],
     };
   }
-
-  const hasTaxPattern = PERMISSION_PATTERNS.taxChange.clear.some((pattern) => pattern.test(text));
+  if (taxPermission.detected === true && taxPermission.risk !== 'low') {
+    return {
+      status: 'detected',
+      buyTaxPct: null,
+      sellTaxPct: null,
+      transferTaxPct: null,
+      evidence: taxPermission.evidence,
+    };
+  }
   return {
-    status: hasTaxPattern ? 'detected' : 'not_detected',
+    status: 'not_detected',
     buyTaxPct: null,
     sellTaxPct: null,
     transferTaxPct: null,
-    evidence: hasTaxPattern ? ['Tax/fee function names present; live rates not simulated'] : [],
+    evidence: [],
   };
 }
 
-function detectSellRestriction(text: string): boolean {
-  return /\bcannot\s+sell\b|\bsell\s+disabled\b|\bantiSell\b|\bblocks?\s+sell/i.test(text);
+function detectSellRestriction(sourceText: string | null): boolean {
+  if (!sourceText) {
+    return false;
+  }
+  const stripped = stripSolidityComments(sourceText);
+  return /\bcannot\s+sell\b|\bsell\s+disabled\b|\bantisell\b|\bblocks?\s+sell/i.test(stripped);
 }
 
 interface ScoreInput {
@@ -1077,10 +1585,10 @@ interface ScoreInput {
   implementationAddress: string | null;
   implementationVerified: boolean;
   proxyAdminAddress: string | null;
-  proxyAdminType: OwnerType;
   permissions: ContractSafetyReport['permissions'];
   honeypot: ContractSafetyReport['honeypot'];
   sellRestrictionDetected: boolean;
+  bytecodeFetchStatus: BytecodeFetchStatus;
 }
 
 function scoreContractSafety(input: ScoreInput): {
@@ -1088,6 +1596,13 @@ function scoreContractSafety(input: ScoreInput): {
   riskLevel: ContractSafetyRiskLevel;
   hardSevere: boolean;
 } {
+  if (
+    input.bytecodeFetchStatus === 'rpc_error' ||
+    input.bytecodeFetchStatus === 'no_provider'
+  ) {
+    return { score: null, riskLevel: 'unknown', hardSevere: false };
+  }
+
   if (input.honeypot.status === 'fail') {
     return { score: clamp(100 - 35, 0, 100), riskLevel: 'severe', hardSevere: true };
   }
@@ -1130,38 +1645,13 @@ function scoreContractSafety(input: ScoreInput): {
     }
   }
 
-  if (input.permissions.mint.detected === true) {
-    score -= input.permissions.mint.risk === 'high' ? 25 : 12;
-  } else if (input.permissions.mint.detected === null) {
-    score -= 0;
-  }
-
-  if (input.permissions.blacklist.detected === true) {
-    score -= input.permissions.blacklist.risk === 'high' ? 20 : 10;
-  }
-
-  if (input.permissions.pause.detected === true) {
-    score -= 10;
-  }
-  if (input.permissions.tradingGate.detected === true) {
-    score -= 15;
-  }
-
-  if (input.permissions.taxChange.detected === true) {
-    score -= 18;
-  } else if (input.permissions.taxChange.detected === null) {
-    score -= 0;
-  } else if (input.permissions.taxChange.risk === 'medium') {
-    score -= 8;
-  }
-
-  if (input.permissions.maxTxOrMaxWallet.detected === true) {
-    score -= 8;
-  }
-
-  if (input.permissions.rescueOrWithdraw.detected === true) {
-    score -= 5;
-  }
+  score -= permissionPenalty(input.permissions.mint, 25, 12, 0);
+  score -= permissionPenalty(input.permissions.blacklist, 20, 10, 0);
+  score -= permissionPenalty(input.permissions.pause, 10, 5, 0);
+  score -= permissionPenalty(input.permissions.tradingGate, 15, 8, 0);
+  score -= permissionPenalty(input.permissions.taxChange, 18, 8, 0);
+  score -= permissionPenalty(input.permissions.maxTxOrMaxWallet, 8, 4, 0);
+  score -= permissionPenalty(input.permissions.rescueOrWithdraw, 5, 3, 0);
 
   if (input.honeypot.status === 'warning') {
     score -= 15;
@@ -1170,22 +1660,22 @@ function scoreContractSafety(input: ScoreInput): {
   score = clamp(Math.round(score), 0, 100);
 
   const ownerActive = input.isRenounced === false && Boolean(input.ownerAddress);
-  const highRiskControls =
-    input.permissions.blacklist.detected === true ||
-    input.permissions.taxChange.detected === true ||
-    input.permissions.tradingGate.detected === true;
+  const confirmedHighRisk =
+    isConfirmedPermission(input.permissions.blacklist) ||
+    isConfirmedPermission(input.permissions.taxChange) ||
+    isConfirmedPermission(input.permissions.tradingGate);
 
   if (
     input.sellRestrictionDetected ||
-    (!input.verifiedSource && highRiskControls) ||
+    (!input.verifiedSource && confirmedHighRisk) ||
     (ownerActive &&
-      input.permissions.mint.detected === true &&
-      input.permissions.blacklist.detected === true) ||
+      isConfirmedPermission(input.permissions.mint) &&
+      isConfirmedPermission(input.permissions.blacklist)) ||
     (!input.implementationAddress &&
       input.isProxy &&
-      (input.permissions.mint.detected === true ||
-        input.permissions.blacklist.detected === true ||
-        input.permissions.tradingGate.detected === true))
+      (isConfirmedPermission(input.permissions.mint) ||
+        isConfirmedPermission(input.permissions.blacklist) ||
+        isConfirmedPermission(input.permissions.tradingGate)))
   ) {
     hardSevere = true;
     score = Math.min(score, 44);
@@ -1195,10 +1685,32 @@ function scoreContractSafety(input: ScoreInput): {
   return { score, riskLevel, hardSevere };
 }
 
-function resolveRiskLevel(
-  score: number,
-  hardSevere: boolean,
-): ContractSafetyRiskLevel {
+function permissionPenalty(
+  signal: PermissionSignal,
+  highPenalty: number,
+  mediumPenalty: number,
+  lowPenalty: number,
+): number {
+  if (signal.detected !== true) {
+    return 0;
+  }
+  if (signal.risk === 'high' || signal.risk === 'severe') {
+    return highPenalty;
+  }
+  if (signal.risk === 'medium') {
+    return mediumPenalty;
+  }
+  if (signal.risk === 'low') {
+    return lowPenalty;
+  }
+  return 0;
+}
+
+function isConfirmedPermission(signal: PermissionSignal): boolean {
+  return signal.detected === true && (signal.risk === 'high' || signal.risk === 'severe');
+}
+
+function resolveRiskLevel(score: number, hardSevere: boolean): ContractSafetyRiskLevel {
   if (hardSevere) {
     return 'severe';
   }
@@ -1214,11 +1726,30 @@ function resolveRiskLevel(
   return 'severe';
 }
 
+function hasPermissionControlFlags(flags: ContractSafetyFlag[]): boolean {
+  return flags.some((flag) =>
+    /Blacklist|Mint Function|Trading Pause|Gate|Tax or Fee/i.test(flag.title),
+  );
+}
+
+function hasActiveAdminControlFlags(flags: ContractSafetyFlag[]): boolean {
+  return flags.some((flag) =>
+    [
+      'Blacklist Controls Detected',
+      'Mint Function Detected',
+      'Tax or Fee Controls Detected',
+      'Trading Pause / Gate Controls Detected',
+    ].includes(flag.title),
+  );
+}
+
 function resolveVerdict(
   riskLevel: ContractSafetyRiskLevel,
   flags: ContractSafetyFlag[],
+  permissions: ContractSafetyReport['permissions'],
   verifiedSource: boolean,
   isProxy: boolean,
+  isRenounced: boolean | null,
 ): string {
   if (riskLevel === 'unknown') {
     return 'Contract safety could not be verified';
@@ -1229,26 +1760,57 @@ function resolveVerdict(
   if (riskLevel === 'high') {
     return 'High-risk token controls detected';
   }
-  if (flags.some((flag) => flag.title === 'Owner Privileges Active')) {
+
+  if (
+    isRenounced === true &&
+    permissions.blacklist.detected === true &&
+    flags.some((flag) => flag.title === 'Blacklist Function Exists')
+  ) {
+    return 'Blacklist function exists, but ownership appears renounced; review recommended';
+  }
+
+  if (
+    flags.some((flag) => flag.title === 'Owner Privileges Active') ||
+    hasActiveAdminControlFlags(flags)
+  ) {
     return 'Owner-controlled permissions require review';
   }
+
   if (isProxy && verifiedSource) {
     return 'Verified contract with upgradeability review required';
   }
+
+  if (hasPermissionControlFlags(flags)) {
+    return 'Contract permission signals require review';
+  }
+
   if (riskLevel === 'low' || riskLevel === 'moderate') {
     return 'No major contract permission risks detected from available contract data';
   }
   return 'Contract safety requires review';
 }
 
-function extractAbiFunctionNames(abi: unknown[] | null): string[] {
+export function parseAbiFunctions(abi: unknown[] | null): ParsedAbiFunction[] {
   if (!abi) {
     return [];
   }
+
   return abi
     .filter((entry): entry is AbiEntry => typeof entry === 'object' && entry !== null)
     .filter((entry) => entry.type === 'function' && typeof entry.name === 'string')
-    .map((entry) => entry.name as string);
+    .map((entry) => {
+      const stateMutability = (entry.stateMutability ?? 'nonpayable').toLowerCase();
+      const isStateChanging = stateMutability === 'nonpayable' || stateMutability === 'payable';
+      const inputs = (entry.inputs ?? [])
+        .map((input) => input.type ?? 'unknown')
+        .join(',');
+      return {
+        name: entry.name as string,
+        stateMutability,
+        isStateChanging,
+        signature: `${entry.name}(${inputs})`,
+      };
+    });
 }
 
 function parseAbiJson(raw: string | undefined): unknown[] | null {
@@ -1269,7 +1831,9 @@ function normalizeSourceCode(raw: string | undefined): string | null {
   }
   if (raw.startsWith('{{')) {
     try {
-      const parsed = JSON.parse(raw.slice(1, -1)) as { sources?: Record<string, { content?: string }> };
+      const parsed = JSON.parse(raw.slice(1, -1)) as {
+        sources?: Record<string, { content?: string }>;
+      };
       const parts = Object.values(parsed.sources ?? {})
         .map((source) => source.content ?? '')
         .filter((content) => content.length > 0);
@@ -1279,6 +1843,12 @@ function normalizeSourceCode(raw: string | undefined): string | null {
     }
   }
   return raw;
+}
+
+function stripSolidityComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/.*$/gm, ' ');
 }
 
 function parseAddressResult(hex: string | null | undefined): string | null {
@@ -1357,6 +1927,10 @@ function inferProxyTypeFromName(
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function getErrorMessage(err: unknown): string {
