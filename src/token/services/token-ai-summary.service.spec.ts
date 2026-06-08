@@ -117,4 +117,26 @@ describe('TokenAiSummaryService', () => {
     expect(fallback.toLowerCase()).not.toContain('safe');
     expect(fallback.toLowerCase()).toContain('contract permission risk');
   });
+
+  it('fallback avoids no-major-risk wording when renounced blacklist exists', () => {
+    const config = { get: jest.fn(() => '') } as unknown as ConfigService;
+    const cache = {
+      get: jest.fn(),
+      set: jest.fn(),
+    } as unknown as Cache;
+    const trust = new TokenTrustReportService();
+    const service = new TokenAiSummaryService(config, trust, cache);
+
+    const input = (service as any).buildInput(makeAnalysis());
+    input.contractSafetyAvailable = true;
+    input.contractSafetyOwnerRenounced = true;
+    input.contractSafetyFlags = ['Blacklist Function Exists'];
+    input.contractSafetyRiskLevel = 'moderate';
+    input.contractSafetyVerified = true;
+
+    const fallback = (service as any).buildFallbackSummary(input);
+    expect(fallback.toLowerCase()).toContain('ownership appears renounced');
+    expect(fallback.toLowerCase()).toContain('blacklist function exists');
+    expect(fallback.toLowerCase()).not.toContain('no major contract permission risk');
+  });
 });

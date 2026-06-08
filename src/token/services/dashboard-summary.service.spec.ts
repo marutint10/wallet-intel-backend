@@ -172,6 +172,8 @@ describe('dashboard wording cleanup', () => {
     expect(summary.tokenTrust.scoreType).toBe('visible_onchain_score');
     expect(summary.tokenTrust.scoreStatus).toBe('partial');
     expect(summary.tokenTrust.availableModules).toContain('contract_safety');
+    expect(summary.tokenTrust.missingScoreInputs).not.toContain('contract_safety');
+    expect(summary.tokenTrust.missingScoreInputs).toContain('market_maturity');
     expect(
       summary.tokenTrust.limitations.some((line) =>
         line.includes('shown separately and is not yet merged'),

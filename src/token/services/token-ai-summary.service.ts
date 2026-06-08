@@ -80,6 +80,7 @@ export interface TokenSummaryInput {
   contractSafetyVerified: boolean | null;
   contractSafetyFlags: string[];
   contractSafetyLimitations: string[];
+  contractSafetyOwnerRenounced: boolean | null;
 }
 
 type GeminiOnceResult = { text: string; finishReason: string };
@@ -94,7 +95,9 @@ Hard rules:
 - Do not say buy, sell, scam, rug, guaranteed safe, or healthy.
 - Do not describe the score as final full token trust; it is a partial visible on-chain score only.
 - Contract safety is a separate module and is not merged into the visible on-chain score yet.
-- Mention severe/high contract risk flags when present; if contract safety is low risk say no major contract permission risk was detected from available source/ABI data.
+- Mention severe/high contract risk flags when present.
+- If ownership appears renounced and a blacklist/mint/tax function exists with onlyOwner access, explain that active admin risk may be reduced but review is still required; do not say no major permission risks while also mentioning active blacklist controls.
+- Only say no major contract permission risk was detected when contract safety flags do not include blacklist, mint, tax, pause, or trading gate signals.
 - If contract source is unverified or scan is incomplete, say contract safety could not be fully verified.
 - Do not invent contract functions or permissions.
 - Always distinguish retail-scoped concentration from total-supply impact when both are provided.
@@ -107,7 +110,7 @@ Hard rules:
 
 @Injectable()
 export class TokenAiSummaryService {
-  private static readonly CACHE_PREFIX = 'token:summary:v6:';
+  private static readonly CACHE_PREFIX = 'token:summary:v7:';
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly FALLBACK_CACHE_TTL_SECONDS = 1_800;
   private static readonly GEMINI_PRIMARY_MODEL = 'gemini-2.5-flash';
@@ -321,6 +324,7 @@ export class TokenAiSummaryService {
       contractSafetyVerified: contractSafety?.verifiedSource ?? null,
       contractSafetyFlags: contractSafety?.flags.map((flag) => flag.title) ?? [],
       contractSafetyLimitations: contractSafety?.limitations ?? [],
+      contractSafetyOwnerRenounced: contractSafety?.owner?.isRenounced ?? null,
     };
   }
 
@@ -436,11 +440,7 @@ Write a 4-6 sentence cautious retail risk summary now.
   }
 
   private buildFallbackSummary(input: TokenSummaryInput): string {
-    const contractLine = input.contractSafetyAvailable
-      ? input.contractSafetyRiskLevel === 'low' || input.contractSafetyRiskLevel === 'moderate'
-        ? 'No major contract permission risk was detected from available source/ABI data. '
-        : `Contract safety flags: ${input.contractSafetyFlags.join(', ') || 'review required'}. `
-      : 'Contract safety could not be fully verified in this snapshot. ';
+    const contractLine = this.buildContractSafetyFallbackLine(input);
 
     return (
       `${input.tokenName} (${input.tokenSymbol}) shows ${input.tokenTrustRiskLevel} visible risk with a partial ${input.scoreLabel} of ${input.tokenTrustScore}/100. ` +
@@ -450,6 +450,40 @@ Write a 4-6 sentence cautious retail risk summary now.
       `${input.whoCanDumpSummary} ` +
       `Research only, not financial advice.`
     );
+  }
+
+  private buildContractSafetyFallbackLine(input: TokenSummaryInput): string {
+    if (!input.contractSafetyAvailable) {
+      return 'Contract safety could not be fully verified in this snapshot. ';
+    }
+
+    const hasPermissionFlags = input.contractSafetyFlags.some((flag) =>
+      /Blacklist|Mint Function|Tax or Fee|Trading Pause|Gate/i.test(flag),
+    );
+    const hasRenouncedBlacklist =
+      input.contractSafetyOwnerRenounced === true &&
+      input.contractSafetyFlags.some((flag) => flag.includes('Blacklist'));
+
+    if (hasRenouncedBlacklist) {
+      return (
+        'Contract source is verified and ownership appears renounced. ' +
+        'A blacklist function exists in the ABI, but its active risk may be reduced if ownership is truly renounced. This still requires review. '
+      );
+    }
+
+    if (
+      hasPermissionFlags ||
+      input.contractSafetyRiskLevel === 'high' ||
+      input.contractSafetyRiskLevel === 'severe'
+    ) {
+      return `Contract safety flags: ${input.contractSafetyFlags.join(', ') || 'review required'}. `;
+    }
+
+    if (input.contractSafetyRiskLevel === 'low' || input.contractSafetyRiskLevel === 'moderate') {
+      return 'No major contract permission risk was detected from available source/ABI data. ';
+    }
+
+    return 'Contract safety requires review from available source/ABI data. ';
   }
 
   private async callGeminiWithRetry(
