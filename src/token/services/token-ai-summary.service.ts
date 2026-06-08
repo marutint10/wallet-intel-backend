@@ -14,6 +14,7 @@ import {
   safeNumberOrNull,
   safeString,
 } from './dashboard-summary.service';
+import { TokenTrustReportService } from './token-trust-report.service';
 
 export interface TokenSummaryInput {
   tokenName: string;
@@ -52,6 +53,14 @@ export interface TokenSummaryInput {
   smartMoneyPct: number;
   teamAllocationPct: number;
   exchangeAllocationPct: number;
+  tokenTrustScore: number;
+  tokenTrustRiskLevel: 'low' | 'moderate' | 'high' | 'severe' | 'unknown';
+  tokenTrustVerdict: string;
+  tokenTrustSummary: string;
+  tokenTrustRedFlags: string[];
+  tokenTrustPositiveSignals: string[];
+  whoCanDumpSummary: string;
+  trustLimitations: string[];
 
   riskSignals: string[];
   positiveSignals: string[];
@@ -59,49 +68,21 @@ export interface TokenSummaryInput {
 
 type GeminiOnceResult = { text: string; finishReason: string };
 
-const TOKEN_ANALYST_SYSTEM_PROMPT = `You are a professional on-chain token analyst at a crypto intelligence firm.
-
-Your job is to write a concise 4-5 sentence analytical summary of a token's holder health, 
-based on structured on-chain intelligence data provided to you.
-
-Your audience is a mix of:
-- Token project founders reviewing their own community health
-- Venture capitalists conducting token due diligence
-- Experienced crypto traders evaluating a token before taking a position
-
-Tone guidelines:
-- Professional, precise, and neutral
-- Write like a senior analyst, not a marketer
-- Do not use hype language ("amazing", "bullish", "promising")
-- Do not use fear language ("dump", "rug", "scam")
-- If signals are negative, describe them factually and professionally
-  (e.g. "elevated concentration risk" not "this will dump")
+const TOKEN_ANALYST_SYSTEM_PROMPT = `You are a cautious token risk analyst.
+You explain whether a token shows hidden holder, whale, team, or concentration risk before a retail user buys.
+You are not giving financial advice.
 
 Hard rules:
-- Do NOT predict future price movement
-- Do NOT predict what holders will do
-- Do NOT use the word "scam" or any variant
-- Do NOT give investment advice
-- Only describe what the on-chain data currently shows
-- Stay strictly factual — do not infer beyond the data
-
-Structure your summary as follows:
-1. Open with an overall assessment of holder quality and community strength
-2. Describe the supply distribution and concentration profile
-3. Describe the community composition (conviction holders, traders, unclassified)
-4. Highlight the most significant risk signal OR positive signal from the data
-5. Close with a note on team allocation or smart money presence if material
-
-Output format:
-- Plain text only
-- 4-5 sentences
-- No bullet points
-- No headers
-- No markdown`;
+- Use only the provided structured metrics.
+- Do not invent facts or percentages.
+- Do not say buy, sell, scam, rug, guaranteed safe, or healthy.
+- Mention both risks and positives when present.
+- Mention uncertainty when sample coverage is limited.
+- Keep output to 4-6 sentences in plain text.`;
 
 @Injectable()
 export class TokenAiSummaryService {
-  private static readonly CACHE_PREFIX = 'token:summary:v2:';
+  private static readonly CACHE_PREFIX = 'token:summary:v3:';
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly FALLBACK_CACHE_TTL_SECONDS = 1_800;
   private static readonly GEMINI_PRIMARY_MODEL = 'gemini-2.5-flash';
@@ -114,6 +95,7 @@ export class TokenAiSummaryService {
 
   constructor(
     private readonly configService: ConfigService,
+    private readonly tokenTrustReport: TokenTrustReportService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
@@ -222,6 +204,7 @@ export class TokenAiSummaryService {
       string,
       unknown
     >;
+    const tokenTrust = this.tokenTrustReport.buildReport(analysis);
 
     const { riskSignals, positiveSignals } = this.partitionCalloutTitles(riskCallouts);
 
@@ -286,6 +269,16 @@ export class TokenAiSummaryService {
       smartMoneyPct,
       teamAllocationPct: safeNumber((teamDetection ?? {}).teamTotalPctOfSupply),
       exchangeAllocationPct: safeNumber(exchangesEntry.pctOfSupply),
+      tokenTrustScore: tokenTrust.trustScore,
+      tokenTrustRiskLevel: tokenTrust.riskLevel,
+      tokenTrustVerdict: tokenTrust.verdict,
+      tokenTrustSummary: tokenTrust.summary,
+      tokenTrustRedFlags: tokenTrust.redFlags.map((flag) => flag.title),
+      tokenTrustPositiveSignals: tokenTrust.positiveSignals.map(
+        (signal) => signal.title,
+      ),
+      whoCanDumpSummary: tokenTrust.whoCanDump.summary,
+      trustLimitations: tokenTrust.limitations,
       riskSignals,
       positiveSignals,
     };
@@ -310,14 +303,14 @@ export class TokenAiSummaryService {
 
   private buildUserPrompt(input: TokenSummaryInput): string {
     const riskLine =
-      input.riskSignals.length > 0
-        ? `Risk signals detected: ${input.riskSignals.join(', ')}.`
-        : 'No major risk signals detected.';
+      input.tokenTrustRedFlags.length > 0
+        ? `Top red flags: ${input.tokenTrustRedFlags.join(', ')}.`
+        : 'No severe red flags were detected in the current holder snapshot.';
 
     const positiveLine =
-      input.positiveSignals.length > 0
-        ? `Positive signals: ${input.positiveSignals.join(', ')}.`
-        : '';
+      input.tokenTrustPositiveSignals.length > 0
+        ? `Positive signals: ${input.tokenTrustPositiveSignals.join(', ')}.`
+        : 'Positive signals are limited in the current snapshot.';
 
     const sampleSizeNote =
       input.retailHolderCount < 100
@@ -354,8 +347,16 @@ SUPPLY COMPOSITION (% of total supply)
 - LP pools: ${input.lpSupplyPct}%
 
 HOLDER QUALITY (retail wallets only)
-- Average Holder Score: ${input.avgHolderScore}/100 (${input.qualityLabel})
+- Holder Strength Score: ${input.avgHolderScore}/100 (${input.qualityLabel})
 - Smart Money Wallets: ${input.smartMoneyPct}%
+
+TOKEN TRUST REPORT
+- Token Trust Score: ${input.tokenTrustScore}/100
+- Risk Level: ${input.tokenTrustRiskLevel}
+- Verdict: ${input.tokenTrustVerdict}
+- Summary: ${input.tokenTrustSummary}
+- Who Can Dump: ${input.whoCanDumpSummary}
+- Limitations: ${input.trustLimitations.join(' | ')}
 
 COMMUNITY COMPOSITION
 - Conviction Holders (Diamond Hands / HODLers): ${input.convictionPct}%
@@ -376,19 +377,17 @@ SIGNALS
 ${riskLine}
 ${positiveLine}
 
-Write the 4-5 sentence analyst summary now.
+Write a 4-6 sentence cautious retail risk summary now.
 `.trim();
   }
 
   private buildFallbackSummary(input: TokenSummaryInput): string {
     return (
-      `${input.tokenName} (${input.tokenSymbol}) has an average holder score of ` +
-      `${input.avgHolderScore}/100 across ${input.retailHolderCount} analyzed retail wallets, ` +
-      `classified as ${input.qualityLabel}. ` +
-      `The top 10 retail wallets hold ${input.top10PctOfRetail}% of retail-held supply ` +
-      `(approximately ${input.top10PctOfTotal}% of total supply). ` +
-      `Exchange custody accounts for ${input.exchangeSupplyPct}% of total supply, ` +
-      `a neutral liquidity signal.`
+      `${input.tokenName} (${input.tokenSymbol}) shows ${input.tokenTrustRiskLevel} visible risk with a token trust score of ${input.tokenTrustScore}/100. ` +
+      `${input.tokenTrustVerdict}. ` +
+      `Top 10 retail wallets hold ${input.top10PctOfRetail}% of retail-held supply (~${input.top10PctOfTotal}% of total supply). ` +
+      `${input.whoCanDumpSummary} ` +
+      `Research only, not financial advice.`
     );
   }
 

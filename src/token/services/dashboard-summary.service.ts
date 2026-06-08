@@ -2,6 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { TokenAnalysisEntity } from '../entities/token-analysis.entity';
 import type { RiskCallout } from './holder-aggregation.service';
 import { UNSCORED_SCORE_BANDS } from './lite-scorer.service';
+import {
+  TokenTrustReport,
+  TokenTrustReportService,
+} from './token-trust-report.service';
 
 function isUnclassifiedHolderType(primaryType: string | null): boolean {
   return (
@@ -89,6 +93,9 @@ export interface HolderTableRow {
   portfolioUsd: number | null;
   trackedTokenWeight: number | null;
   knownLabel: string | null;
+  retailType: string;
+  retailRiskLabel: string;
+  retailExplanation: string;
 }
 
 export interface SupplyBreakdownSummary {
@@ -154,6 +161,7 @@ export interface DashboardSummaryResponse {
   holderQualityBreakdown: HolderQualityBreakdown;
 
   distribution: DistributionSummary;
+  tokenTrust: TokenTrustReport;
 
   holderTable: {
     total: number;
@@ -194,6 +202,8 @@ export interface RawHolder {
 
 @Injectable()
 export class DashboardSummaryService {
+  constructor(private readonly tokenTrustReport: TokenTrustReportService) {}
+
   // ===========================================================================
   // Main entrypoint
   // ===========================================================================
@@ -267,6 +277,8 @@ export class DashboardSummaryService {
     >;
     const exchangePctOfSupply = safeNumber(exchangesEntry.pctOfSupply);
 
+    const tokenTrust = this.tokenTrustReport.buildReport(analysis);
+
     const summaryCards = buildSummaryCards({
       avgScore: avgScoreRaw,
       smartMoneyPct,
@@ -275,6 +287,7 @@ export class DashboardSummaryService {
       teamPctOfSupply,
       exchangePctOfSupply,
       botPct,
+      tokenTrust,
     });
 
     return {
@@ -304,6 +317,7 @@ export class DashboardSummaryService {
       },
       holderQualityBreakdown,
       distribution: distributionSummary,
+      tokenTrust,
       holderTable: {
         total: holderTableRows.length,
         rows: holderTableRows,
@@ -507,6 +521,7 @@ interface SummaryCardInputs {
   teamPctOfSupply: number;
   exchangePctOfSupply: number;
   botPct: number;
+  tokenTrust: TokenTrustReport;
 }
 
 export function buildSummaryCards(inputs: SummaryCardInputs): SummaryCard[] {
@@ -518,6 +533,7 @@ export function buildSummaryCards(inputs: SummaryCardInputs): SummaryCard[] {
     teamPctOfSupply,
     exchangePctOfSupply,
     botPct,
+    tokenTrust,
   } = inputs;
 
   const avgScoreSentiment: SummaryCard['sentiment'] =
@@ -540,9 +556,9 @@ export function buildSummaryCards(inputs: SummaryCardInputs): SummaryCard[] {
 
   return [
     {
-      title: 'Avg Holder Score',
+      title: 'Holder Strength Score',
       value: avgScore !== null ? `${Math.round(avgScore)}/100` : 'N/A',
-      subtitle: 'Across analyzed EOA holders',
+      subtitle: `Risk ${tokenTrust.riskLevel}; not a safety guarantee`,
       sentiment: avgScoreSentiment,
     },
     {
@@ -909,6 +925,12 @@ function buildHolderTableRow(
         coerceContractName(holder?.walletLabelDetail)
       : null;
 
+  const retail = mapHolderTypeForRetail(classification, {
+    walletLabel,
+    percentSupply,
+    trackedTokenWeight,
+  });
+
   return {
     rank,
     walletAddress,
@@ -925,6 +947,9 @@ function buildHolderTableRow(
     portfolioUsd,
     trackedTokenWeight,
     knownLabel,
+    retailType: retail.retailType,
+    retailRiskLabel: retail.retailRiskLabel,
+    retailExplanation: retail.retailExplanation,
   };
 }
 
@@ -935,6 +960,106 @@ function coerceContractName(value: unknown): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+export function mapHolderTypeForRetail(
+  primaryType: string | null,
+  holder: {
+    walletLabel: string | null;
+    percentSupply: number;
+    trackedTokenWeight: number | null;
+  },
+): {
+  retailType: string;
+  retailRiskLabel: string;
+  retailExplanation: string;
+} {
+  if (holder.walletLabel === 'exchange' || holder.walletLabel === 'cex_deposit') {
+    return {
+      retailType: 'Exchange Custody',
+      retailRiskLabel: 'Liquidity Context',
+      retailExplanation:
+        'Exchange-held supply is treated as liquidity access, not direct sell pressure.',
+    };
+  }
+
+  if (holder.walletLabel === 'burn') {
+    return {
+      retailType: 'Burn Address',
+      retailRiskLabel: 'Low Exit Risk',
+      retailExplanation: 'Burned supply is generally not expected to return to circulation.',
+    };
+  }
+
+  if (primaryType === 'Conviction Holder') {
+    const highExitRisk =
+      holder.percentSupply >= 1 || (holder.trackedTokenWeight ?? 0) >= 80;
+    return {
+      retailType: 'Concentrated Holder',
+      retailRiskLabel: highExitRisk ? 'High Exit Risk' : 'Moderate Exit Risk',
+      retailExplanation: 'This wallet is heavily concentrated in the analyzed token.',
+    };
+  }
+
+  if (primaryType === 'Diversified Whale') {
+    return {
+      retailType: 'Diversified Whale',
+      retailRiskLabel:
+        holder.percentSupply >= 5
+          ? 'High Exit Risk'
+          : holder.percentSupply >= 1
+            ? 'Moderate Exit Risk'
+            : 'Low Exit Risk',
+      retailExplanation: 'Large wallet with diversified portfolio exposure.',
+    };
+  }
+
+  if (primaryType === 'Strategic Allocator') {
+    return {
+      retailType: 'Partial Allocator',
+      retailRiskLabel:
+        holder.percentSupply >= 2 ? 'Moderate Exit Risk' : 'Low Exit Risk',
+      retailExplanation: 'Wallet has meaningful but not all-in exposure.',
+    };
+  }
+
+  if (primaryType === 'Dormant Wallet') {
+    return {
+      retailType: 'Low-Activity Wallet',
+      retailRiskLabel: holder.percentSupply >= 1 ? 'Moderate Exit Risk' : 'Low Exit Risk',
+      retailExplanation: 'Limited trading history detected in recent on-chain activity.',
+    };
+  }
+
+  return {
+    retailType: mapLegacyStrengthLabel(primaryType),
+    retailRiskLabel:
+      holder.percentSupply >= 5
+        ? 'High Exit Risk'
+        : holder.percentSupply >= 1
+          ? 'Moderate Exit Risk'
+          : 'Low Exit Risk',
+    retailExplanation:
+      'Retail-facing label mapped from current on-chain holder classification.',
+  };
+}
+
+function mapLegacyStrengthLabel(primaryType: string | null): string {
+  if (!primaryType) {
+    return 'Unknown';
+  }
+  switch (primaryType) {
+    case 'Institutional':
+      return 'Very Strong';
+    case 'Premium':
+      return 'Strong';
+    case 'Solid':
+      return 'Moderate';
+    case 'Developing':
+      return 'Weak';
+    default:
+      return primaryType;
+  }
 }
 
 // -----------------------------
