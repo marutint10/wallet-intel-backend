@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import {
   TokenWebCrawlerService,
   analyzeSignals,
@@ -76,6 +77,13 @@ describe('TokenWebCrawlerService helpers', () => {
   });
 });
 
+function makeCrawler(configValues: Record<string, string> = {}): TokenWebCrawlerService {
+  const config = {
+    get: jest.fn((key: string) => configValues[key] ?? ''),
+  } as unknown as ConfigService;
+  return new TokenWebCrawlerService(config);
+}
+
 describe('TokenWebCrawlerService crawlOfficialWebsite', () => {
   const originalFetch = global.fetch;
 
@@ -89,7 +97,7 @@ describe('TokenWebCrawlerService crawlOfficialWebsite', () => {
       .fn()
       .mockRejectedValue(new Error('network down')) as unknown as typeof fetch;
 
-    const service = new TokenWebCrawlerService();
+    const service = makeCrawler();
     const result = await service.crawlOfficialWebsite({
       websiteUrl: 'https://broken.example',
       tokenName: 'Broken',
@@ -129,7 +137,7 @@ describe('TokenWebCrawlerService crawlOfficialWebsite', () => {
       } as unknown as Response;
     }) as unknown as typeof fetch;
 
-    const service = new TokenWebCrawlerService();
+    const service = makeCrawler();
     const result = await service.crawlOfficialWebsite({
       websiteUrl: 'https://many.example',
       tokenName: 'Many',
@@ -152,7 +160,7 @@ describe('TokenWebCrawlerService crawlOfficialWebsite', () => {
       text: async () => SAMPLE_HTML,
     })) as unknown as typeof fetch;
 
-    const service = new TokenWebCrawlerService();
+    const service = makeCrawler();
     const result = await service.crawlOfficialWebsite({
       websiteUrl: 'https://chain.link',
       tokenName: 'Chainlink',
@@ -165,5 +173,46 @@ describe('TokenWebCrawlerService crawlOfficialWebsite', () => {
     expect(result.signals.hasClearUseCase).toBe(true);
     expect(result.mentions.tokenName).toBe(true);
     expect(result.mentions.tokenSymbol).toBe(true);
+  });
+
+  it('returns partial result when crawling disabled', async () => {
+    const service = makeCrawler({ OFFCHAIN_CRAWL_ENABLED: 'false' });
+    const result = await service.crawlOfficialWebsite({
+      websiteUrl: 'https://chain.link',
+      tokenName: 'Chainlink',
+      tokenSymbol: 'LINK',
+    });
+
+    expect(result.status).toBe('partial');
+    expect(result.errors).toContain('Website crawling disabled');
+  });
+
+  it('reuses crawl cache for repeated requests', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      url: 'https://cached.example/',
+      headers: { get: () => 'text/html' },
+      text: async () =>
+        '<html><body><h1>Cached Token</h1><p>oracle infrastructure protocol documentation</p></body></html>',
+    })) as unknown as typeof fetch;
+
+    const service = makeCrawler();
+    const first = await service.crawlOfficialWebsite({
+      websiteUrl: 'https://cached.example',
+      tokenName: 'Cached',
+      tokenSymbol: 'CACHE',
+      maxPages: 1,
+    });
+    const second = await service.crawlOfficialWebsite({
+      websiteUrl: 'https://cached.example',
+      tokenName: 'Cached',
+      tokenSymbol: 'CACHE',
+      maxPages: 1,
+    });
+
+    expect(first.status).toBe('done');
+    expect(second.extractedText).toBe(first.extractedText);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 });

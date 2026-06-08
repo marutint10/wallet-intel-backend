@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  buildDiscoveryCacheKey,
+  OffchainMemoryCache,
+} from './offchain-memory-cache';
+import { resolveOffchainConfig } from './offchain-config';
+import {
   TokenWebCrawlerService,
   type TokenWebsiteCrawlResult,
 } from './token-web-crawler.service';
@@ -55,17 +60,33 @@ const TRUSTED_SOURCES = new Set<MetadataSource>([
 ]);
 
 const BRAVE_API_URL = 'https://api.search.brave.com/res/v1/web/search';
-const BRAVE_TIMEOUT_MS = 8_000;
 const MAX_BRAVE_QUERIES = 4;
+const DISCOVERY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_BRAVE_RESULTS = 5;
+
+export interface BraveSearchResponse {
+  hits: BraveSearchHit[];
+  error: string | null;
+  rateLimited: boolean;
+  timedOut: boolean;
+}
 
 @Injectable()
 export class TokenOffchainDiscoveryService {
   private readonly logger = new Logger(TokenOffchainDiscoveryService.name);
+  private readonly discoveryCache = new OffchainMemoryCache<OffchainDiscoveryResult>(
+    200,
+    DISCOVERY_CACHE_TTL_MS,
+  );
 
   constructor(
     private readonly config: ConfigService,
     private readonly webCrawler: TokenWebCrawlerService,
   ) {}
+
+  clearDiscoveryCache(): void {
+    this.discoveryCache.clear();
+  }
 
   async discoverOfficialLinks(input: {
     tokenName?: string | null;
@@ -77,7 +98,17 @@ export class TokenOffchainDiscoveryService {
     coinGeckoMetadata?: unknown;
     explorerMetadata?: unknown;
     existingMetadata?: unknown;
+    bypassCache?: boolean;
   }): Promise<OffchainDiscoveryResult> {
+    const runtime = resolveOffchainConfig(this.config);
+    const cacheKey = buildDiscoveryCacheKey(input);
+    if (!input.bypassCache) {
+      const cached = this.discoveryCache.get(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
+
     const errors: string[] = [];
     const sourceUrls: string[] = [];
     const provenance: LinkProvenance = {};
@@ -128,7 +159,9 @@ export class TokenOffchainDiscoveryService {
 
     let braveUsed = false;
     if (needsBrave) {
-      if (!braveApiKey) {
+      if (!runtime.braveEnabled) {
+        errors.push('Brave search fallback disabled');
+      } else if (!braveApiKey) {
         errors.push('BRAVE_SEARCH_API_KEY missing; Brave fallback skipped');
       } else if (tokenName || tokenSymbol || contractAddress) {
         braveUsed = true;
@@ -138,6 +171,7 @@ export class TokenOffchainDiscoveryService {
           tokenSymbol,
           contractAddress,
           discoveredLinks,
+          runtime.braveTimeoutMs,
         );
         mergeDiscoveredLinks(discoveredLinks, provenance, braveLinks.links, 'brave', sourceUrls);
         errors.push(...braveLinks.errors);
@@ -145,7 +179,7 @@ export class TokenOffchainDiscoveryService {
     }
 
     let crawlResult: TokenWebsiteCrawlResult | null = null;
-    if (discoveredLinks.website) {
+    if (discoveredLinks.website && runtime.crawlEnabled) {
       try {
         crawlResult = await this.webCrawler.crawlOfficialWebsite({
           websiteUrl: discoveredLinks.website,
@@ -170,6 +204,8 @@ export class TokenOffchainDiscoveryService {
       } catch (err: unknown) {
         errors.push(`Website validation crawl failed: ${getErrorMessage(err)}`);
       }
+    } else if (discoveredLinks.website && !runtime.crawlEnabled) {
+      errors.push('Website crawling disabled; homepage validation skipped');
     }
 
     const officialLinkConfidence = resolveOfficialLinkConfidence({
@@ -189,13 +225,19 @@ export class TokenOffchainDiscoveryService {
       status = discoveredLinks.website ? 'partial' : 'partial';
     }
 
-    return {
+    const result: OffchainDiscoveryResult = {
       status,
       discoveredLinks,
       officialLinkConfidence,
       sourceUrls: [...new Set(sourceUrls)],
       errors,
     };
+
+    if (result.status === 'done' || result.status === 'partial') {
+      this.discoveryCache.set(cacheKey, result);
+    }
+
+    return result;
   }
 
   private getBraveApiKey(): string {
@@ -212,6 +254,7 @@ export class TokenOffchainDiscoveryService {
     tokenSymbol: string | null,
     contractAddress: string | null,
     current: DiscoveredLinks,
+    timeoutMs: number,
   ): Promise<{ links: DiscoveredLinks; errors: string[] }> {
     const errors: string[] = [];
     const links = emptyDiscoveredLinks();
@@ -236,13 +279,24 @@ export class TokenOffchainDiscoveryService {
 
     const limitedQueries = queries.slice(0, MAX_BRAVE_QUERIES);
     for (const query of limitedQueries) {
-      const hits = await searchBraveWeb(apiKey, query);
-      if (hits.length === 0) {
+      const response = await searchBraveWeb(apiKey, query, timeoutMs);
+      if (response.rateLimited) {
+        errors.push('Brave Search rate limit reached');
+        break;
+      }
+      if (response.timedOut) {
+        errors.push(`Brave search timed out for: ${query}`);
+        continue;
+      }
+      if (response.error) {
+        errors.push(response.error);
+      }
+      if (response.hits.length === 0) {
         errors.push(`Brave search returned no results for: ${query}`);
         continue;
       }
 
-      for (const hit of hits) {
+      for (const hit of response.hits.slice(0, MAX_BRAVE_RESULTS)) {
         assignBraveHit(links, hit, current);
       }
     }
@@ -270,14 +324,15 @@ export function shouldUseBraveFallback(links: DiscoveredLinks): boolean {
 export async function searchBraveWeb(
   apiKey: string,
   query: string,
-): Promise<BraveSearchHit[]> {
+  timeoutMs = 8_000,
+): Promise<BraveSearchResponse> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), BRAVE_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const url = new URL(BRAVE_API_URL);
     url.searchParams.set('q', query);
-    url.searchParams.set('count', '5');
+    url.searchParams.set('count', String(MAX_BRAVE_RESULTS));
 
     const response = await fetch(url.toString(), {
       method: 'GET',
@@ -288,23 +343,45 @@ export async function searchBraveWeb(
       signal: controller.signal,
     });
 
+    if (response.status === 429) {
+      return {
+        hits: [],
+        error: 'Brave Search rate limit reached',
+        rateLimited: true,
+        timedOut: false,
+      };
+    }
+
     if (!response.ok) {
-      return [];
+      return {
+        hits: [],
+        error: `Brave search HTTP ${response.status}`,
+        rateLimited: false,
+        timedOut: false,
+      };
     }
 
     const body = (await response.json()) as {
       web?: { results?: Array<{ title?: string; url?: string; description?: string }> };
     };
 
-    return (body.web?.results ?? [])
+    const hits = (body.web?.results ?? [])
       .map((result) => ({
         title: safeString(result.title) ?? '',
         url: safeString(result.url) ?? '',
         description: safeString(result.description) ?? '',
       }))
       .filter((result) => result.url.length > 0);
-  } catch {
-    return [];
+
+    return { hits, error: null, rateLimited: false, timedOut: false };
+  } catch (err: unknown) {
+    const timedOut = err instanceof Error && err.name === 'AbortError';
+    return {
+      hits: [],
+      error: timedOut ? 'Brave search timed out' : 'Brave search failed',
+      rateLimited: false,
+      timedOut,
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -445,7 +522,11 @@ export function resolveOfficialLinkConfidence(input: {
   if (trustedWebsite) {
     reasons.push('Website found in trusted metadata');
     if (!verifiedOnSite && (tokenName || tokenSymbol || contractAddress)) {
-      reasons.push('Homepage did not clearly mention token name, symbol, or contract');
+      reasons.push('Official website could not be fully verified from homepage text');
+      if (socialAgreement > 0) {
+        reasons.push('Supporting social or docs links appear consistent with trusted metadata');
+        return { level: 'medium', reasons };
+      }
       return { level: 'medium', reasons };
     }
     return { level: 'medium', reasons };
@@ -460,7 +541,12 @@ export function resolveOfficialLinkConfidence(input: {
     return { level: 'medium', reasons };
   }
 
-  if (!verifiedOnSite && (tokenName || tokenSymbol || contractAddress)) {
+  if (
+    crawlResult &&
+    !verifiedOnSite &&
+    (tokenName || tokenSymbol || contractAddress) &&
+    !trustedWebsite
+  ) {
     reasons.push('Website could not be verified against token identifiers');
     return { level: 'low', reasons };
   }

@@ -1,5 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as cheerio from 'cheerio';
+import { resolveOffchainConfig } from './offchain-config';
+import {
+  buildCrawlCacheKey,
+  OffchainMemoryCache,
+} from './offchain-memory-cache';
 
 export const MAX_CRAWL_PAGES = 5;
 export const PAGE_TIMEOUT_MS = 10_000;
@@ -131,9 +137,22 @@ const PAGE_PRIORITY: Array<keyof CrawlLinkMap> = [
   'blog',
 ];
 
+const CRAWL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const BROKEN_CRAWL_CACHE_TTL_MS = 60 * 60 * 1000;
+
 @Injectable()
 export class TokenWebCrawlerService {
   private readonly logger = new Logger(TokenWebCrawlerService.name);
+  private readonly crawlCache = new OffchainMemoryCache<TokenWebsiteCrawlResult>(
+    100,
+    CRAWL_CACHE_TTL_MS,
+  );
+
+  constructor(private readonly config: ConfigService) {}
+
+  clearCrawlCache(): void {
+    this.crawlCache.clear();
+  }
 
   async crawlOfficialWebsite(input: {
     websiteUrl: string;
@@ -141,10 +160,32 @@ export class TokenWebCrawlerService {
     tokenSymbol?: string | null;
     contractAddress?: string | null;
     maxPages?: number;
+    bypassCache?: boolean;
   }): Promise<TokenWebsiteCrawlResult> {
-    const errors: string[] = [];
-    const maxPages = Math.min(input.maxPages ?? MAX_CRAWL_PAGES, MAX_CRAWL_PAGES);
+    const runtime = resolveOffchainConfig(this.config);
     const homepageUrl = normalizeHttpUrl(input.websiteUrl);
+
+    if (!runtime.crawlEnabled) {
+      return emptyCrawlResult(input.websiteUrl, {
+        status: 'partial',
+        homepageUrl: homepageUrl ?? input.websiteUrl,
+        errors: ['Website crawling disabled'],
+      });
+    }
+
+    if (homepageUrl && !input.bypassCache) {
+      const cached = this.crawlCache.get(buildCrawlCacheKey(homepageUrl));
+      if (cached) {
+        return cached;
+      }
+    }
+
+    const errors: string[] = [];
+    const maxPages = Math.min(
+      input.maxPages ?? runtime.maxPages,
+      runtime.maxPages,
+      MAX_CRAWL_PAGES,
+    );
 
     if (!homepageUrl || !isSafeCrawlUrl(homepageUrl)) {
       return emptyCrawlResult(input.websiteUrl, {
@@ -218,7 +259,7 @@ export class TokenWebCrawlerService {
       status = 'partial';
     }
 
-    return {
+    const result: TokenWebsiteCrawlResult = {
       status,
       homepageUrl,
       finalUrl,
@@ -230,6 +271,20 @@ export class TokenWebCrawlerService {
       signals,
       errors,
     };
+
+    if (
+      homepageUrl &&
+      (result.status === 'done' || result.status === 'partial') &&
+      !input.bypassCache
+    ) {
+      this.crawlCache.set(
+        buildCrawlCacheKey(homepageUrl),
+        result,
+        result.brokenWebsite ? BROKEN_CRAWL_CACHE_TTL_MS : CRAWL_CACHE_TTL_MS,
+      );
+    }
+
+    return result;
   }
 
   async fetchPageContent(url: string): Promise<CrawlPageContent | null> {
@@ -247,8 +302,9 @@ export class TokenWebCrawlerService {
   }
 
   private async fetchWithHttp(url: string): Promise<CrawlPageContent | null> {
+    const timeoutMs = resolveOffchainConfig(this.config).fetchTimeoutMs;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), PAGE_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(url, {
@@ -288,6 +344,11 @@ export class TokenWebCrawlerService {
   }
 
   private async fetchWithPlaywright(url: string): Promise<CrawlPageContent | null> {
+    const runtime = resolveOffchainConfig(this.config);
+    if (!runtime.playwrightFallbackEnabled) {
+      return null;
+    }
+
     try {
       const { chromium } = await import('playwright');
       const browser = await chromium.launch({ headless: true });
@@ -295,7 +356,7 @@ export class TokenWebCrawlerService {
         const page = await browser.newPage();
         await page.goto(url, {
           waitUntil: 'domcontentloaded',
-          timeout: PAGE_TIMEOUT_MS,
+          timeout: runtime.fetchTimeoutMs,
         });
         const finalUrl = page.url();
         if (!isSafeCrawlUrl(finalUrl)) {
