@@ -53,6 +53,11 @@ export interface TokenTrustBreakdownItem {
 
 export interface TokenTrustReport {
   trustScore: number;
+  scoreType: 'visible_onchain_score';
+  scoreLabel: 'Visible On-chain Score';
+  scoreStatus: 'partial';
+  scoreCoverage: string[];
+  missingScoreInputs: string[];
   riskLevel: TrustRiskLevel;
   verdict: string;
   confidence: TrustConfidence;
@@ -247,6 +252,20 @@ export class TokenTrustReportService {
 
     return {
       trustScore,
+      scoreType: 'visible_onchain_score',
+      scoreLabel: 'Visible On-chain Score',
+      scoreStatus: 'partial',
+      scoreCoverage: [
+        'holder_structure',
+        'wallet_concentration',
+        'team_treasury_exposure',
+      ],
+      missingScoreInputs: [
+        'contract_safety',
+        'market_maturity',
+        'liquidity_depth',
+        'off_chain_credibility',
+      ],
       riskLevel,
       verdict,
       confidence: this.resolveConfidence(analyzedRetail),
@@ -259,15 +278,15 @@ export class TokenTrustReportService {
       trustBreakdown: {
         holderConcentration: scoreItem(
           70 + adjustments.concentrationTotal,
-          adjustmentRiskLabel(adjustments.concentrationTotal),
+          breakdownSafetyLabel(70 + adjustments.concentrationTotal),
         ),
         whaleExitRisk: scoreItem(
           70 + adjustments.whale,
-          adjustmentRiskLabel(adjustments.whale),
+          breakdownSafetyLabel(70 + adjustments.whale),
         ),
         teamOrInsiderRisk: scoreItem(
           70 + adjustments.teamTotal,
-          adjustmentRiskLabel(adjustments.teamTotal),
+          breakdownSafetyLabel(70 + adjustments.teamTotal),
         ),
         exchangeLiquidityContext: scoreItem(
           70 + adjustments.exchange,
@@ -277,11 +296,11 @@ export class TokenTrustReportService {
         ),
         holderStrength: scoreItem(
           70 + adjustments.holderStrength,
-          adjustmentRiskLabel(adjustments.holderStrength),
+          breakdownSafetyLabel(70 + adjustments.holderStrength),
         ),
         dataConfidence: scoreItem(
           70 + adjustments.dataConfidence,
-          adjustmentRiskLabel(adjustments.dataConfidence),
+          breakdownSafetyLabel(70 + adjustments.dataConfidence),
         ),
       },
       limitations,
@@ -583,7 +602,7 @@ export class TokenTrustReportService {
 
       flags.push({
         severity,
-        title: 'High Retail Concentration',
+        title: concentrationRedFlagTitle(severity),
         description:
           `Top 10 retail wallets control ${roundTo(retail, 1)}% of retail-held supply, ` +
           `equal to roughly ${roundTo(total, 1)}% of total supply.`,
@@ -757,11 +776,12 @@ export class TokenTrustReportService {
     analyzedRetail: number,
   ): string[] {
     const limitations = [
+      'This is a partial visible on-chain score. Full trust scoring will require contract safety, market maturity, liquidity depth, and off-chain credibility analysis.',
       'Contract safety analysis is not included yet.',
       'Off-chain credibility analysis is not included yet.',
       'Holder classifications are based on available on-chain data and may be incomplete.',
       'Exchange custody is treated as liquidity context, not direct sell pressure.',
-      `Trust score is capped at ${MAX_TRUST_SCORE_WITHOUT_FULL_AUDIT}/100 until contract and off-chain review are added.`,
+      `Visible on-chain score is capped at ${MAX_TRUST_SCORE_WITHOUT_FULL_AUDIT}/100 until missing inputs are added.`,
     ];
 
     if (reportMode === 'fast') {
@@ -810,12 +830,23 @@ function retailPctOfTotal(
   return (retailSupplyPct * retailScopedPct) / 100;
 }
 
-function adjustmentRiskLabel(adjustment: number): string {
-  if (adjustment <= -15) return 'Severe risk';
-  if (adjustment <= -8) return 'High risk';
-  if (adjustment < 0) return 'Moderate risk';
-  if (adjustment > 0) return 'Favorable signal';
-  return 'Neutral';
+export function concentrationRedFlagTitle(
+  severity: TokenTrustFlag['severity'],
+): string {
+  if (severity === 'severe' || severity === 'high') {
+    return 'High Retail Concentration';
+  }
+  if (severity === 'medium') {
+    return 'Retail Concentration Requires Review';
+  }
+  return 'Retail Holder Concentration';
+}
+
+function breakdownSafetyLabel(score: number): string {
+  if (score >= 80) return 'Favorable signal';
+  if (score >= 65) return 'Moderate / watch';
+  if (score >= 45) return 'Elevated risk';
+  return 'High risk';
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

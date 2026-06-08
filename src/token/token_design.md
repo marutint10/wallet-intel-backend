@@ -1415,7 +1415,9 @@ It does **not** add off-chain crawling, contract-audit logic, or chat behavior.
 
 `tokenTrust` includes:
 
-- `trustScore`, `riskLevel`, `verdict`, `confidence`, `reportMode`, `summary`
+- `trustScore` (compatibility field), `scoreType`, `scoreLabel`, `scoreStatus`, `scoreCoverage`, `missingScoreInputs`
+- `riskLevel`, `verdict`, `confidence`, `reportMode`, `summary`
+- `concentrationContext` (retail-scoped vs total-supply impact)
 - `redFlags[]` (severity + title + description + optional evidence)
 - `positiveSignals[]` (strength + title + description + optional evidence)
 - `whoCanDump`:

@@ -128,8 +128,11 @@ describe('TokenTrustReportService', () => {
     expect(report.trustScore).toBeLessThanOrEqual(60);
     expect(report.verdict.toLowerCase()).toMatch(/meme|concentration|exit/);
     expect(
-      report.redFlags.some((flag) => flag.title === 'High Retail Concentration'),
+      report.redFlags.some((flag) => flag.title.includes('Concentration')),
     ).toBe(true);
+    expect(
+      report.redFlags.find((flag) => flag.title.includes('Concentration'))?.title,
+    ).toBe('Retail Concentration Requires Review');
     expect(
       report.positiveSignals.some(
         (signal) => signal.title === 'Low Detected Team Allocation',
@@ -160,12 +163,11 @@ describe('TokenTrustReportService', () => {
       ),
     ).toBe(true);
 
-    const concentrationFlag = report.redFlags.find(
-      (flag) => flag.title === 'High Retail Concentration',
+    const concentrationFlag = report.redFlags.find((flag) =>
+      flag.title.includes('Concentration'),
     );
-    if (concentrationFlag) {
-      expect(['low', 'medium']).toContain(concentrationFlag.severity);
-    }
+    expect(concentrationFlag?.title).toBe('Retail Holder Concentration');
+    expect(['low', 'medium']).toContain(concentrationFlag?.severity);
 
     const teamFlag = report.redFlags.find((flag) =>
       flag.title.includes('Treasury'),
@@ -276,6 +278,8 @@ describe('TokenTrustReportService', () => {
       ),
     ).toBe(true);
     expect(report.trustScore).toBeLessThanOrEqual(82);
+    expect(report.scoreLabel).toBe('Visible On-chain Score');
+    expect(report.scoreStatus).toBe('partial');
   });
 });
 
