@@ -34,6 +34,7 @@ import { TokenContractSafetyService } from './services/token-contract-safety.ser
 import { TokenMarketContextService } from './services/token-market-context.service';
 import { TokenWebCrawlerService } from './services/token-web-crawler.service';
 import { TokenOffchainDiscoveryService } from './services/token-offchain-discovery.service';
+import { TokenOffchainCredibilityService } from './services/token-offchain-credibility.service';
 
 @Module({
   imports: [
@@ -72,6 +73,7 @@ import { TokenOffchainDiscoveryService } from './services/token-offchain-discove
     TokenMarketContextService,
     TokenWebCrawlerService,
     TokenOffchainDiscoveryService,
+    TokenOffchainCredibilityService,
   ],
 })
 export class TokenModule {}

@@ -37,6 +37,7 @@ import {
   TokenContractSafetyService,
 } from './token-contract-safety.service';
 import { TokenMarketContextService } from './token-market-context.service';
+import { TokenOffchainCredibilityService } from './token-offchain-credibility.service';
 
 // FAST_MODE = true enables the B2B holder-intelligence path:
 //   * skip LitePnlService entirely (no realized PnL reconstruction)
@@ -73,6 +74,7 @@ export class TokenAnalysisService {
     private readonly targetValidator: TokenTargetValidatorService,
     private readonly contractSafety: TokenContractSafetyService,
     private readonly marketContext: TokenMarketContextService,
+    private readonly offChainCredibility: TokenOffchainCredibilityService,
   ) {}
 
   // --- START ANALYSIS (saves status=processing, runs in background) ---
@@ -584,9 +586,34 @@ export class TokenAnalysisService {
         `tier=${marketContextReport.maturityTier} risk=${marketContextReport.riskLevel}`,
     );
 
+    let offChainCredibilityReport = null;
+    try {
+      offChainCredibilityReport = await this.offChainCredibility.buildReport({
+        tokenName: tokenMetadata.name,
+        tokenSymbol: tokenMetadata.symbol,
+        contractAddress: address,
+        chain,
+        existingMetadata: {
+          website: null,
+          liquidityUsd: tokenMetadata.liquidityUsd,
+          liquidityPairs: tokenMetadata.liquidityPairs,
+          metadataSource: tokenMetadata.source,
+        },
+      });
+      this.logger.log(
+        `Off-chain credibility: score=${offChainCredibilityReport.score ?? 'n/a'} ` +
+          `tier=${offChainCredibilityReport.credibilityTier} risk=${offChainCredibilityReport.riskLevel}`,
+      );
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Off-chain credibility failed for ${address}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     const qualityWithPrice = {
       ...qualityBase,
       marketContext: marketContextReport,
+      offChainCredibility: offChainCredibilityReport,
     };
     const qualityMetrics =
       qualityWithPrice as unknown as QueryDeepPartialEntity<
