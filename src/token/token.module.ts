@@ -32,6 +32,8 @@ import { TokenPdfExportService } from './services/token-pdf-export.service';
 import { TokenTargetValidatorService } from './services/token-target-validator.service';
 import { TokenContractSafetyService } from './services/token-contract-safety.service';
 import { TokenMarketContextService } from './services/token-market-context.service';
+import { TokenWebCrawlerService } from './services/token-web-crawler.service';
+import { TokenOffchainDiscoveryService } from './services/token-offchain-discovery.service';
 
 @Module({
   imports: [
@@ -68,6 +70,8 @@ import { TokenMarketContextService } from './services/token-market-context.servi
     TokenTargetValidatorService,
     TokenContractSafetyService,
     TokenMarketContextService,
+    TokenWebCrawlerService,
+    TokenOffchainDiscoveryService,
   ],
 })
 export class TokenModule {}
