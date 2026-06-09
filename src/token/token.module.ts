@@ -35,6 +35,8 @@ import { TokenMarketContextService } from './services/token-market-context.servi
 import { TokenWebCrawlerService } from './services/token-web-crawler.service';
 import { TokenOffchainDiscoveryService } from './services/token-offchain-discovery.service';
 import { TokenOffchainCredibilityService } from './services/token-offchain-credibility.service';
+import { TokenOffchainExternalEvidenceService } from './services/token-offchain-external-evidence.service';
+import { TokenOffchainAiClassifierService } from './services/token-offchain-ai-classifier.service';
 
 @Module({
   imports: [
@@ -73,6 +75,8 @@ import { TokenOffchainCredibilityService } from './services/token-offchain-credi
     TokenMarketContextService,
     TokenWebCrawlerService,
     TokenOffchainDiscoveryService,
+    TokenOffchainExternalEvidenceService,
+    TokenOffchainAiClassifierService,
     TokenOffchainCredibilityService,
   ],
 })
