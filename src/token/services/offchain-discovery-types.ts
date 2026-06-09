@@ -204,7 +204,7 @@ export function emptyDiscoveryTrace(input: {
       crawlCacheHit: false,
       persistedReportUsed: false,
       forceRecompute: Boolean(input.forceRecompute),
-      cacheVersion: 'v4',
+      cacheVersion: 'v5',
     },
   };
 }

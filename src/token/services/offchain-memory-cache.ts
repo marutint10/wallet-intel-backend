@@ -53,7 +53,7 @@ export function normalizeCacheUrl(url: string): string {
   }
 }
 
-const DISCOVERY_CACHE_VERSION = 'v4';
+const DISCOVERY_CACHE_VERSION = 'v5';
 
 export function buildDiscoveryCacheKey(input: {
   chain?: string | null;

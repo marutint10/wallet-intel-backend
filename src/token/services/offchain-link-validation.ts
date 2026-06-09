@@ -58,6 +58,23 @@ const AGGREGATOR_HOST_PATTERNS: RegExp[] = [
   /(^|\.)coindesk\.com$/i,
 ];
 
+const BLOCK_EXPLORER_HOST_PATTERNS: RegExp[] = [
+  /(^|\.)etherscan\.io$/i,
+  /(^|\.)ethplorer\.io$/i,
+  /(^|\.)bscscan\.com$/i,
+  /(^|\.)polygonscan\.com$/i,
+  /(^|\.)basescan\.org$/i,
+  /(^|\.)arbiscan\.io$/i,
+  /(^|\.)optimistic\.etherscan\.io$/i,
+  /(^|\.)snowtrace\.io$/i,
+  /(^|\.)ftmscan\.com$/i,
+  /(^|\.)gnosisscan\.io$/i,
+  /(^|\.)celoscan\.io$/i,
+  /(^|\.)moonscan\.io$/i,
+  /(^|\.)cronoscan\.com$/i,
+  /(^|\.)blockscout\.com$/i,
+];
+
 const AGGREGATOR_PATH_PATTERNS: Array<{ host: RegExp; path: RegExp }> = [
   { host: /(^|\.)coinbase\.com$/i, path: /\/price\b/i },
   { host: /(^|\.)binance\.com$/i, path: /\/en\/price\b/i },
@@ -160,6 +177,14 @@ export function isAggregatorUrl(url: string): boolean {
   }
 }
 
+export function isExplorerUrl(url: string): boolean {
+  const hostname = extractHostname(url);
+  if (!hostname) {
+    return false;
+  }
+  return BLOCK_EXPLORER_HOST_PATTERNS.some((pattern) => pattern.test(hostname));
+}
+
 export function isTrustedMetadataSource(source: MetadataSource | undefined): boolean {
   return source ? TRUSTED_METADATA_SOURCES.has(source) : false;
 }
@@ -219,6 +244,10 @@ export function isVerifiedSecondaryLink(
   field: LinkField,
   context: LinkValidationContext,
 ): boolean {
+  if (field === 'docs' && isExplorerUrl(url)) {
+    return false;
+  }
+
   if (isBlockedOfficialLink(url)) {
     return false;
   }
