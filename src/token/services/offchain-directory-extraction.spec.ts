@@ -74,6 +74,31 @@ describe('offchain-directory-extraction', () => {
     expect(result.links.website).toContain('ondo.foundation');
     expect(result.links.telegram).toBeNull();
   });
+
+  it('rejects CoinGecko global news Telegram as token official social', () => {
+    const html = `
+      <html><body>
+        <h1>Pepe (PEPE)</h1>
+        <p>Contract: ${PEPE_CONTRACT}</p>
+        <a href="https://www.pepe.vip/">Website</a>
+        <a href="https://t.me/coingeckonews">Telegram</a>
+      </body></html>
+    `;
+
+    const result = extractOutboundLinksFromDirectoryHtml(
+      html,
+      'https://www.coingecko.com/en/coins/pepe',
+      {
+        tokenName: 'Pepe',
+        tokenSymbol: 'PEPE',
+        contractAddress: PEPE_CONTRACT,
+        chain: 'ethereum',
+      },
+    );
+
+    expect(result.identityVerified).toBe(true);
+    expect(result.links.telegram).toBeNull();
+  });
 });
 
 describe('PEPE metadata enrichment', () => {

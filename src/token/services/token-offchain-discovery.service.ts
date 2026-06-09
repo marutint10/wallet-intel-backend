@@ -32,6 +32,7 @@ import {
   hasCrossProjectMismatch,
   isAggregatorUrl,
   isBlockedOfficialLink,
+  isPlatformDirectorySocialUrl,
   isTrustedMetadataSource,
   sanitizeDiscoveredLinks,
   type LinkProvenanceMap,
@@ -671,6 +672,7 @@ export function extractCoinGeckoLinks(metadata: unknown): DiscoveredLinks {
   const homepage = firstNonAggregatorUrl(links.homepage);
   const twitterHandle = safeString(links.twitter_screen_name);
   const telegram = safeString(links.telegram_channel_identifier);
+  const telegramUrl = telegram ? `https://t.me/${telegram}` : firstUrl(links.chat_url);
 
   return normalizeDiscoveredLinks({
     website: homepage,
@@ -681,7 +683,7 @@ export function extractCoinGeckoLinks(metadata: unknown): DiscoveredLinks {
     whitepaper: firstNonAggregatorUrlMatching(links.homepage, /whitepaper|white-paper/i),
     github: firstNonAggregatorUrl(githubRepos),
     twitter: twitterHandle ? `https://twitter.com/${twitterHandle}` : null,
-    telegram: telegram ? `https://t.me/${telegram}` : firstUrl(links.chat_url),
+    telegram: telegramUrl && !isPlatformDirectorySocialUrl(telegramUrl) ? telegramUrl : null,
     discord: firstUrlMatching(links.chat_url, /discord/i),
     blog: firstUrlMatching(links.homepage, /blog/i),
   });
@@ -701,6 +703,9 @@ export function extractDexScreenerLinks(profile: unknown): DiscoveredLinks {
     const type = safeString(item.type)?.toLowerCase() ?? '';
     const url = safeString(item.url);
     if (!url) {
+      continue;
+    }
+    if (isPlatformDirectorySocialUrl(url)) {
       continue;
     }
     if (type.includes('twitter') || type === 'x') {
@@ -729,7 +734,7 @@ export function extractExplorerLinks(metadata: unknown): DiscoveredLinks {
     website: safeString(tokenInfo.website) ?? safeString(result.website),
     twitter: safeString(tokenInfo.twitter) ?? safeString(result.twitter),
     github: safeString(tokenInfo.github) ?? safeString(result.github),
-    telegram: safeString(tokenInfo.telegram) ?? safeString(result.telegram),
+    telegram: rejectPlatformSocial(safeString(tokenInfo.telegram) ?? safeString(result.telegram)),
     discord: safeString(tokenInfo.discord) ?? safeString(result.discord),
   });
 }
@@ -747,7 +752,7 @@ export function extractExistingMetadataLinks(metadata: unknown): DiscoveredLinks
     whitepaper: safeString(record.whitepaper) ?? safeString(social.whitepaper),
     github: safeString(record.github) ?? safeString(social.github),
     twitter: safeString(record.twitter) ?? safeString(social.twitter),
-    telegram: safeString(record.telegram) ?? safeString(social.telegram),
+    telegram: rejectPlatformSocial(safeString(record.telegram) ?? safeString(social.telegram)),
     discord: safeString(record.discord) ?? safeString(social.discord),
     blog: safeString(record.blog) ?? safeString(social.blog),
   });
@@ -1068,6 +1073,10 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function safeString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function rejectPlatformSocial(url: string | null): string | null {
+  return url && !isPlatformDirectorySocialUrl(url) ? url : null;
 }
 
 function getErrorMessage(err: unknown): string {

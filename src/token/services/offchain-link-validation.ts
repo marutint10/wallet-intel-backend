@@ -161,11 +161,18 @@ export function isPlatformDirectorySocialUrl(url: string): boolean {
   const lower = url.toLowerCase();
   return (
     /t\.me\/coinmarketcapannouncements\b/i.test(lower) ||
+    /t\.me\/coinmarketcap(news|updates|community)?\b/i.test(lower) ||
     /t\.me\/coingecko\b/i.test(lower) ||
+    /t\.me\/coingeckonews\b/i.test(lower) ||
+    /t\.me\/coingeckoupdates\b/i.test(lower) ||
     /twitter\.com\/coinmarketcap\b/i.test(lower) ||
     /x\.com\/coinmarketcap\b/i.test(lower) ||
+    /twitter\.com\/coinmarketcap(news|updates)?\b/i.test(lower) ||
+    /x\.com\/coinmarketcap(news|updates)?\b/i.test(lower) ||
     /twitter\.com\/coingecko\b/i.test(lower) ||
     /x\.com\/coingecko\b/i.test(lower) ||
+    /twitter\.com\/coingecko(news|updates)?\b/i.test(lower) ||
+    /x\.com\/coingecko(news|updates)?\b/i.test(lower) ||
     /discord\.(gg|com)\/(coinmarketcap|coingecko)\b/i.test(lower)
   );
 }

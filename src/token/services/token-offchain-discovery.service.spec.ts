@@ -347,6 +347,20 @@ describe('TokenOffchainDiscoveryService', () => {
     expect(['medium', 'high']).toContain(result.officialLinkConfidence.level);
   });
 
+  it('rejects CoinGecko global Telegram metadata as token official social', () => {
+    const links = extractCoinGeckoLinks({
+      links: {
+        homepage: ['https://www.pepe.vip/'],
+        twitter_screen_name: 'pepecoineth',
+        telegram_channel_identifier: 'coingeckonews',
+      },
+      platforms: { ethereum: '0x6982508145454ce325ddbe47a25d4ec3d2311933' },
+    });
+
+    expect(links.website).toBe('https://www.pepe.vip/');
+    expect(links.telegram).toBeNull();
+  });
+
   it('passes DexScreener and CoinGecko metadata without calling Brave', async () => {
     const service = makeDiscoveryService({ BRAVE_SEARCH_API_KEY: 'test-key' });
     const braveSpy = jest.spyOn(service as any, 'discoverWithBrave');
