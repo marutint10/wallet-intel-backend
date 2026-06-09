@@ -140,7 +140,7 @@ Hard rules:
 
 @Injectable()
 export class TokenAiSummaryService {
-  private static readonly CACHE_PREFIX = 'token:summary:v9:';
+  private static readonly CACHE_PREFIX = 'token:summary:v11:';
   private static readonly CACHE_TTL_SECONDS = 86_400;
   private static readonly FALLBACK_CACHE_TTL_SECONDS = 1_800;
   private static readonly GEMINI_PRIMARY_MODEL = 'gemini-2.5-flash';
@@ -520,6 +520,32 @@ Write a 4-6 sentence cautious retail risk summary now.
       return '';
     }
 
+    if (input.offChainCredibilityCategory === 'meme') {
+      const hasVerifiedWebsite = !input.offChainCredibilityFlags.includes(
+        'Official Website Not Verified',
+      );
+      if (hasVerifiedWebsite) {
+        return (
+          'Market maturity may appear strong, but off-chain credibility is community-driven or limited, with a verified meme-project website but limited documentation or functional utility evidence. '
+        );
+      }
+      return (
+        'Off-chain credibility appears community-driven or limited; market maturity does not remove holder concentration risk. '
+      );
+    }
+
+    if (
+      input.offChainCredibilityTier === 'limited' ||
+      input.offChainCredibilityTier === 'weak' ||
+      input.offChainCredibilityRiskLevel === 'high' ||
+      input.offChainCredibilityRiskLevel === 'severe' ||
+      input.offChainCredibilityFlags.includes('Official Website Not Verified')
+    ) {
+      return (
+        'Off-chain credibility appears community-driven or limited; market maturity does not remove holder concentration risk. '
+      );
+    }
+
     if (
       input.offChainCredibilityTier === 'institutional_grade' ||
       input.offChainCredibilityTier === 'strong' ||
@@ -528,19 +554,6 @@ Write a 4-6 sentence cautious retail risk summary now.
       return (
         'Off-chain credibility appears strong based on official project, documentation, and use-case signals, but the visible on-chain score remains partial. '
       );
-    }
-
-    if (input.offChainCredibilityCategory === 'meme') {
-      return (
-        'Off-chain credibility may be limited or community-driven; market maturity does not remove holder concentration risk. '
-      );
-    }
-
-    if (
-      input.offChainCredibilityRiskLevel === 'high' ||
-      input.offChainCredibilityRiskLevel === 'severe'
-    ) {
-      return `Off-chain credibility flags: ${input.offChainCredibilityFlags.join(', ') || 'review recommended'}. `;
     }
 
     return 'Off-chain credibility is available as a separate module and is not merged into the visible on-chain score yet. ';

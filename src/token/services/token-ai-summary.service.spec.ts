@@ -305,6 +305,6 @@ describe('TokenAiSummaryService', () => {
 
     const fallback = (service as any).buildFallbackSummary(input);
     expect(fallback.toLowerCase()).toContain('community-driven');
-    expect(fallback.toLowerCase()).toContain('holder concentration');
+    expect(fallback.toLowerCase()).toMatch(/verified meme-project|limited documentation/);
   });
 });

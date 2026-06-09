@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   HttpException,
   HttpStatus,
@@ -217,7 +218,10 @@ export class TokenController {
   // POST /token/analyze
   // Starts background analysis for a token contract
   @Post('analyze')
-  async analyzeToken(@Body() body: { contractAddress: string; chain?: string }) {
+  async analyzeToken(
+    @Body() body: { contractAddress: string; chain?: string; forceOffchain?: boolean },
+    @Query('forceOffchain') forceOffchainQuery?: string,
+  ) {
     const contractAddress = body.contractAddress?.trim();
     if (!contractAddress) {
       throw new BadRequestException({
@@ -227,9 +231,12 @@ export class TokenController {
     }
 
     const chain = body.chain ?? 'ethereum';
+    const forceOffchain =
+      body.forceOffchain === true || forceOffchainQuery === 'true';
     const { entity, validation } = await this.tokenAnalysis.startAnalysis(
       contractAddress,
       chain,
+      { forceOffchain },
     );
 
     if (!validation.canAnalyze) {
@@ -336,6 +343,45 @@ export class TokenController {
       contractAddress: entity.contractAddress,
       chain: entity.chain,
     });
+  }
+
+  private isOffchainDebugEnabled(): boolean {
+    return (
+      process.env.NODE_ENV !== 'production' ||
+      process.env.OFFCHAIN_DEBUG_ENABLED === 'true'
+    );
+  }
+
+  // POST /token/:address/offchain/recompute?chain=ethereum&debug=true
+  @Post(':address/offchain/recompute')
+  async recomputeOffchainCredibility(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+    @Query('debug') debug?: string,
+  ) {
+    if (!this.isEvmContractAddress(address)) {
+      throw new BadRequestException('Invalid contract address');
+    }
+
+    return this.tokenAnalysis.recomputeOffchainCredibility(address, chain, {
+      debug: debug === 'true',
+    });
+  }
+
+  // GET /token/:address/offchain/debug?chain=ethereum
+  @Get(':address/offchain/debug')
+  async debugOffchainDiscovery(
+    @Param('address') address: string,
+    @Query('chain') chain: string = 'ethereum',
+  ) {
+    if (!this.isOffchainDebugEnabled()) {
+      throw new ForbiddenException('Off-chain debug endpoint is disabled');
+    }
+    if (!this.isEvmContractAddress(address)) {
+      throw new BadRequestException('Invalid contract address');
+    }
+
+    return this.tokenAnalysis.debugOffchainDiscovery(address, chain);
   }
 
   // POST /token/:address/contract-safety/refresh?chain=ethereum
