@@ -251,6 +251,10 @@ function classifyBraveHit(
     sourceType = 'developer_resource';
     trustLevel = matchedTokenName || matchedContractAddress ? 'medium' : 'low';
     reason = 'Search result points to a developer resource.';
+  } else if (isWalletOrMarketDirectoryUrl(hit.url)) {
+    sourceType = 'trusted_directory';
+    trustLevel = matchedContractAddress || matchedTokenName ? 'medium' : 'low';
+    reason = 'Search result is a third-party token or wallet directory page, not official developer proof.';
   } else if (isTrustedDirectoryUrl(hit.url)) {
     sourceType = 'trusted_directory';
     trustLevel = matchedContractAddress || matchedTokenName ? 'medium' : 'low';
@@ -384,6 +388,17 @@ function isSpamOrSeo(text: string, url: string): boolean {
   return (
     /price prediction|buy now|presale|1000x|best wallet|airdrop claim/i.test(text) ||
     /\/tag\/|\/category\/|utm_/i.test(url)
+  );
+}
+
+function isWalletOrMarketDirectoryUrl(url: string): boolean {
+  const hostname = extractHostname(url) ?? '';
+  return (
+    /(^|\.)phantom\.app$/i.test(hostname) ||
+    /(^|\.)wallet\.phantom\.app$/i.test(hostname) ||
+    /(^|\.)geckoterminal\.com$/i.test(hostname) ||
+    /(^|\.)dexscreener\.com$/i.test(hostname) ||
+    /(^|\.)dextools\.io$/i.test(hostname)
   );
 }
 

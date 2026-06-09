@@ -372,6 +372,68 @@ describe('buildOffChainCredibilityReport', () => {
     ).toBe(false);
   });
 
+  it('PEPE deterministic fallback stays meme when Gemini quota fails', () => {
+    const report = buildOffChainCredibilityReport({
+      ...pepeLikeData(),
+      aiClassification: null,
+      aiClassifierDebug: {
+        enabled: true,
+        provider: 'gemini',
+        model: 'gemini-2.5-flash-lite',
+        hasApiKey: true,
+        evidenceItemCount: 1,
+        attempted: true,
+        failureReason: '429 Too Many Requests',
+        resultSource: 'deterministic',
+      },
+      externalEvidence: {
+        status: 'done',
+        evidenceItems: [
+          {
+            id: 'ev_pepe_directory',
+            sourceType: 'trusted_directory',
+            trustLevel: 'medium',
+            relevance: 'high',
+            url: 'https://www.coingecko.com/en/coins/pepe',
+            title: 'Pepe PEPE meme coin',
+            snippet: 'PEPE is a community-driven meme coin with Pepe the Frog positioning.',
+            matchedContractAddress: true,
+            matchedTokenName: true,
+            reason: 'Trusted directory matched contract and meme positioning.',
+          },
+          {
+            id: 'ev_pepe_trading',
+            sourceType: 'trusted_directory',
+            trustLevel: 'medium',
+            relevance: 'high',
+            url: 'https://dexscreener.com/ethereum/pepe',
+            title: 'PEPE price and liquidity',
+            snippet: 'DEX pair trading, liquidity, and price information.',
+            matchedContractAddress: true,
+            reason: 'Market directory matched contract.',
+          },
+        ],
+        summary: {
+          trustedDirectoryCount: 2,
+          officialSourceCount: 0,
+          externalValidationCount: 2,
+          riskWarningCount: 0,
+          scamWarningCount: 0,
+          unrelatedCount: 0,
+        },
+      },
+    });
+
+    expect(report.projectUnderstanding?.source).toBe('deterministic');
+    expect(report.projectUnderstanding?.category).toBe('meme');
+    expect(report.projectUnderstanding?.claimedUseCase).toBe('Community-driven meme token');
+    expect(report.projectUnderstanding?.hasClearUseCase).toBe(false);
+    expect(report.score).toBeLessThanOrEqual(75);
+    expect(report.verdict.toLowerCase()).toContain('community/meme');
+    expect(report.verdict.toLowerCase()).not.toContain('decentralized finance protocol');
+    expect(report.verdict.toLowerCase()).not.toContain('infrastructure use-case signals');
+  });
+
   it('meme pretending infrastructure utility receives unsupported claim penalty', () => {
     const report = buildOffChainCredibilityReport({
       ...pepeLikeData(),
@@ -396,6 +458,151 @@ describe('buildOffChainCredibilityReport', () => {
     expect(report.claimChecks.some((check) => check.status === 'unsupported')).toBe(true);
     expect(report.riskFlags.some((flag) => flag.title === 'Unsupported Major Claim')).toBe(true);
     expect(report.score).toBeLessThan(60);
+  });
+
+  it('Chainlink backed-by claim is not supported by security page alone', () => {
+    const data = linkLikeData();
+    const report = buildOffChainCredibilityReport({
+      ...data,
+      crawl: makeCrawl({
+        ...data.crawl!,
+        extractedText:
+          `${data.crawl?.extractedText ?? ''} Chainlink is backed by a secure oracle network.`,
+      }),
+      externalEvidence: externalEvidenceFixture(),
+    });
+
+    const backedBy = report.claimChecks.find((check) => check.claim === 'backed by');
+    expect(backedBy?.status).toBe('unsupported');
+    expect(backedBy?.sourceUrls).not.toContain('https://chain.link/security');
+    expect(report.projectProfile.category).toBe('infrastructure');
+  });
+
+  it('Chainlink score is capped below perfect while remaining strong', () => {
+    const report = buildOffChainCredibilityReport({
+      ...linkLikeData(),
+      externalEvidence: externalEvidenceFixture(),
+      aiClassification: aiClassification({
+        evidenceRefs: ['ev_chainlink_docs', 'ev_chainlink_github'],
+      }),
+      aiClassifierDebug: {
+        enabled: true,
+        provider: 'gemini',
+        model: 'gemini-2.5-flash-lite',
+        hasApiKey: true,
+        evidenceItemCount: 2,
+        attempted: true,
+        resultSource: 'ai',
+      },
+    });
+
+    expect(report.score).toBeLessThanOrEqual(97);
+    expect(report.score).toBeGreaterThanOrEqual(85);
+    expect(report.projectUnderstanding?.category).toBe('infrastructure');
+    expect(report.verdict.toLowerCase()).toMatch(/oracle|infrastructure/);
+  });
+
+  it('FLOYX search-only fallback remains low confidence unknown', () => {
+    const report = buildOffChainCredibilityReport({
+      tokenName: 'FLOYX',
+      tokenSymbol: 'FLOYX',
+      contractAddress: '0xf10yx00000000000000000000000000000000000',
+      discovery: makeDiscovery({
+        status: 'partial',
+        discoveryMode: 'search_only',
+        officialLinkConfidence: { level: 'low', reasons: ['No official website discovered'] },
+        trustedDirectoryUrls: ['https://phantom.app/tokens/polygon/floyx'],
+      }),
+      crawl: null,
+      externalEvidence: {
+        status: 'done',
+        evidenceItems: [
+          {
+            id: 'ev_floyx_phantom',
+            sourceType: 'trusted_directory',
+            trustLevel: 'medium',
+            relevance: 'high',
+            url: 'https://phantom.app/tokens/polygon/floyx',
+            title: 'FLOYX token page',
+            snippet: 'Third-party wallet token directory page for FLOYX.',
+            matchedContractAddress: true,
+            reason: 'Third-party token or wallet directory page, not official developer proof.',
+          },
+          {
+            id: 'ev_floyx_social',
+            sourceType: 'news',
+            trustLevel: 'low',
+            relevance: 'medium',
+            title: 'FLOYX Web3 social platform',
+            snippet: 'Weak third-party snippets describe a possible Web3 social platform.',
+            matchedTokenName: true,
+            reason: 'Search result matched token name.',
+          },
+        ],
+        summary: {
+          trustedDirectoryCount: 1,
+          officialSourceCount: 0,
+          externalValidationCount: 1,
+          riskWarningCount: 0,
+          scamWarningCount: 0,
+          unrelatedCount: 0,
+        },
+      },
+      fetchErrors: [],
+    });
+
+    expect(report.discoveryMode).toBe('search_only');
+    expect(report.discoveredLinks.website).toBeNull();
+    expect(report.projectUnderstanding?.category).toBe('unknown');
+    expect(report.projectUnderstanding?.hasClearUseCase).toBe(false);
+    expect(report.score).toBeLessThanOrEqual(45);
+    expect(report.verdict.toLowerCase()).toContain('official identity could not be verified');
+  });
+
+  it('ONDO verdict mentions RWA institutional finance', () => {
+    const report = buildOffChainCredibilityReport({
+      tokenName: 'Ondo',
+      tokenSymbol: 'ONDO',
+      contractAddress: '0xfaba6f8e4a5e8ab82f62fe7c39859fa577269be3',
+      discovery: makeDiscovery({
+        status: 'done',
+        discoveryMode: 'official_verified',
+        discoveredLinks: {
+          website: 'https://ondo.foundation/',
+          docs: 'https://docs.ondo.foundation/ondo-token',
+          whitepaper: null,
+          github: null,
+          twitter: null,
+          telegram: null,
+          discord: null,
+          blog: null,
+        },
+        linkSources: { website: 'coingecko', docs: 'coingecko' },
+        hasTrustedOfficialWebsite: true,
+        officialLinkConfidence: { level: 'high', reasons: ['Trusted metadata'] },
+      }),
+      crawl: makeCrawl({
+        homepageUrl: 'https://ondo.foundation/',
+        extractedText:
+          'Ondo provides tokenized real-world assets and institutional-grade on-chain finance.',
+        mentions: { tokenName: true, tokenSymbol: true, contractAddress: false },
+        signals: {
+          hasDocs: true,
+          hasWhitepaper: false,
+          hasGithub: false,
+          hasAuditsMentioned: false,
+          hasTeamInfo: false,
+          hasClearUseCase: true,
+          suspiciousPhrases: [],
+          adoptionClaims: [],
+        },
+      }),
+      externalEvidence: ondoEvidenceFixture(),
+      fetchErrors: [],
+    });
+
+    expect(report.projectUnderstanding?.category).toBe('rwa');
+    expect(report.verdict.toLowerCase()).toMatch(/rwa|institutional on-chain finance/);
   });
 
   it('no official website applies penalty and flags', () => {

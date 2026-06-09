@@ -220,17 +220,16 @@ const CATEGORY_RULES: Array<{
   {
     category: 'defi',
     patterns: [
-      /\bdex\b/i,
       /\bamm\b/i,
       /lending/i,
       /borrowing/i,
       /yield/i,
-      /liquidity/i,
       /staking/i,
       /derivatives/i,
       /vault/i,
       /money market/i,
-      /swap/i,
+      /dex protocol/i,
+      /swap protocol/i,
     ],
     useCase: 'Decentralized finance protocol',
   },
@@ -762,8 +761,22 @@ export function detectProjectCategory(
     .filter(([category]) => category !== 'meme' && category !== 'unknown')
     .sort((left, right) => right[1] - left[1])[0];
   const meme = scores.get('meme') ?? 0;
+  const defiIsMarketOnly =
+    functionalBest?.[0] === 'defi' && !hasDefiProtocolEvidence(haystack);
 
-  if (functionalBest && functionalBest[1] >= Math.max(3, meme + 2)) {
+  if (meme >= 4 && (defiIsMarketOnly || !functionalBest || functionalBest[1] < 3)) {
+    return {
+      category: 'meme',
+      score: meme,
+      claimedUseCase: 'Community-driven meme token',
+      evidenceRefs: collectEvidenceRefs(externalEvidence, ['community_social', 'trusted_directory', 'official_website']),
+      externalValidation: resolveExternalValidation(externalEvidence),
+      communitySignal: resolveCommunitySignal(externalEvidence, haystack),
+      negativeRiskEvidence: resolveNegativeRiskEvidence(externalEvidence),
+    };
+  }
+
+  if (functionalBest && functionalBest[1] >= Math.max(3, meme + 2) && !defiIsMarketOnly) {
     return {
       category: functionalBest[0],
       score: functionalBest[1],
@@ -779,7 +792,7 @@ export function detectProjectCategory(
     return {
       category: 'meme',
       score: meme,
-      claimedUseCase: 'Community or meme token positioning',
+      claimedUseCase: 'Community-driven meme token',
       evidenceRefs: collectEvidenceRefs(externalEvidence, ['community_social', 'trusted_directory']),
       externalValidation: resolveExternalValidation(externalEvidence),
       communitySignal: resolveCommunitySignal(externalEvidence, haystack),
@@ -821,6 +834,12 @@ export function detectProjectCategory(
     communitySignal: resolveCommunitySignal(externalEvidence, haystack),
     negativeRiskEvidence: resolveNegativeRiskEvidence(externalEvidence),
   };
+}
+
+function hasDefiProtocolEvidence(text: string): boolean {
+  return /lending|borrowing|amm|dex protocol|swap protocol|vault|yield protocol|money market|staking protocol|derivatives protocol/i.test(
+    text,
+  );
 }
 
 function buildExternalEvidenceText(externalEvidence?: OffchainExternalEvidenceResult): string {
@@ -1133,10 +1152,7 @@ export function buildClaimChecks(
     const evidence: string[] = [];
     const claimSources: string[] = [];
 
-    if (projectProfile.hasDocs === true) {
-      evidence.push('Verified documentation link detected');
-    }
-    if (verifiedAuditLink || verifiedSecurityLink) {
+    if (item.claim === 'audited by' && (verifiedAuditLink || verifiedSecurityLink)) {
       evidence.push('Verified audit or security link detected on official materials');
       if (crawl?.links.audit) {
         claimSources.push(crawl.links.audit);
@@ -1146,12 +1162,25 @@ export function buildClaimChecks(
       }
     }
     if (
+      item.claim === 'secured by' &&
+      verifiedSecurityLink &&
+      /secured by|security|staking|cryptoeconomic security|proof of reserve|decentralized oracle network/i.test(
+        evidenceText,
+      )
+    ) {
+      evidence.push('Official security material contains security or cryptoeconomic-security language');
+      if (crawl?.links.security) {
+        claimSources.push(crawl.links.security);
+      }
+    }
+    if (
+      isAdoptionClaim(item.claim) &&
       (crawl?.signals.adoptionClaims.length ?? 0) > 0 &&
       projectProfile.hasClearUseCase === true
     ) {
       evidence.push('Adoption language found on verified official materials');
     }
-    if (item.requiresEvidence && item.requiresEvidence.test(evidenceText) && verifiedAuditLink) {
+    if (item.claim === 'audited by' && item.requiresEvidence && item.requiresEvidence.test(evidenceText) && verifiedAuditLink) {
       evidence.push('Nearby audit/security terminology found on verified materials');
     }
 
@@ -1165,6 +1194,12 @@ export function buildClaimChecks(
 
     let status: OffChainCredibilityReport['claimChecks'][number]['status'] = 'unknown';
     if (item.claim === 'audited by' && !verifiedAuditLink && !verifiedSecurityLink) {
+      status = 'unsupported';
+    } else if (item.claim === 'backed by' && matchingExternalEvidence.length === 0) {
+      status = 'unsupported';
+    } else if (item.claim === 'secured by' && evidence.length === 0) {
+      status = 'unsupported';
+    } else if (isAdoptionClaim(item.claim) && evidence.length === 0) {
       status = 'unsupported';
     } else if (evidence.length >= 2) {
       status = 'supported';
@@ -1185,6 +1220,12 @@ export function buildClaimChecks(
   }
 
   return checks;
+}
+
+function isAdoptionClaim(claim: string): boolean {
+  return /institutional|enterprise|partner|real-world adoption|used by major banks|government adoption|official partner/i.test(
+    claim,
+  );
 }
 
 function findExternalEvidenceForClaim(
@@ -1415,6 +1456,39 @@ export function scoreOffChainCredibility(input: {
   });
   score = caps.score;
 
+  const hasDocs = projectProfile.hasDocs === true;
+  const hasGithub = projectProfile.hasGithub === true;
+  const hasWhitepaper = projectProfile.hasWhitepaper === true;
+  const noDeepProjectMaterials = !hasDocs && !hasGithub && !hasWhitepaper;
+  if (score >= 100) {
+    score = 97;
+  }
+  if (confidence === 'low') {
+    score = Math.min(score, 55);
+  }
+  if (data.discovery.status === 'partial') {
+    score = Math.min(score, 85);
+  }
+  if (unsupportedClaims.length > 0) {
+    score = Math.min(score, 90);
+  }
+  if (noDeepProjectMaterials) {
+    score = Math.min(score, 78);
+  }
+  if (categoryMatch.category === 'meme' && noDeepProjectMaterials) {
+    score = Math.min(score, 75);
+  }
+  if (discoveryMeta.discoveryMode === 'search_only' || confidence === 'low') {
+    score = Math.min(score, 45);
+  }
+  if (
+    data.aiClassifierDebug?.enabled &&
+    data.aiClassifierDebug.provider === 'gemini' &&
+    data.aiClassifierDebug.resultSource === 'deterministic'
+  ) {
+    score = Math.min(score, categoryMatch.category === 'meme' ? 75 : 85);
+  }
+
   let credibilityTier = resolveCredibilityTier(score, projectProfile, adoptionEvidence);
   credibilityTier = capCredibilityTier(credibilityTier, caps.maxTier);
   if (categoryMatch.category === 'meme') {
@@ -1485,9 +1559,9 @@ function buildProjectProfile(
     ),
   );
   const hasClearUseCase =
-    (FUNCTIONAL_CATEGORIES.has(categoryMatch.category) || categoryMatch.category === 'meme') &&
+    FUNCTIONAL_CATEGORIES.has(categoryMatch.category) &&
     (Boolean(crawl?.signals.hasClearUseCase) ||
-      (categoryMatch.category !== 'meme' && categoryMatch.score > 0) ||
+      categoryMatch.score > 0 ||
       hasDocs ||
       hasGithub ||
       hasWhitepaper ||
@@ -1734,7 +1808,7 @@ function resolveOffChainVerdict(input: {
     return 'Off-chain credibility requires review because external evidence contains material scam, exploit, or risk-warning signals.';
   }
   if (!input.hasWebsite && input.externalValidation !== 'strong') {
-    return 'Official identity could not be fully verified. Open-web evidence is limited or partial, so off-chain credibility remains uncertain.';
+    return 'Official identity could not be verified. Evidence is limited to weak third-party/search results, so off-chain credibility remains uncertain.';
   }
   if (input.linkMismatch || input.officialLinkConfidence.level === 'low') {
     return 'Off-chain credibility requires review because the discovered website or project links could not be confidently matched to the token.';
@@ -1747,7 +1821,15 @@ function resolveOffChainVerdict(input: {
     (input.hasDocs || input.hasGithub) &&
     (input.externalValidation === 'strong' || input.externalValidation === 'moderate')
   ) {
-    return 'Off-chain credibility appears strong. Official website, documentation/developer resources, and external evidence support a clear infrastructure or oracle use case.';
+    return 'Off-chain credibility appears strong. Official website, documentation, GitHub or security resources, and external evidence support a clear oracle/infrastructure use case.';
+  }
+  if (
+    input.category === 'rwa' &&
+    input.hasWebsite &&
+    input.hasTrustedOfficialWebsite &&
+    (input.externalValidation === 'strong' || input.externalValidation === 'moderate')
+  ) {
+    return 'Off-chain credibility appears strong. Official links and external evidence support an RWA / institutional on-chain finance project.';
   }
   if (
     input.category === 'meme' &&
@@ -1755,7 +1837,7 @@ function resolveOffChainVerdict(input: {
     input.hasTrustedOfficialWebsite &&
     input.negativeRiskEvidence === 'none_found'
   ) {
-    return 'Official identity appears verified. Project appears meme or community-driven; credibility depends more on community, market presence, and absence of risk warnings than technical utility.';
+    return 'Official identity appears verified, but this is primarily a community/meme token with limited documentation, developer resources, or functional utility evidence.';
   }
   if (input.credibilityTier === 'limited') {
     return 'Off-chain credibility appears limited. Official links may exist, but documentation, utility evidence, or external validation remain incomplete.';
@@ -1765,9 +1847,18 @@ function resolveOffChainVerdict(input: {
     input.credibilityTier === 'strong' ||
     (input.category === 'infrastructure' && input.riskLevel === 'low')
   ) {
-    return 'Off-chain credibility appears strong based on official project, documentation, developer, and infrastructure use-case signals.';
+    if (input.category === 'infrastructure') {
+      return 'Off-chain credibility appears strong. Official links and external evidence support a clear oracle/infrastructure use case.';
+    }
+    if (input.category === 'rwa') {
+      return 'Off-chain credibility appears strong. Official links and external evidence support an RWA / institutional on-chain finance project.';
+    }
+    return 'Off-chain credibility appears strong based on verified official identity, project materials, and external corroboration.';
   }
   if (input.riskLevel === 'high' || input.riskLevel === 'severe' || input.credibilityTier === 'weak') {
+    if (!input.hasWebsite) {
+      return 'Official identity could not be verified. Evidence is limited to weak third-party/search results, so off-chain credibility remains uncertain.';
+    }
     return 'Off-chain credibility is limited because official project links, documentation, or clear use-case evidence could not be verified.';
   }
   return 'Off-chain credibility is mixed and should be reviewed alongside on-chain holder and market context signals.';
