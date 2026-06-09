@@ -3,6 +3,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cache } from 'cache-manager';
 import { lookupKnownExchange } from '../constants/known-exchange-addresses';
+import { aggregateDexScreenerProfile } from './offchain-directory-extraction';
 
 export type HolderLabel =
   | 'eoa'
@@ -636,7 +637,8 @@ export class TokenIntelligenceService {
         (left, right) => (right.liquidity?.usd ?? 0) - (left.liquidity?.usd ?? 0),
       )[0];
 
-      return {
+      const aggregated = aggregateDexScreenerProfile(pairs);
+      return aggregated ?? {
         info: bestPair.info ?? null,
         pairs,
       };

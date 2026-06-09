@@ -38,6 +38,8 @@ import {
 } from './token-contract-safety.service';
 import { TokenMarketContextService } from './token-market-context.service';
 import { TokenOffchainCredibilityService } from './token-offchain-credibility.service';
+import { TokenOffchainDiscoveryService } from './token-offchain-discovery.service';
+import type { OffchainDiscoveryTrace } from './offchain-discovery-types';
 import { resolveOffchainConfig } from './offchain-config';
 
 // FAST_MODE = true enables the B2B holder-intelligence path:
@@ -76,12 +78,14 @@ export class TokenAnalysisService {
     private readonly contractSafety: TokenContractSafetyService,
     private readonly marketContext: TokenMarketContextService,
     private readonly offChainCredibility: TokenOffchainCredibilityService,
+    private readonly offchainDiscovery: TokenOffchainDiscoveryService,
   ) {}
 
   // --- START ANALYSIS (saves status=processing, runs in background) ---
   async startAnalysis(
     contractAddress: string,
     chain: string,
+    options?: { forceOffchain?: boolean },
   ): Promise<{
     entity: TokenAnalysisEntity;
     validation: TokenAnalysisTargetValidation;
@@ -148,7 +152,7 @@ export class TokenAnalysisService {
     }
 
     // Run analysis in background - do not await
-    void this.runAnalysis(address, chain).catch(async (err: unknown) => {
+    void this.runAnalysis(address, chain, options).catch(async (err: unknown) => {
       const errorMessage = this.getErrorMessage(err);
       this.logger.error(`Analysis failed for ${address}: ${errorMessage}`);
       await this.tokenRepo.update(
@@ -221,6 +225,124 @@ export class TokenAnalysisService {
     });
   }
 
+  async recomputeOffchainCredibility(
+    contractAddress: string,
+    chain: string,
+    options?: { debug?: boolean },
+  ): Promise<{
+    offChainCredibility: Awaited<ReturnType<TokenOffchainCredibilityService['buildReport']>>;
+    debugTrace?: OffchainDiscoveryTrace;
+  }> {
+    const address = contractAddress.trim().toLowerCase();
+    const existing = await this.tokenRepo.findOne({
+      where: { contractAddress: address, chain },
+    });
+
+    const offchainProfiles = await this.intelligence.getOffchainMetadataProfiles(address, chain);
+    const report = await this.offChainCredibility.buildReport({
+      tokenName: existing?.tokenName ?? null,
+      tokenSymbol: existing?.tokenSymbol ?? null,
+      contractAddress: address,
+      chain,
+      dexScreenerProfile: offchainProfiles.dexScreenerProfile,
+      coinGeckoMetadata: offchainProfiles.coinGeckoMetadata,
+      explorerMetadata: offchainProfiles.explorerMetadata,
+      existingMetadata: existing?.qualityMetrics ?? null,
+      forceRefresh: true,
+      debug: options?.debug,
+    });
+
+    if (existing) {
+      const quality = (existing.qualityMetrics ?? {}) as Record<string, unknown>;
+      const qualityMetrics = {
+        ...quality,
+        offChainCredibility: report,
+      } as unknown as QueryDeepPartialEntity<Record<string, unknown> | null>;
+
+      await this.tokenRepo.update(
+        { contractAddress: address, chain },
+        {
+          qualityMetrics,
+          updatedAt: new Date(),
+        },
+      );
+    }
+
+    const { debugTrace, ...offChainCredibility } = report as typeof report & {
+      debugTrace?: OffchainDiscoveryTrace;
+    };
+    return options?.debug && debugTrace
+      ? { offChainCredibility, debugTrace }
+      : { offChainCredibility };
+  }
+
+  async debugOffchainDiscovery(
+    contractAddress: string,
+    chain: string,
+  ): Promise<OffchainDiscoveryTrace> {
+    const address = contractAddress.trim().toLowerCase();
+    const existing = await this.tokenRepo.findOne({
+      where: { contractAddress: address, chain },
+    });
+    const offchainProfiles = await this.intelligence.getOffchainMetadataProfiles(address, chain);
+
+    const discovery = await this.offchainDiscovery.discoverOfficialLinks({
+      tokenName: existing?.tokenName ?? null,
+      tokenSymbol: existing?.tokenSymbol ?? null,
+      contractAddress: address,
+      chain,
+      dexScreenerProfile: offchainProfiles.dexScreenerProfile,
+      coinGeckoMetadata: offchainProfiles.coinGeckoMetadata,
+      explorerMetadata: offchainProfiles.explorerMetadata,
+      existingMetadata: existing?.qualityMetrics ?? null,
+      forceRefresh: true,
+      debug: true,
+    });
+
+    return (
+      discovery.debugTrace ?? {
+        token: {
+          name: existing?.tokenName ?? '',
+          symbol: existing?.tokenSymbol ?? '',
+          contractAddress: address,
+          chain,
+        },
+        structuredMetadata: {
+          dexScreenerWebsitesFound: [],
+          dexScreenerSocialsFound: [],
+          dexScreenerPairCount: null,
+          coinGeckoHomepageFound: [],
+          coinGeckoTwitterFound: null,
+          coinGeckoGithubFound: [],
+          coinGeckoCategories: [],
+          coinGeckoPlatforms: {},
+          coinGeckoContractMatched: null,
+          explorerWebsiteFound: null,
+        },
+        candidates: [],
+        directoryExtraction: [],
+        brave: { enabled: false, called: false, queries: [], resultUrls: [], errors: [] },
+        finalSelection: {
+          discoveryMode: discovery.discoveryMode,
+          website: discovery.discoveredLinks.website,
+          websiteSource: discovery.linkSources.website ?? null,
+          docs: discovery.discoveredLinks.docs,
+          github: discovery.discoveredLinks.github,
+          twitter: discovery.discoveredLinks.twitter,
+          telegram: discovery.discoveredLinks.telegram,
+          discord: discovery.discoveredLinks.discord,
+        },
+        cache: {
+          discoveryCacheHit: false,
+          crawlCacheHit: false,
+          persistedReportUsed: false,
+          forceRecompute: true,
+          cacheVersion: 'v4',
+        },
+      }
+    );
+  }
+
   async refreshContractSafety(
     contractAddress: string,
     chain: string,
@@ -256,7 +378,11 @@ export class TokenAnalysisService {
   }
 
   // --- CORE ANALYSIS PIPELINE ---
-  private async runAnalysis(contractAddress: string, chain: string): Promise<void> {
+  private async runAnalysis(
+    contractAddress: string,
+    chain: string,
+    options?: { forceOffchain?: boolean },
+  ): Promise<void> {
     const address = contractAddress.toLowerCase();
     this.logger.log(`Starting analysis for ${contractAddress} on ${chain}`);
 
@@ -610,6 +736,7 @@ export class TokenAnalysisService {
             deployer: tokenMetadata.deployer,
             owner: tokenMetadata.owner,
           },
+          forceRefresh: options?.forceOffchain === true,
         });
         this.logger.log(
           `Off-chain credibility: score=${offChainCredibilityReport.score ?? 'n/a'} ` +
