@@ -1,5 +1,9 @@
 import { ConfigService } from '@nestjs/config';
-import { parseAiClassifierJsonResponse, TokenOffchainAiClassifierService } from './token-offchain-ai-classifier.service';
+import {
+  parseAiClassifierJsonResponse,
+  selectClassifierEvidence,
+  TokenOffchainAiClassifierService,
+} from './token-offchain-ai-classifier.service';
 import type { DiscoveredLinks } from './offchain-discovery-types';
 import type { OffchainExternalEvidenceResult } from './token-offchain-external-evidence.service';
 
@@ -227,5 +231,77 @@ describe('TokenOffchainAiClassifierService Gemini flat output', () => {
     expect(result.debug.provider).toBe('gemini');
     expect(result.debug.resultSource).toBe('deterministic');
     expect(result.debug.failureReason).toBeDefined();
+  });
+
+  it('backs off Gemini after quota errors in the same session', async () => {
+    const service = new TokenOffchainAiClassifierService(makeGeminiConfig());
+    const geminiSpy = jest
+      .spyOn(service as any, 'generateGeminiText')
+      .mockRejectedValueOnce(new Error('429 Too Many Requests: quotaValue: 20 retryDelay: 30s'));
+
+    const input = {
+      tokenName: 'PEPE',
+      tokenSymbol: 'PEPE',
+      contractAddress: '0x6982508145454ce325ddbe47a25d4ec3d2311933',
+      chain: 'ethereum',
+      discoveredLinks: links({ website: 'https://www.pepe.vip/' }),
+      discoveryMode: 'official_verified' as const,
+      officialLinkConfidence: 'medium' as const,
+      crawl: null,
+      externalEvidence: evidence([]),
+      forceRefresh: true,
+    };
+
+    const first = await service.classifyWithDebug(input);
+    const second = await service.classifyWithDebug(input);
+
+    expect(first.debug.attempted).toBe(true);
+    expect(first.debug.failureReason).toContain('429');
+    expect(second.debug.attempted).toBe(false);
+    expect(second.debug.skippedReason).toBe('gemini_quota_backoff');
+    expect(second.debug.resultSource).toBe('deterministic');
+    expect(geminiSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('prefers official evidence over explorer and trading evidence refs', async () => {
+    const selected = selectClassifierEvidence(
+      evidence([
+        {
+          id: 'ev_dex',
+          sourceType: 'trusted_directory',
+          trustLevel: 'medium',
+          relevance: 'high',
+          url: 'https://dexscreener.com/ethereum/chainlink',
+          title: 'Chainlink price and liquidity',
+          snippet: 'Trading and liquidity page.',
+          matchedContractAddress: true,
+          reason: 'Market directory matched.',
+        },
+        {
+          id: 'ev_docs',
+          sourceType: 'official_docs',
+          trustLevel: 'high',
+          relevance: 'high',
+          url: 'https://docs.chain.link/',
+          title: 'Chainlink Docs',
+          snippet: 'Data feeds and oracle documentation.',
+          matchedOfficialDomain: true,
+          reason: 'Official docs.',
+        },
+        {
+          id: 'ev_explorer',
+          sourceType: 'explorer_identity',
+          trustLevel: 'medium',
+          relevance: 'high',
+          url: 'https://etherscan.io/token/0x5149',
+          title: 'LINK Token',
+          snippet: 'Explorer identity page.',
+          matchedContractAddress: true,
+          reason: 'Explorer identity.',
+        },
+      ]),
+    );
+
+    expect(selected.map((item) => item.id)).toEqual(['ev_docs', 'ev_explorer']);
   });
 });

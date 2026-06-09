@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import { buildDiscoveryCacheKey, OffchainMemoryCache } from './offchain-memory-cache';
 import { resolveOffchainConfig } from './offchain-config';
 import type { DiscoveredLinks, DiscoveryMode } from './offchain-discovery-types';
@@ -196,6 +197,7 @@ const GEMINI_FLAT_RESPONSE_SCHEMA = {
 export class TokenOffchainAiClassifierService {
   private readonly logger = new Logger(TokenOffchainAiClassifierService.name);
   private anthropicClient: Anthropic | null = null;
+  private geminiBackoffUntil: Date | null = null;
   private readonly classifierCache = new OffchainMemoryCache<OffchainAiProjectClassification>(
     200,
     24 * 60 * 60 * 1000,
@@ -285,6 +287,7 @@ export class TokenOffchainAiClassifierService {
     }
 
     const packet = this.buildInputPacket(input, runtime.aiClassifierMaxInputChars);
+    const evidenceHash = buildEvidenceHash(packet);
     const prompt =
       provider === 'gemini'
         ? this.buildGeminiFlatPrompt(packet, runtime.aiClassifierMaxInputChars)
@@ -296,19 +299,28 @@ export class TokenOffchainAiClassifierService {
       tokenSymbol: input.tokenSymbol,
       provider,
       model: runtime.aiClassifierModel,
+      evidenceHash,
     });
 
-    if (!input.forceRefresh) {
-      const cached = this.classifierCache.get(cacheKey);
-      if (cached) {
-        this.logger.log(
-          `Off-chain AI classifier cache hit provider=${provider} model=${runtime.aiClassifierModel}`,
-        );
-        return {
-          classification: cached,
-          debug: { ...baseDebug, attempted: false, resultSource: 'ai' },
-        };
-      }
+    const cached = this.classifierCache.get(cacheKey);
+    if (cached && (provider === 'gemini' || !input.forceRefresh)) {
+      this.logger.log(
+        `Off-chain AI classifier cache hit provider=${provider} model=${runtime.aiClassifierModel}`,
+      );
+      return {
+        classification: cached,
+        debug: { ...baseDebug, attempted: false, resultSource: 'ai' },
+      };
+    }
+
+    if (provider === 'gemini' && this.geminiBackoffUntil && Date.now() < this.geminiBackoffUntil.getTime()) {
+      this.logger.warn(
+        `Off-chain AI classifier skipped: gemini_quota_backoff until=${this.geminiBackoffUntil.toISOString()}`,
+      );
+      return {
+        classification: null,
+        debug: { ...baseDebug, attempted: false, skippedReason: 'gemini_quota_backoff' },
+      };
     }
 
     try {
@@ -338,6 +350,9 @@ export class TokenOffchainAiClassifierService {
       };
     } catch (err: unknown) {
       const failureReason = getErrorMessage(err);
+      if (provider === 'gemini' && isGeminiQuotaError(failureReason)) {
+        this.geminiBackoffUntil = new Date(Date.now() + resolveGeminiRetryDelayMs(failureReason));
+      }
       this.logger.warn(`Off-chain AI classifier failed: ${failureReason}`);
       return {
         classification: null,
@@ -578,7 +593,33 @@ export function selectClassifierEvidence(
     return false;
   });
 
-  return selected.slice(0, 8);
+  return selected.sort(compareClassifierEvidenceQuality).slice(0, 8);
+}
+
+function compareClassifierEvidenceQuality(
+  left: OffchainEvidenceItem,
+  right: OffchainEvidenceItem,
+): number {
+  return evidencePriority(left) - evidencePriority(right);
+}
+
+function evidencePriority(item: OffchainEvidenceItem): number {
+  if (item.sourceType === 'official_docs') return 0;
+  if (item.sourceType === 'official_security') return 1;
+  if (item.sourceType === 'official_website') return 2;
+  if (item.sourceType === 'official_github') return 3;
+  if (item.sourceType === 'official_whitepaper') return 4;
+  if (item.matchedOfficialDomain) return 5;
+  if (item.sourceType === 'trusted_directory' && (item.matchedTokenName || item.matchedTokenSymbol)) {
+    return 6;
+  }
+  if (item.sourceType === 'news') return 7;
+  if (item.sourceType === 'audit_report' || item.sourceType === 'security_report') return 8;
+  if (item.sourceType === 'explorer_identity') return 10;
+  if (/dexscreener|geckoterminal|uniswap|price|trading|liquidity/i.test(`${item.url ?? ''} ${item.title ?? ''}`)) {
+    return 11;
+  }
+  return 9;
 }
 
 function isKnownUnrelatedClassifierEvidence(item: OffchainEvidenceItem): boolean {
@@ -594,6 +635,12 @@ function isKnownUnrelatedClassifierEvidence(item: OffchainEvidenceItem): boolean
   if (
     String(item.sourceType) === 'dex_pair' &&
     !item.matchedContractAddress &&
+    !item.matchedOfficialDomain
+  ) {
+    return true;
+  }
+  if (
+    /dexscreener|geckoterminal|uniswap|dextools/i.test(`${item.url ?? ''} ${item.title ?? ''}`) &&
     !item.matchedOfficialDomain
   ) {
     return true;
@@ -1001,6 +1048,49 @@ function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function isGeminiQuotaError(message: string): boolean {
+  return /429|too many requests|quota|rate limit/i.test(message);
+}
+
+function resolveGeminiRetryDelayMs(message: string): number {
+  const secondsMatch =
+    message.match(/retryDelay["']?\s*[:=]\s*["']?(\d+)s/i) ??
+    message.match(/retry(?:\s|-)?after["']?\s*[:=]\s*["']?(\d+)/i);
+  if (secondsMatch) {
+    const seconds = Number.parseInt(secondsMatch[1], 10);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return Math.min(seconds * 1_000, 60 * 60 * 1_000);
+    }
+  }
+  return 10 * 60 * 1_000;
+}
+
+function buildEvidenceHash(input: OffchainAiClassifierInput): string {
+  const evidence = input.externalEvidence.map((item) => ({
+    id: item.id,
+    sourceType: item.sourceType,
+    trustLevel: item.trustLevel,
+    relevance: item.relevance,
+    url: item.url,
+    title: item.title,
+    snippet: item.snippet,
+    matchedContractAddress: item.matchedContractAddress,
+    matchedOfficialDomain: item.matchedOfficialDomain,
+  }));
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        chain: input.token.chain,
+        contractAddress: input.token.contractAddress.toLowerCase(),
+        officialWebsite: input.identity.website,
+        discoveredLinks: input.identity.discoveredLinks,
+        evidence,
+      }),
+    )
+    .digest('hex')
+    .slice(0, 16);
+}
+
 function buildAiClassifierCacheKey(input: {
   chain?: string | null;
   contractAddress?: string | null;
@@ -1008,6 +1098,7 @@ function buildAiClassifierCacheKey(input: {
   tokenSymbol?: string | null;
   provider: 'anthropic' | 'gemini';
   model: string;
+  evidenceHash: string;
 }): string {
-  return `${buildDiscoveryCacheKey(input)}:ai-classifier:${input.provider}:${input.model}`;
+  return `${buildDiscoveryCacheKey(input)}:ai-classifier:${input.provider}:${input.model}:${input.evidenceHash}`;
 }
