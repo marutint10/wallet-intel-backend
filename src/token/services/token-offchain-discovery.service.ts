@@ -674,9 +674,10 @@ export function extractCoinGeckoLinks(metadata: unknown): DiscoveredLinks {
 
   return normalizeDiscoveredLinks({
     website: homepage,
-    docs:
-      firstNonAggregatorUrlMatching(links.homepage, /docs/i) ??
-      firstNonAggregatorUrl(links.blockchain_site),
+    docs: firstNonAggregatorUrlMatching(
+      links.homepage,
+      /(^|[/.-])(docs?|documentation|developers?|developer-docs|dev)([/.-]|$)/i,
+    ),
     whitepaper: firstNonAggregatorUrlMatching(links.homepage, /whitepaper|white-paper/i),
     github: firstNonAggregatorUrl(githubRepos),
     twitter: twitterHandle ? `https://twitter.com/${twitterHandle}` : null,

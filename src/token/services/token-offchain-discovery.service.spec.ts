@@ -86,6 +86,18 @@ describe('TokenOffchainDiscoveryService metadata extraction', () => {
     expect(links.github).toContain('github.com');
     expect(links.twitter).toContain('chainlink');
   });
+
+  it('does not use CoinGecko blockchain explorer URLs as docs', () => {
+    const links = extractCoinGeckoLinks({
+      links: {
+        homepage: ['https://chain.link'],
+        blockchain_site: ['https://ethplorer.io/address/0x514910771af9ca656af840dff83e8264ecf986ca'],
+      },
+    });
+
+    expect(links.website).toBe('https://chain.link/');
+    expect(links.docs).toBeNull();
+  });
 });
 
 function makeCrawler(): TokenWebCrawlerService {
