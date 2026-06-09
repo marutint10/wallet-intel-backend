@@ -53,6 +53,8 @@ export function normalizeCacheUrl(url: string): string {
   }
 }
 
+const DISCOVERY_CACHE_VERSION = 'v4';
+
 export function buildDiscoveryCacheKey(input: {
   chain?: string | null;
   contractAddress?: string | null;
@@ -62,15 +64,15 @@ export function buildDiscoveryCacheKey(input: {
   const chain = (input.chain ?? 'unknown').toLowerCase();
   const address = (input.contractAddress ?? '').toLowerCase();
   if (address) {
-    return `offchain:discovery:${chain}:${address}`;
+    return `offchain:discovery:${DISCOVERY_CACHE_VERSION}:${chain}:${address}`;
   }
   const label = [input.tokenName, input.tokenSymbol]
     .filter((value) => typeof value === 'string' && value.trim().length > 0)
     .join(':')
     .toLowerCase();
-  return `offchain:discovery:${chain}:${label || 'unknown'}`;
+  return `offchain:discovery:${DISCOVERY_CACHE_VERSION}:${chain}:${label || 'unknown'}`;
 }
 
 export function buildCrawlCacheKey(url: string): string {
-  return `offchain:crawl:${normalizeCacheUrl(url)}`;
+  return `offchain:crawl:${DISCOVERY_CACHE_VERSION}:${normalizeCacheUrl(url)}`;
 }

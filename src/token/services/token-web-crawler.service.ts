@@ -154,6 +154,14 @@ export class TokenWebCrawlerService {
     this.crawlCache.clear();
   }
 
+  hasCachedCrawl(websiteUrl: string): boolean {
+    const homepageUrl = normalizeHttpUrl(websiteUrl);
+    if (!homepageUrl) {
+      return false;
+    }
+    return this.crawlCache.get(buildCrawlCacheKey(homepageUrl)) !== null;
+  }
+
   async crawlOfficialWebsite(input: {
     websiteUrl: string;
     tokenName?: string | null;

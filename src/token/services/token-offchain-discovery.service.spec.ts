@@ -93,6 +93,19 @@ function makeCrawler(): TokenWebCrawlerService {
   return new TokenWebCrawlerService(config);
 }
 
+function emptyBraveLinks() {
+  return {
+    website: null,
+    docs: null,
+    whitepaper: null,
+    github: null,
+    twitter: null,
+    telegram: null,
+    discord: null,
+    blog: null,
+  };
+}
+
 function makeDiscoveryService(
   configValues: Record<string, string> = {},
 ): TokenOffchainDiscoveryService {
@@ -136,16 +149,8 @@ describe('TokenOffchainDiscoveryService', () => {
     const service = makeDiscoveryService({ BRAVE_SEARCH_API_KEY: 'test-key' });
 
     const braveSpy = jest.spyOn(service as any, 'discoverWithBrave').mockResolvedValue({
-      links: {
-        website: 'https://www.pepe.vip/',
-        docs: null,
-        whitepaper: null,
-        github: null,
-        twitter: 'https://twitter.com/pepecoineth',
-        telegram: null,
-        discord: null,
-        blog: null,
-      },
+      links: emptyBraveLinks(),
+      directoryCandidates: [],
       errors: [],
     });
 
@@ -177,8 +182,9 @@ describe('TokenOffchainDiscoveryService', () => {
     });
 
     expect(braveSpy).toHaveBeenCalled();
-    expect(result.discoveredLinks.website).toContain('pepe.vip');
-    expect(result.officialLinkConfidence.level).toBe('medium');
+    expect(result.discoveredLinks.website).toBeNull();
+    expect(result.braveOnlyWebsite).toBe(false);
+    expect(result.officialLinkConfidence.level).toBe('low');
   });
 
   it('missing BRAVE_SEARCH_API_KEY does not throw', async () => {
@@ -190,7 +196,9 @@ describe('TokenOffchainDiscoveryService', () => {
     });
 
     expect(['partial', 'unknown']).toContain(result.status);
-    expect(result.errors.some((error) => error.includes('BRAVE_SEARCH_API_KEY'))).toBe(true);
+    expect(result.errors.some((error) => error.toLowerCase().includes('brave search api key'))).toBe(
+      true,
+    );
   });
 
   it('website mismatch downgrades confidence', async () => {
@@ -379,16 +387,8 @@ describe('TokenOffchainDiscoveryService', () => {
   it('handles Brave 429 without throwing', async () => {
     const service = makeDiscoveryService({ BRAVE_SEARCH_API_KEY: 'test-key' });
     jest.spyOn(service as any, 'discoverWithBrave').mockResolvedValue({
-      links: {
-        website: null,
-        docs: null,
-        whitepaper: null,
-        github: null,
-        twitter: null,
-        telegram: null,
-        discord: null,
-        blog: null,
-      },
+      links: emptyBraveLinks(),
+      directoryCandidates: [],
       errors: ['Brave Search rate limit reached'],
     });
 
@@ -400,6 +400,97 @@ describe('TokenOffchainDiscoveryService', () => {
 
     expect(result.errors.some((error) => error.includes('rate limit'))).toBe(true);
     expect(['partial', 'unknown']).toContain(result.status);
+  });
+
+  it('extracts pepe.vip from trusted directory page instead of using directory URL', async () => {
+    const service = makeDiscoveryService({ BRAVE_SEARCH_API_KEY: 'test-key' });
+    jest.spyOn(service as any, 'discoverWithBrave').mockResolvedValue({
+      links: emptyBraveLinks(),
+      directoryCandidates: ['https://coinmarketcap.com/currencies/pepe/'],
+      errors: [],
+    });
+    jest.spyOn(service['webCrawler'], 'fetchPageContent').mockResolvedValue({
+      html: `
+        <html><body>
+          <h1>Pepe (PEPE)</h1>
+          <p>${'0x6982508145454ce325ddbe47a25d4ec3d2311933'}</p>
+          <a href="https://www.pepe.vip/">Website</a>
+          <a href="https://twitter.com/pepecoineth">Twitter</a>
+        </body></html>
+      `,
+      finalUrl: 'https://coinmarketcap.com/currencies/pepe/',
+      method: 'fetch',
+    });
+    jest.spyOn(service['webCrawler'], 'crawlOfficialWebsite').mockResolvedValue({
+      status: 'done',
+      homepageUrl: 'https://www.pepe.vip/',
+      finalUrl: 'https://www.pepe.vip/',
+      pagesVisited: ['https://www.pepe.vip/'],
+      brokenWebsite: false,
+      extractedText: 'Pepe PEPE meme community',
+      links: {
+        docs: null,
+        whitepaper: null,
+        github: null,
+        twitter: 'https://twitter.com/pepecoineth',
+        telegram: null,
+        discord: null,
+        blog: null,
+        tokenomics: null,
+        security: null,
+        audit: null,
+        about: null,
+      },
+      mentions: { tokenName: true, tokenSymbol: true, contractAddress: false },
+      signals: {
+        hasDocs: false,
+        hasWhitepaper: false,
+        hasGithub: false,
+        hasAuditsMentioned: false,
+        hasTeamInfo: false,
+        hasClearUseCase: false,
+        suspiciousPhrases: [],
+        adoptionClaims: [],
+      },
+      errors: [],
+    });
+
+    const result = await service.discoverOfficialLinks({
+      tokenName: 'Pepe',
+      tokenSymbol: 'PEPE',
+      contractAddress: '0x6982508145454ce325ddbe47a25d4ec3d2311933',
+      bypassCache: true,
+    });
+
+    expect(result.discoveredLinks.website).toContain('pepe.vip');
+    expect(result.discoveredLinks.website).not.toContain('coinmarketcap.com');
+    expect(['medium', 'high']).toContain(result.officialLinkConfidence.level);
+    expect(result.linkSources.website).toBe('coinmarketcap_directory');
+    expect(result.discoveryMode).toBe('directory_verified');
+  });
+
+  it('rejects CoinMarketCap as official website from Brave', async () => {
+    const service = makeDiscoveryService({ BRAVE_SEARCH_API_KEY: 'test-key' });
+    jest.spyOn(service as any, 'discoverWithBrave').mockResolvedValue({
+      links: emptyBraveLinks(),
+      directoryCandidates: ['https://coinmarketcap.com/currencies/pepe/'],
+      errors: [],
+    });
+    jest.spyOn(service['webCrawler'], 'fetchPageContent').mockResolvedValue(null);
+
+    const result = await service.discoverOfficialLinks({
+      tokenName: 'Pepe',
+      tokenSymbol: 'PEPE',
+      contractAddress: '0x6982508145454ce325ddbe47a25d4ec3d2311933',
+      bypassCache: true,
+    });
+
+    expect(result.discoveredLinks.website).toBeNull();
+    expect(result.discoveredLinks.docs).toBeNull();
+    expect(result.discoveredLinks.github).toBeNull();
+    expect(result.discoveredLinks.whitepaper).toBeNull();
+    expect(result.aggregatorWebsiteRejected).toBe(true);
+    expect(result.sourceUrls.some((url) => url.includes('coinmarketcap.com'))).toBe(true);
   });
 
   it('reuses discovery cache for repeated requests', async () => {
@@ -445,6 +536,152 @@ describe('searchBraveWeb', () => {
     expect(response.rateLimited).toBe(true);
     expect(response.error).toContain('rate limit');
     expect(response.hits).toEqual([]);
+  });
+});
+
+describe('two-lane discovery modes', () => {
+  const PEPE_CONTRACT = '0x6982508145454ce325ddbe47a25d4ec3d2311933';
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('selects pepe.vip from CoinGecko contract metadata without Brave', async () => {
+    const service = makeDiscoveryService({ BRAVE_SEARCH_API_KEY: 'test-key' });
+    const braveSpy = jest.spyOn(service as any, 'discoverWithBrave');
+    jest.spyOn(service['webCrawler'], 'crawlOfficialWebsite').mockResolvedValue(
+      makeCrawlResult({
+        homepageUrl: 'https://www.pepe.vip/',
+        finalUrl: 'https://www.pepe.vip/',
+        extractedText: 'Pepe PEPE meme community',
+        mentions: { tokenName: true, tokenSymbol: true, contractAddress: false },
+      }),
+    );
+
+    const result = await service.discoverOfficialLinks({
+      tokenName: 'Pepe',
+      tokenSymbol: 'PEPE',
+      contractAddress: PEPE_CONTRACT,
+      coinGeckoMetadata: {
+        id: 'pepe',
+        categories: ['Meme'],
+        platforms: { ethereum: PEPE_CONTRACT },
+        links: {
+          homepage: ['https://www.pepe.vip/'],
+          twitter_screen_name: 'pepecoineth',
+        },
+      },
+      bypassCache: true,
+      debug: true,
+    });
+
+    expect(result.discoveredLinks.website).toContain('pepe.vip');
+    expect(result.linkSources.website).toBe('coingecko');
+    expect(result.discoveryMode).toBe('official_verified');
+    expect(braveSpy).not.toHaveBeenCalled();
+    expect(result.debugTrace?.structuredMetadata.coinGeckoContractMatched).toBe(true);
+  });
+
+  it('selects pepe.vip from DexScreener metadata', async () => {
+    const service = makeDiscoveryService();
+    jest.spyOn(service['webCrawler'], 'crawlOfficialWebsite').mockResolvedValue(
+      makeCrawlResult({
+        homepageUrl: 'https://www.pepe.vip/',
+        finalUrl: 'https://www.pepe.vip/',
+        extractedText: 'Pepe PEPE meme',
+        mentions: { tokenName: true, tokenSymbol: true, contractAddress: false },
+      }),
+    );
+
+    const result = await service.discoverOfficialLinks({
+      tokenName: 'Pepe',
+      tokenSymbol: 'PEPE',
+      contractAddress: PEPE_CONTRACT,
+      dexScreenerProfile: {
+        info: {
+          websites: ['https://www.pepe.vip/'],
+          socials: [{ type: 'twitter', url: 'https://twitter.com/pepecoineth' }],
+        },
+      },
+      bypassCache: true,
+    });
+
+    expect(result.discoveredLinks.website).toContain('pepe.vip');
+    expect(result.linkSources.website).toBe('dexscreener');
+    expect(result.discoveryMode).toBe('official_verified');
+  });
+
+  it('rejects pepeunchained.com clone candidates', async () => {
+    const service = makeDiscoveryService({ BRAVE_SEARCH_API_KEY: 'test-key' });
+    jest.spyOn(service as any, 'discoverWithBrave').mockResolvedValue({
+      links: {
+        ...emptyBraveLinks(),
+        website: 'https://pepeunchained.com/',
+      },
+      directoryCandidates: [],
+      errors: [],
+    });
+
+    const result = await service.discoverOfficialLinks({
+      tokenName: 'Pepe',
+      tokenSymbol: 'PEPE',
+      contractAddress: PEPE_CONTRACT,
+      bypassCache: true,
+      debug: true,
+    });
+
+    expect(result.discoveredLinks.website).toBeNull();
+    expect(
+      result.debugTrace?.candidates.some(
+        (candidate) =>
+          candidate.url.includes('pepeunchained') &&
+          candidate.action === 'rejected' &&
+          candidate.reason === 'cross_project_or_clone',
+      ),
+    ).toBe(true);
+  });
+
+  it('enters search_only when trusted directories exist but website is missing', async () => {
+    const service = makeDiscoveryService({ BRAVE_SEARCH_API_KEY: 'test-key' });
+    jest.spyOn(service as any, 'discoverWithBrave').mockResolvedValue({
+      links: emptyBraveLinks(),
+      directoryCandidates: ['https://coinmarketcap.com/currencies/pepe/'],
+      errors: [],
+    });
+    jest.spyOn(service['webCrawler'], 'fetchPageContent').mockResolvedValue({
+      html: `<html><body><h1>Pepe (PEPE)</h1><p>${PEPE_CONTRACT}</p></body></html>`,
+      finalUrl: 'https://coinmarketcap.com/currencies/pepe/',
+      method: 'fetch',
+    });
+
+    const result = await service.discoverOfficialLinks({
+      tokenName: 'Pepe',
+      tokenSymbol: 'PEPE',
+      contractAddress: PEPE_CONTRACT,
+      bypassCache: true,
+    });
+
+    expect(result.discoveryMode).toBe('search_only');
+    expect(result.discoveredLinks.website).toBeNull();
+    expect(result.trustedDirectoryUrls.length).toBeGreaterThan(0);
+  });
+
+  it('debug trace includes structured metadata and final selection without secrets', async () => {
+    const service = makeDiscoveryService();
+    jest.spyOn(service['webCrawler'], 'crawlOfficialWebsite').mockResolvedValue(makeCrawlResult());
+
+    const result = await service.discoverOfficialLinks({
+      tokenName: 'Chainlink',
+      tokenSymbol: 'LINK',
+      seedLinks: { website: 'https://chain.link' },
+      bypassCache: true,
+      debug: true,
+    });
+
+    const traceJson = JSON.stringify(result.debugTrace ?? {});
+    expect(result.debugTrace?.candidates.length).toBeGreaterThan(0);
+    expect(result.debugTrace?.finalSelection.website).toContain('chain.link');
+    expect(traceJson.toLowerCase()).not.toMatch(/api[_-]?key|subscription-token|bearer/);
   });
 });
 
