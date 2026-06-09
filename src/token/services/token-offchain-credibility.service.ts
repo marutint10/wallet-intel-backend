@@ -22,6 +22,16 @@ import {
   TokenWebCrawlerService,
   type TokenWebsiteCrawlResult,
 } from './token-web-crawler.service';
+import {
+  TokenOffchainExternalEvidenceService,
+  type OffchainEvidenceItem,
+  type OffchainExternalEvidenceResult,
+} from './token-offchain-external-evidence.service';
+import {
+  TokenOffchainAiClassifierService,
+  type OffchainAiClassifierDebug,
+  type OffchainAiProjectClassification,
+} from './token-offchain-ai-classifier.service';
 
 export type OffChainCredibilityStatus = 'done' | 'partial' | 'error' | 'unknown';
 export type OffChainCredibilityRiskLevel =
@@ -50,6 +60,7 @@ export type ProjectCategory =
   | 'unknown';
 
 export interface OffChainCredibilityReport {
+  pipelineVersion?: string;
   status: OffChainCredibilityStatus;
   score: number | null;
   riskLevel: OffChainCredibilityRiskLevel;
@@ -112,6 +123,25 @@ export interface OffChainCredibilityReport {
   unknowns: string[];
   limitations: string[];
   checkedAt: string;
+  externalEvidence?: OffchainExternalEvidenceResult;
+  projectUnderstanding?: {
+    source: 'deterministic' | 'ai' | 'ai_with_fallback';
+    category: string;
+    categoryLabel?: string;
+    categoryConfidence?: 'high' | 'medium' | 'low';
+    claimedUseCase: string | null;
+    hasClearUseCase: boolean | null;
+    useCaseConfidence?: 'high' | 'medium' | 'low' | 'unknown';
+    identityStatus?: 'verified' | 'partially_verified' | 'unverified' | 'unknown';
+    evidenceQuality?: 'strong' | 'moderate' | 'weak' | 'limited';
+    possibleNarrative?: string | null;
+    externalValidation: 'strong' | 'moderate' | 'weak' | 'none';
+    communitySignal: 'strong' | 'moderate' | 'weak' | 'unknown';
+    negativeRiskEvidence: 'none_found' | 'low' | 'medium' | 'high';
+    evidenceRefs: string[];
+    warnings?: string[];
+  };
+  aiClassifierDebug?: OffchainAiClassifierDebug;
 }
 
 export interface OffChainCredibilityCollectedData {
@@ -124,12 +154,19 @@ export interface OffChainCredibilityCollectedData {
   runtimeLimitations?: string[];
   coinGeckoMetadata?: unknown;
   debugTrace?: OffchainDiscoveryTrace;
+  externalEvidence?: OffchainExternalEvidenceResult;
+  aiClassification?: OffchainAiProjectClassification | null;
+  aiClassifierDebug?: OffchainAiClassifierDebug;
 }
 
 interface CategoryMatch {
   category: ProjectCategory;
   score: number;
   claimedUseCase: string | null;
+  evidenceRefs?: string[];
+  externalValidation?: 'strong' | 'moderate' | 'weak' | 'none';
+  communitySignal?: 'strong' | 'moderate' | 'weak' | 'unknown';
+  negativeRiskEvidence?: 'none_found' | 'low' | 'medium' | 'high';
 }
 
 const MAJOR_CLAIM_PATTERNS: Array<{
@@ -166,6 +203,10 @@ const CATEGORY_RULES: Array<{
     patterns: [
       /oracle/i,
       /data feeds?/i,
+      /\bccip\b/i,
+      /automation/i,
+      /smart contracts?/i,
+      /developer docs?/i,
       /interoperability/i,
       /bridge/i,
       /network infrastructure/i,
@@ -264,6 +305,8 @@ export class TokenOffchainCredibilityService {
     private readonly config: ConfigService,
     private readonly discovery: TokenOffchainDiscoveryService,
     private readonly webCrawler: TokenWebCrawlerService,
+    private readonly externalEvidence: TokenOffchainExternalEvidenceService,
+    private readonly aiClassifier: TokenOffchainAiClassifierService,
   ) {}
 
   async buildReport(input: {
@@ -317,6 +360,9 @@ export class TokenOffchainCredibilityService {
       if (!runtime.braveEnabled) {
         runtimeLimitations.push('Brave search fallback is disabled.');
       }
+      if (!runtime.externalEvidenceEnabled) {
+        runtimeLimitations.push('External open-web evidence collection is disabled.');
+      }
 
       let crawl: TokenWebsiteCrawlResult | null = null;
       if (discovery.discoveredLinks.website && runtime.crawlEnabled) {
@@ -335,6 +381,57 @@ export class TokenOffchainCredibilityService {
         }
       }
 
+      let externalEvidence: OffchainExternalEvidenceResult | undefined;
+      try {
+        externalEvidence = await this.externalEvidence.collectEvidence({
+          tokenName: input.tokenName,
+          tokenSymbol: input.tokenSymbol,
+          contractAddress: input.contractAddress,
+          chain: input.chain,
+          discoveredLinks: discovery.discoveredLinks,
+          forceRefresh: input.forceRefresh,
+        });
+        if (externalEvidence.status === 'partial' || externalEvidence.status === 'failed') {
+          fetchErrors.push(...(externalEvidence.errors ?? ['External evidence collection incomplete']));
+        }
+      } catch (err: unknown) {
+        externalEvidence = {
+          status: 'failed',
+          evidenceItems: [],
+          summary: {
+            trustedDirectoryCount: 0,
+            officialSourceCount: 0,
+            externalValidationCount: 0,
+            riskWarningCount: 0,
+            scamWarningCount: 0,
+            unrelatedCount: 0,
+          },
+          errors: [getErrorMessage(err)],
+        };
+        fetchErrors.push(`External evidence failed: ${getErrorMessage(err)}`);
+      }
+
+      const aiClassifierResult = await this.aiClassifier.classifyWithDebug({
+        tokenName: input.tokenName,
+        tokenSymbol: input.tokenSymbol,
+        contractAddress: input.contractAddress,
+        chain: input.chain,
+        discoveredLinks: discovery.discoveredLinks,
+        websiteSource: discovery.linkSources.website ?? null,
+        discoveryMode: discovery.discoveryMode,
+        officialLinkConfidence: discovery.officialLinkConfidence.level,
+        crawl,
+        externalEvidence,
+        metadataCategories: discovery.metadataCategories,
+        forceRefresh: input.forceRefresh,
+      });
+      this.logger.log(
+        `Off-chain AI classifier selected source=${aiClassifierResult.debug.resultSource} ` +
+          `enabled=${aiClassifierResult.debug.enabled} attempted=${aiClassifierResult.debug.attempted} ` +
+          `skip=${aiClassifierResult.debug.skippedReason ?? 'none'} ` +
+          `failure=${aiClassifierResult.debug.failureReason ?? 'none'}`,
+      );
+
       const report = buildOffChainCredibilityReport({
         tokenName: safeString(input.tokenName),
         tokenSymbol: safeString(input.tokenSymbol),
@@ -345,6 +442,9 @@ export class TokenOffchainCredibilityService {
         runtimeLimitations,
         coinGeckoMetadata: input.coinGeckoMetadata,
         debugTrace: discovery.debugTrace,
+        externalEvidence,
+        aiClassification: aiClassifierResult.classification,
+        aiClassifierDebug: aiClassifierResult.debug,
       });
       if (input.debug && discovery.debugTrace) {
         return { ...report, debugTrace: discovery.debugTrace };
@@ -405,18 +505,50 @@ export function buildOffChainCredibilityReport(
     officialWebsite: discoveredLinks.website,
   });
   const combinedText = buildVerifiedCombinedText(data, verifiedCategoryText);
-  const categoryMatch = detectProjectCategory(data, verifiedCategoryText, data.discovery.metadataCategories);
+  const rawDeterministicCategoryMatch = detectProjectCategory(
+    { ...data, discovery: { ...data.discovery, discoveredLinks, linkSources } },
+    verifiedCategoryText,
+    data.discovery.metadataCategories,
+    { externalEvidence: data.externalEvidence, crawl, discoveredLinks },
+  );
+  const deterministicCategoryMatch = applyWeakIdentityDeterministicGuard(
+    rawDeterministicCategoryMatch,
+    {
+      discoveredLinks,
+      discoveryMode: data.discovery.discoveryMode,
+      officialLinkConfidence: officialLinkConfidence.level,
+      externalEvidence: data.externalEvidence,
+      crawl,
+    },
+  );
+  const categoryMatch = data.aiClassification
+    ? applyAiCategoryMatch(deterministicCategoryMatch, data.aiClassification)
+    : deterministicCategoryMatch;
   const projectProfile = buildProjectProfile(
     { ...data, discovery: { ...data.discovery, discoveredLinks, linkSources } },
     categoryMatch,
     linkSources,
     crawl,
+    data.externalEvidence,
   );
-  const claimChecks = buildClaimChecks(combinedText, crawl, projectProfile, linkSources);
+  const finalProjectProfile = applyAiProjectProfile(projectProfile, data.aiClassification);
+  const projectUnderstanding = buildProjectUnderstanding(
+    categoryMatch,
+    finalProjectProfile,
+    data.externalEvidence,
+    data.aiClassification,
+  );
+  const claimChecks = buildClaimChecks(
+    combinedText,
+    crawl,
+    finalProjectProfile,
+    linkSources,
+    data.externalEvidence,
+  );
   const discoveryMode = data.discovery.discoveryMode ?? 'not_found';
   const scoring = scoreOffChainCredibility({
     data: { ...data, discovery: { ...data.discovery, discoveredLinks, linkSources } },
-    projectProfile,
+    projectProfile: finalProjectProfile,
     categoryMatch,
     claimChecks,
     combinedText,
@@ -429,21 +561,24 @@ export function buildOffChainCredibilityReport(
       discoveryMode,
       hasTrustedDirectoryPresence: data.discovery.trustedDirectoryUrls.length > 0,
     },
+    externalEvidence: data.externalEvidence,
   });
 
   const credibilitySignals = buildCredibilitySignals(
     { ...data, discovery: { ...data.discovery, discoveredLinks } },
-    projectProfile,
+    finalProjectProfile,
     categoryMatch,
     combinedText,
+    data.externalEvidence,
   );
   const riskFlags = buildRiskFlags(
     { ...data, discovery: { ...data.discovery, discoveredLinks } },
-    projectProfile,
+    finalProjectProfile,
     claimChecks,
     scoring,
     sanitized.aggregatorWebsiteRejected,
     discoveryMode,
+    data.externalEvidence,
   );
 
   if (!discoveredLinks.website) {
@@ -460,6 +595,11 @@ export function buildOffChainCredibilityReport(
   }
   if (data.fetchErrors.length > 0) {
     unknowns.push(...data.fetchErrors.slice(0, 3));
+  }
+  if (data.externalEvidence?.status === 'failed') {
+    unknowns.push('External open-web evidence collection failed');
+  } else if (data.externalEvidence?.status === 'partial') {
+    unknowns.push('External open-web evidence collection was partial');
   }
 
   const hasUsableData =
@@ -489,14 +629,20 @@ export function buildOffChainCredibilityReport(
   const verdict = resolveOffChainVerdict({
     riskLevel,
     credibilityTier,
-    category: projectProfile.category,
+    category: finalProjectProfile.category,
     officialLinkConfidence,
     hasWebsite: Boolean(discoveredLinks.website),
     hasTrustedOfficialWebsite: sanitized.hasTrustedOfficialWebsite,
     linkMismatch: scoring.linkMismatch,
+    hasClearUseCase: finalProjectProfile.hasClearUseCase,
+    hasDocs: finalProjectProfile.hasDocs,
+    hasGithub: finalProjectProfile.hasGithub,
+    externalValidation: projectUnderstanding.externalValidation,
+    negativeRiskEvidence: projectUnderstanding.negativeRiskEvidence,
   });
 
   return {
+    pipelineVersion: 'offchain-v2-evidence',
     status,
     score: scoring.score,
     riskLevel,
@@ -507,13 +653,21 @@ export function buildOffChainCredibilityReport(
     websiteSource: linkSources.website ?? null,
     discoveredLinks,
     officialLinkConfidence,
-    projectProfile,
+    projectProfile: finalProjectProfile,
     credibilitySignals,
     riskFlags,
     claimChecks,
     unknowns,
     limitations,
     checkedAt,
+    externalEvidence: data.externalEvidence,
+    projectUnderstanding,
+    aiClassifierDebug: data.aiClassifierDebug
+      ? {
+          ...data.aiClassifierDebug,
+          resultSource: data.aiClassification ? 'ai' : 'deterministic',
+        }
+      : undefined,
   };
 }
 
@@ -521,63 +675,414 @@ export function detectProjectCategory(
   data: OffChainCredibilityCollectedData,
   verifiedText: string,
   metadataCategories: string[] = [],
+  signals?: {
+    externalEvidence?: OffchainExternalEvidenceResult;
+    crawl?: TokenWebsiteCrawlResult | null;
+    discoveredLinks?: OffChainCredibilityReport['discoveredLinks'];
+  },
 ): CategoryMatch {
-  const categoryHaystack = [
+  const metadataText = [
     ...metadataCategories,
     ...extractCoinGeckoCategories(data.coinGeckoMetadata),
   ]
     .join(' ')
     .toLowerCase();
 
-  if (categoryHaystack.includes('meme') || /frog|pepe|doge|shib/i.test(categoryHaystack)) {
-    return {
-      category: 'meme',
-      score: 3,
-      claimedUseCase: 'Community or meme token positioning',
-    };
-  }
-
-  if (isLikelyMemeToken(data.tokenName, data.tokenSymbol)) {
-    const functionalOnlyText = verifiedText.toLowerCase();
-    const functionalHits = CATEGORY_RULES.filter(
-      (rule) => rule.category !== 'meme',
-    ).reduce(
-      (count, rule) =>
-        count + rule.patterns.filter((pattern) => pattern.test(functionalOnlyText)).length,
-      0,
-    );
-    if (functionalHits < 2) {
-      return {
-        category: 'meme',
-        score: 2,
-        claimedUseCase: 'Community or meme token positioning',
-      };
-    }
-  }
-
-  const haystack = [data.tokenName, data.tokenSymbol, verifiedText]
+  const links = signals?.discoveredLinks ?? data.discovery.discoveredLinks;
+  const externalEvidence = signals?.externalEvidence;
+  const evidenceText = buildExternalEvidenceText(externalEvidence);
+  const linkText = Object.values(links).filter(Boolean).join(' ');
+  const crawlText = signals?.crawl?.extractedText ?? '';
+  const haystack = [data.tokenName, data.tokenSymbol, verifiedText, crawlText, linkText, evidenceText]
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
 
-  let best: CategoryMatch = { category: 'unknown', score: 0, claimedUseCase: null };
+  const scores = new Map<ProjectCategory, number>();
+  const evidenceRefs: string[] = [];
+  const addScore = (category: ProjectCategory, amount: number) => {
+    scores.set(category, (scores.get(category) ?? 0) + amount);
+  };
 
   for (const rule of CATEGORY_RULES) {
-    const hits = rule.patterns.filter((pattern) => pattern.test(haystack)).length;
-    if (hits > best.score) {
+    const verifiedHits = rule.patterns.filter((pattern) => pattern.test(verifiedText)).length;
+    const crawlHits = rule.patterns.filter((pattern) => pattern.test(crawlText)).length;
+    const externalHits = rule.patterns.filter((pattern) => pattern.test(evidenceText)).length;
+    const metadataHits = rule.patterns.filter((pattern) => pattern.test(metadataText)).length;
+    addScore(rule.category, verifiedHits * 3 + crawlHits * 2 + externalHits + metadataHits);
+  }
+
+  if (hasInfrastructureLinkEvidence(links, externalEvidence)) {
+    addScore('infrastructure', 5);
+    evidenceRefs.push(...collectEvidenceRefs(externalEvidence, ['developer_resource', 'official_docs', 'official_security', 'official_whitepaper']));
+  }
+  if (/docs\.chain\.link|smartcontractkit|chainlink|ccip|data feeds?|oracle|automation|proof of reserve/i.test(haystack)) {
+    addScore('infrastructure', 4);
+  }
+  if (/docs?|github|whitepaper|security|developer/i.test(linkText)) {
+    addScore('infrastructure', 2);
+  }
+
+  const memeMetadataHints = /\bmeme|memecoin|frog|pepe|doge|shib/i.test(metadataText) ? 1 : 0;
+  const memeNameHint = isLikelyMemeToken(data.tokenName, data.tokenSymbol) ? 2 : 0;
+  const memeOfficialHits = /\bmeme\b|memecoin|community token|no intrinsic value|frog|mascot|entertainment/i.test(
+    `${verifiedText} ${crawlText}`,
+  )
+    ? 3
+    : 0;
+  const memeExternalHits = externalEvidence
+    ? externalEvidence.evidenceItems.filter(
+        (item) =>
+          item.relevance !== 'low' &&
+          /meme|memecoin|community token|frog|pepe|doge|shib/i.test(
+            `${item.title ?? ''} ${item.snippet ?? ''}`,
+          ),
+      ).length
+    : 0;
+  const memeScore = memeNameHint + memeOfficialHits + memeExternalHits + memeMetadataHints;
+  if (memeScore > 0) {
+    addScore('meme', memeScore);
+  }
+
+  const functionalBest = [...scores.entries()]
+    .filter(([category]) => category !== 'meme' && category !== 'unknown')
+    .sort((left, right) => right[1] - left[1])[0];
+  const meme = scores.get('meme') ?? 0;
+
+  if (functionalBest && functionalBest[1] >= Math.max(3, meme + 2)) {
+    return {
+      category: functionalBest[0],
+      score: functionalBest[1],
+      claimedUseCase: resolveClaimedUseCase(functionalBest[0], haystack),
+      evidenceRefs,
+      externalValidation: resolveExternalValidation(externalEvidence),
+      communitySignal: resolveCommunitySignal(externalEvidence, haystack),
+      negativeRiskEvidence: resolveNegativeRiskEvidence(externalEvidence),
+    };
+  }
+
+  if (meme >= 4 && (!functionalBest || functionalBest[1] < 3)) {
+    return {
+      category: 'meme',
+      score: meme,
+      claimedUseCase: 'Community or meme token positioning',
+      evidenceRefs: collectEvidenceRefs(externalEvidence, ['community_social', 'trusted_directory']),
+      externalValidation: resolveExternalValidation(externalEvidence),
+      communitySignal: resolveCommunitySignal(externalEvidence, haystack),
+      negativeRiskEvidence: resolveNegativeRiskEvidence(externalEvidence),
+    };
+  }
+
+  let best: CategoryMatch = { category: 'unknown', score: 0, claimedUseCase: null };
+
+  for (const rule of CATEGORY_RULES.filter((rule) => rule.category !== 'meme')) {
+    const hits = scores.get(rule.category) ?? 0;
+    if (hits > best.score && hits >= 2) {
       best = {
         category: rule.category,
         score: hits,
-        claimedUseCase: rule.useCase,
+        claimedUseCase: resolveClaimedUseCase(rule.category, haystack),
+        evidenceRefs,
+        externalValidation: resolveExternalValidation(externalEvidence),
+        communitySignal: resolveCommunitySignal(externalEvidence, haystack),
+        negativeRiskEvidence: resolveNegativeRiskEvidence(externalEvidence),
       };
     }
   }
 
-  if (best.score === 0 && verifiedText.trim().length > 80) {
-    return { category: 'other', score: 1, claimedUseCase: 'General crypto project positioning' };
+  if (best.score === 0 && verifiedText.trim().length > 160) {
+    return {
+      category: 'other',
+      score: 1,
+      claimedUseCase: 'General crypto project positioning',
+      externalValidation: resolveExternalValidation(externalEvidence),
+      communitySignal: resolveCommunitySignal(externalEvidence, haystack),
+      negativeRiskEvidence: resolveNegativeRiskEvidence(externalEvidence),
+    };
   }
 
-  return best;
+  return {
+    ...best,
+    externalValidation: resolveExternalValidation(externalEvidence),
+    communitySignal: resolveCommunitySignal(externalEvidence, haystack),
+    negativeRiskEvidence: resolveNegativeRiskEvidence(externalEvidence),
+  };
+}
+
+function buildExternalEvidenceText(externalEvidence?: OffchainExternalEvidenceResult): string {
+  return (
+    externalEvidence?.evidenceItems
+      .filter((item) => item.relevance !== 'low')
+      .map((item) => `${item.title ?? ''} ${item.snippet ?? ''} ${item.url ?? ''}`)
+      .join('\n') ?? ''
+  );
+}
+
+function hasInfrastructureLinkEvidence(
+  links: OffChainCredibilityReport['discoveredLinks'],
+  externalEvidence?: OffchainExternalEvidenceResult,
+): boolean {
+  if (links.docs || links.github || links.whitepaper) {
+    return true;
+  }
+  return Boolean(
+    externalEvidence?.evidenceItems.some(
+      (item) =>
+        item.relevance !== 'low' &&
+        ['developer_resource', 'official_docs', 'official_github', 'official_security', 'official_whitepaper'].includes(
+          item.sourceType,
+        ),
+    ),
+  );
+}
+
+function collectEvidenceRefs(
+  externalEvidence: OffchainExternalEvidenceResult | undefined,
+  sourceTypes: string[],
+): string[] {
+  return (
+    externalEvidence?.evidenceItems
+      .filter((item) => sourceTypes.includes(item.sourceType) && item.relevance !== 'low')
+      .map((item) => item.id)
+      .slice(0, 8) ?? []
+  );
+}
+
+function resolveClaimedUseCase(category: ProjectCategory, text: string): string | null {
+  if (category === 'infrastructure') {
+    if (/oracle|data feeds?/i.test(text)) {
+      return 'Oracle, data feeds, and smart contract infrastructure';
+    }
+    if (/ccip|interoperability|bridge/i.test(text)) {
+      return 'Cross-chain interoperability and protocol infrastructure';
+    }
+    if (/automation|security|developer docs?/i.test(text)) {
+      return 'Developer and protocol infrastructure services';
+    }
+    return 'Decentralized infrastructure or data services';
+  }
+  return CATEGORY_RULES.find((rule) => rule.category === category)?.useCase ?? null;
+}
+
+function resolveExternalValidation(
+  externalEvidence?: OffchainExternalEvidenceResult,
+): 'strong' | 'moderate' | 'weak' | 'none' {
+  if (!externalEvidence || externalEvidence.status === 'skipped') {
+    return 'none';
+  }
+  const highValue = externalEvidence.evidenceItems.filter(
+    (item) =>
+      item.relevance === 'high' &&
+      ['official_website', 'official_docs', 'developer_resource', 'trusted_directory', 'news', 'audit_report'].includes(
+        item.sourceType,
+      ),
+  ).length;
+  const mediumValue = externalEvidence.evidenceItems.filter(
+    (item) =>
+      item.relevance !== 'low' &&
+      ['trusted_directory', 'developer_resource', 'news', 'security_report', 'audit_report'].includes(
+        item.sourceType,
+      ),
+  ).length;
+  if (highValue >= 2 || externalEvidence.summary.externalValidationCount >= 4) {
+    return 'strong';
+  }
+  if (highValue >= 1 || mediumValue >= 2) {
+    return 'moderate';
+  }
+  return mediumValue > 0 ? 'weak' : 'none';
+}
+
+function resolveCommunitySignal(
+  externalEvidence: OffchainExternalEvidenceResult | undefined,
+  text: string,
+): 'strong' | 'moderate' | 'weak' | 'unknown' {
+  const socialCount =
+    externalEvidence?.evidenceItems.filter((item) => item.sourceType === 'community_social').length ?? 0;
+  const memeText = /meme|memecoin|community token|frog|pepe|doge|shib/i.test(text);
+  if (socialCount >= 3 || (socialCount >= 1 && memeText)) {
+    return 'strong';
+  }
+  if (socialCount >= 1 || memeText) {
+    return 'moderate';
+  }
+  return externalEvidence ? 'weak' : 'unknown';
+}
+
+function resolveNegativeRiskEvidence(
+  externalEvidence?: OffchainExternalEvidenceResult,
+): 'none_found' | 'low' | 'medium' | 'high' {
+  if (!externalEvidence) {
+    return 'none_found';
+  }
+  const contractMatched = externalEvidence.evidenceItems.filter(
+    (item) =>
+      (item.sourceType === 'scam_warning' || item.sourceType === 'risk_warning') &&
+      item.matchedContractAddress,
+  ).length;
+  if (contractMatched > 0 || externalEvidence.summary.scamWarningCount >= 2) {
+    return 'high';
+  }
+  if (externalEvidence.summary.scamWarningCount > 0 || externalEvidence.summary.riskWarningCount > 1) {
+    return 'medium';
+  }
+  if (externalEvidence.summary.riskWarningCount > 0) {
+    return 'low';
+  }
+  return 'none_found';
+}
+
+function buildProjectUnderstanding(
+  categoryMatch: CategoryMatch,
+  projectProfile: OffChainCredibilityReport['projectProfile'],
+  externalEvidence?: OffchainExternalEvidenceResult,
+  aiClassification?: OffchainAiProjectClassification | null,
+): NonNullable<OffChainCredibilityReport['projectUnderstanding']> {
+  if (aiClassification) {
+    return {
+      source: 'ai',
+      category: aiClassification.normalizedCategory,
+      categoryLabel: aiClassification.categoryLabel,
+      categoryConfidence: aiClassification.categoryConfidence,
+      claimedUseCase: aiClassification.claimedUseCase,
+      hasClearUseCase: aiClassification.hasClearUseCase,
+      useCaseConfidence: aiClassification.useCaseConfidence,
+      identityStatus: aiClassification.identityStatus,
+      evidenceQuality: aiClassification.evidenceQuality,
+      possibleNarrative: aiClassification.possibleNarrative,
+      externalValidation: categoryMatch.externalValidation ?? resolveExternalValidation(externalEvidence),
+      communitySignal: categoryMatch.communitySignal ?? resolveCommunitySignal(externalEvidence, ''),
+      negativeRiskEvidence:
+        categoryMatch.negativeRiskEvidence ?? resolveNegativeRiskEvidence(externalEvidence),
+      evidenceRefs: aiClassification.evidenceRefs,
+      warnings: aiClassification.warnings,
+    };
+  }
+
+  return {
+    source: 'deterministic',
+    category: projectProfile.category,
+    claimedUseCase: projectProfile.claimedUseCase,
+    hasClearUseCase: projectProfile.hasClearUseCase,
+    externalValidation: categoryMatch.externalValidation ?? resolveExternalValidation(externalEvidence),
+    communitySignal: categoryMatch.communitySignal ?? resolveCommunitySignal(externalEvidence, ''),
+    negativeRiskEvidence:
+      categoryMatch.negativeRiskEvidence ?? resolveNegativeRiskEvidence(externalEvidence),
+    evidenceRefs: categoryMatch.evidenceRefs ?? collectEvidenceRefs(externalEvidence, [
+      'official_website',
+      'official_docs',
+      'developer_resource',
+      'trusted_directory',
+      'news',
+    ]),
+  };
+}
+
+function applyAiCategoryMatch(
+  fallback: CategoryMatch,
+  aiClassification: OffchainAiProjectClassification,
+): CategoryMatch {
+  const mappedCategory = mapAiCategoryToProjectCategory(aiClassification.normalizedCategory);
+  const score =
+    aiClassification.categoryConfidence === 'high'
+      ? 6
+      : aiClassification.categoryConfidence === 'medium'
+        ? 3
+        : 1;
+  return {
+    ...fallback,
+    category: mappedCategory,
+    score,
+    claimedUseCase: aiClassification.claimedUseCase,
+    evidenceRefs: aiClassification.evidenceRefs,
+  };
+}
+
+function applyWeakIdentityDeterministicGuard(
+  categoryMatch: CategoryMatch,
+  input: {
+    discoveredLinks: OffChainCredibilityReport['discoveredLinks'];
+    discoveryMode: DiscoveryMode;
+    officialLinkConfidence: 'high' | 'medium' | 'low';
+    externalEvidence?: OffchainExternalEvidenceResult;
+    crawl: TokenWebsiteCrawlResult | null;
+  },
+): CategoryMatch {
+  const weakIdentity =
+    !input.discoveredLinks.website ||
+    input.discoveryMode === 'search_only' ||
+    input.officialLinkConfidence === 'low';
+  if (!weakIdentity) {
+    return categoryMatch;
+  }
+  if (categoryMatch.category !== 'infrastructure' && categoryMatch.category !== 'defi') {
+    return categoryMatch;
+  }
+
+  const text = [
+    input.crawl?.extractedText ?? '',
+    ...(input.externalEvidence?.evidenceItems
+      .filter((item) => item.relevance !== 'low')
+      .map((item) => `${item.title ?? ''} ${item.snippet ?? ''} ${item.url ?? ''}`) ?? []),
+  ].join('\n');
+
+  const hasSpecificInfrastructure =
+    /oracle|data feeds?|ccip|interoperability|bridge|rpc|indexing|validator|node service|middleware|developer api|protocol infrastructure|automation/i.test(
+      text,
+    );
+  const hasDefiProtocol =
+    /lending|borrowing|amm|dex protocol|vault|yield protocol|money market|staking protocol/i.test(
+      text,
+    );
+
+  if (categoryMatch.category === 'infrastructure' && hasSpecificInfrastructure) {
+    return categoryMatch;
+  }
+  if (categoryMatch.category === 'defi' && hasDefiProtocol) {
+    return categoryMatch;
+  }
+
+  return {
+    ...categoryMatch,
+    category: 'unknown',
+    score: 0,
+    claimedUseCase: null,
+    evidenceRefs: [],
+  };
+}
+
+function applyAiProjectProfile(
+  projectProfile: OffChainCredibilityReport['projectProfile'],
+  aiClassification?: OffchainAiProjectClassification | null,
+): OffChainCredibilityReport['projectProfile'] {
+  if (!aiClassification) {
+    return projectProfile;
+  }
+
+  return {
+    ...projectProfile,
+    category: mapAiCategoryToProjectCategory(aiClassification.normalizedCategory),
+    claimedUseCase: aiClassification.claimedUseCase,
+    hasClearUseCase: aiClassification.hasClearUseCase,
+  };
+}
+
+function mapAiCategoryToProjectCategory(
+  category: OffchainAiProjectClassification['normalizedCategory'],
+): ProjectCategory {
+  if (
+    category === 'meme' ||
+    category === 'defi' ||
+    category === 'infrastructure' ||
+    category === 'gaming' ||
+    category === 'ai' ||
+    category === 'rwa' ||
+    category === 'stablecoin' ||
+    category === 'unknown'
+  ) {
+    return category;
+  }
+  return 'other';
 }
 
 export function buildClaimChecks(
@@ -585,6 +1090,7 @@ export function buildClaimChecks(
   crawl: TokenWebsiteCrawlResult | null,
   projectProfile: OffChainCredibilityReport['projectProfile'],
   linkSources: LinkProvenanceMap,
+  externalEvidence?: OffchainExternalEvidenceResult,
 ): OffChainCredibilityReport['claimChecks'] {
   const checks: OffChainCredibilityReport['claimChecks'] = [];
   const evidenceText = combinedText.toLowerCase();
@@ -629,6 +1135,14 @@ export function buildClaimChecks(
       evidence.push('Nearby audit/security terminology found on verified materials');
     }
 
+    const matchingExternalEvidence = findExternalEvidenceForClaim(item.claim, externalEvidence);
+    for (const evidenceItem of matchingExternalEvidence) {
+      evidence.push(`External evidence ${evidenceItem.id}: ${evidenceItem.reason}`);
+      if (evidenceItem.url) {
+        claimSources.push(evidenceItem.url);
+      }
+    }
+
     let status: OffChainCredibilityReport['claimChecks'][number]['status'] = 'unknown';
     if (item.claim === 'audited by' && !verifiedAuditLink && !verifiedSecurityLink) {
       status = 'unsupported';
@@ -653,6 +1167,44 @@ export function buildClaimChecks(
   return checks;
 }
 
+function findExternalEvidenceForClaim(
+  claim: string,
+  externalEvidence?: OffchainExternalEvidenceResult,
+): OffchainEvidenceItem[] {
+  if (!externalEvidence) {
+    return [];
+  }
+  const items = externalEvidence.evidenceItems.filter((item) => item.relevance !== 'low');
+  if (/audited by/i.test(claim)) {
+    return items
+      .filter((item) => item.sourceType === 'audit_report' || item.sourceType === 'official_security')
+      .slice(0, 2);
+  }
+  if (/institutional|enterprise|partner|real-world adoption|used by major banks/i.test(claim)) {
+    return items
+      .filter(
+        (item) =>
+          ['news', 'trusted_directory', 'official_website', 'official_docs'].includes(item.sourceType) &&
+          /partner|integration|integrated|enterprise|institution|used by|adoption/i.test(
+            `${item.title ?? ''} ${item.snippet ?? ''}`,
+          ),
+      )
+      .slice(0, 2);
+  }
+  if (/backed by/i.test(claim)) {
+    return items
+      .filter(
+        (item) =>
+          ['news', 'trusted_directory'].includes(item.sourceType) &&
+          /backed by|funding|investor|raised|venture|capital/i.test(
+            `${item.title ?? ''} ${item.snippet ?? ''}`,
+          ),
+      )
+      .slice(0, 2);
+  }
+  return [];
+}
+
 export function scoreOffChainCredibility(input: {
   data: OffChainCredibilityCollectedData;
   projectProfile: OffChainCredibilityReport['projectProfile'];
@@ -668,13 +1220,14 @@ export function scoreOffChainCredibility(input: {
     discoveryMode: DiscoveryMode;
     hasTrustedDirectoryPresence: boolean;
   };
+  externalEvidence?: OffchainExternalEvidenceResult;
 }): {
   score: number | null;
   riskLevel: OffChainCredibilityRiskLevel;
   credibilityTier: CredibilityTier;
   linkMismatch: boolean;
 } {
-  const { data, projectProfile, categoryMatch, claimChecks, combinedText, crawl, discoveryMeta } =
+  const { data, projectProfile, categoryMatch, claimChecks, combinedText, crawl, discoveryMeta, externalEvidence } =
     input;
   const links = data.discovery.discoveredLinks;
   const confidence = discoveryMeta.officialLinkConfidence;
@@ -715,6 +1268,9 @@ export function scoreOffChainCredibility(input: {
   } else if (projectProfile.hasClearUseCase) {
     score += 15;
   }
+  if (projectProfile.hasClearUseCase && categoryMatch.category === 'meme') {
+    score += 5;
+  }
   if (projectProfile.hasDocs) {
     score += 10;
   }
@@ -726,6 +1282,24 @@ export function scoreOffChainCredibility(input: {
   }
   if (projectProfile.hasAuditsMentioned) {
     score += 5;
+  }
+
+  const externalValidation = resolveExternalValidation(externalEvidence);
+  if (externalValidation === 'strong') {
+    score += 10;
+  } else if (externalValidation === 'moderate') {
+    score += 6;
+  } else if (externalValidation === 'weak') {
+    score += 2;
+  }
+
+  const negativeRiskEvidence = resolveNegativeRiskEvidence(externalEvidence);
+  if (negativeRiskEvidence === 'high') {
+    score -= 30;
+  } else if (negativeRiskEvidence === 'medium') {
+    score -= 18;
+  } else if (negativeRiskEvidence === 'low') {
+    score -= 8;
   }
 
   const adoptionEvidence = (crawl?.signals.adoptionClaims.length ?? 0) > 0;
@@ -798,6 +1372,15 @@ export function scoreOffChainCredibility(input: {
     score -= 20;
   }
 
+  if (
+    categoryMatch.category === 'unknown' &&
+    !links.website &&
+    externalValidation === 'none' &&
+    !projectProfile.hasClearUseCase
+  ) {
+    score = Math.min(score, 44);
+  }
+
   score = clamp(Math.round(score), 0, 100);
 
   const caps = applyOffchainScoreCaps({
@@ -834,6 +1417,7 @@ function buildProjectProfile(
   categoryMatch: CategoryMatch,
   linkSources: LinkProvenanceMap,
   crawl: TokenWebsiteCrawlResult | null,
+  externalEvidence?: OffchainExternalEvidenceResult,
 ): OffChainCredibilityReport['projectProfile'] {
   const links = data.discovery.discoveredLinks;
   const validationContext = {
@@ -868,23 +1452,32 @@ function buildProjectProfile(
           isVerifiedSecondaryLink(crawl.links.security, 'docs', validationContext))),
   );
   const hasTeamInfo = Boolean(crawl?.signals.hasTeamInfo);
+  const hasExternalUseCase = Boolean(
+    externalEvidence?.evidenceItems.some(
+      (item) =>
+        item.relevance !== 'low' &&
+        ['developer_resource', 'official_docs', 'official_security', 'official_whitepaper', 'news'].includes(
+          item.sourceType,
+        ) &&
+        /oracle|data feeds?|infrastructure|protocol|interoperability|ccip|automation|smart contracts?|developer|docs?|defi|security|bridge/i.test(
+          `${item.title ?? ''} ${item.snippet ?? ''} ${item.url ?? ''}`,
+        ),
+    ),
+  );
   const hasClearUseCase =
-    FUNCTIONAL_CATEGORIES.has(categoryMatch.category) &&
+    (FUNCTIONAL_CATEGORIES.has(categoryMatch.category) || categoryMatch.category === 'meme') &&
     (Boolean(crawl?.signals.hasClearUseCase) ||
-      categoryMatch.score > 0 ||
-      hasDocs);
+      (categoryMatch.category !== 'meme' && categoryMatch.score > 0) ||
+      hasDocs ||
+      hasGithub ||
+      hasWhitepaper ||
+      hasAuditsMentioned ||
+      hasExternalUseCase);
 
   return {
     category: categoryMatch.category,
     claimedUseCase: categoryMatch.claimedUseCase,
-    hasClearUseCase:
-      categoryMatch.category === 'meme'
-        ? false
-        : crawl
-          ? hasClearUseCase
-          : hasClearUseCase
-            ? true
-            : null,
+    hasClearUseCase: crawl || externalEvidence ? hasClearUseCase : hasClearUseCase ? true : null,
     hasDocs: hasDocs ? true : crawl ? false : null,
     hasWhitepaper: hasWhitepaper ? true : crawl ? false : null,
     hasGithub: hasGithub ? true : crawl ? false : null,
@@ -898,6 +1491,7 @@ function buildCredibilitySignals(
   projectProfile: OffChainCredibilityReport['projectProfile'],
   categoryMatch: CategoryMatch,
   combinedText: string,
+  externalEvidence?: OffchainExternalEvidenceResult,
 ): OffChainCredibilityReport['credibilitySignals'] {
   const signals: OffChainCredibilityReport['credibilitySignals'] = [];
 
@@ -954,6 +1548,22 @@ function buildCredibilitySignals(
       sourceUrl: data.discovery.discoveredLinks.website ?? undefined,
     });
   }
+  const externalValidation = resolveExternalValidation(externalEvidence);
+  if (externalValidation === 'strong' || externalValidation === 'moderate') {
+    signals.push({
+      strength: externalValidation === 'strong' ? 'high' : 'medium',
+      title: 'External Evidence Corroboration',
+      description: 'Open-web evidence corroborates official identity or project resources.',
+      evidence: collectEvidenceRefs(externalEvidence, [
+        'official_website',
+        'official_docs',
+        'developer_resource',
+        'trusted_directory',
+        'news',
+      ]).join(', ') || undefined,
+      sourceUrl: externalEvidence?.evidenceItems.find((item) => item.relevance === 'high')?.url,
+    });
+  }
   if (categoryMatch.category === 'meme' && hasMemePositioning(combinedText)) {
     signals.push({
       strength: 'low',
@@ -973,6 +1583,7 @@ function buildRiskFlags(
   scoring: { linkMismatch: boolean },
   aggregatorWebsiteRejected: boolean,
   discoveryMode: DiscoveryMode,
+  externalEvidence?: OffchainExternalEvidenceResult,
 ): OffChainCredibilityReport['riskFlags'] {
   const flags: OffChainCredibilityReport['riskFlags'] = [];
   const crawl = data.crawl;
@@ -1047,6 +1658,21 @@ function buildRiskFlags(
     });
   }
 
+  const negativeRiskEvidence = resolveNegativeRiskEvidence(externalEvidence);
+  if (negativeRiskEvidence === 'high' || negativeRiskEvidence === 'medium') {
+    const warning = externalEvidence?.evidenceItems.find(
+      (item) => item.sourceType === 'scam_warning' || item.sourceType === 'risk_warning',
+    );
+    flags.push({
+      severity: negativeRiskEvidence === 'high' ? 'high' : 'medium',
+      title: 'External Risk Warning Found',
+      description:
+        'Open-web evidence contains scam, exploit, hack, or risk-warning language that should be reviewed.',
+      evidence: warning ? `${warning.id}: ${warning.reason}` : undefined,
+      sourceUrl: warning?.url,
+    });
+  }
+
   const auditClaim = claimChecks.find((check) => check.claim === 'audited by');
   if (auditClaim && auditClaim.status !== 'supported') {
     flags.push({
@@ -1075,24 +1701,44 @@ function resolveOffChainVerdict(input: {
   hasWebsite: boolean;
   hasTrustedOfficialWebsite: boolean;
   linkMismatch: boolean;
+  hasClearUseCase: boolean | null;
+  hasDocs: boolean | null;
+  hasGithub: boolean | null;
+  externalValidation: 'strong' | 'moderate' | 'weak' | 'none';
+  negativeRiskEvidence: 'none_found' | 'low' | 'medium' | 'high';
 }): string {
   if (!input.hasWebsite && input.riskLevel === 'unknown') {
     return 'Off-chain credibility could not be assessed because official project links were unavailable.';
+  }
+  if (input.negativeRiskEvidence === 'high') {
+    return 'Off-chain credibility requires review because external evidence contains material scam, exploit, or risk-warning signals.';
+  }
+  if (!input.hasWebsite && input.externalValidation !== 'strong') {
+    return 'Official identity could not be fully verified. Open-web evidence is limited or partial, so off-chain credibility remains uncertain.';
   }
   if (input.linkMismatch || input.officialLinkConfidence.level === 'low') {
     return 'Off-chain credibility requires review because the discovered website or project links could not be confidently matched to the token.';
   }
   if (
+    input.category === 'infrastructure' &&
+    input.hasWebsite &&
+    input.hasTrustedOfficialWebsite &&
+    input.hasClearUseCase &&
+    (input.hasDocs || input.hasGithub) &&
+    (input.externalValidation === 'strong' || input.externalValidation === 'moderate')
+  ) {
+    return 'Off-chain credibility appears strong. Official website, documentation/developer resources, and external evidence support a clear infrastructure or oracle use case.';
+  }
+  if (
     input.category === 'meme' &&
     input.hasWebsite &&
     input.hasTrustedOfficialWebsite &&
-    (input.officialLinkConfidence.level === 'medium' ||
-      input.officialLinkConfidence.level === 'high')
+    input.negativeRiskEvidence === 'none_found'
   ) {
-    return 'Off-chain credibility appears community-driven. Official website/socials may be verified, but project documentation and functional utility evidence are limited compared with infrastructure or DeFi protocols.';
+    return 'Official identity appears verified. Project appears meme or community-driven; credibility depends more on community, market presence, and absence of risk warnings than technical utility.';
   }
-  if (input.category === 'meme' || input.credibilityTier === 'limited') {
-    return 'Off-chain credibility appears community-driven or limited. Official links may exist, but project documentation and utility evidence are limited compared with infrastructure or DeFi protocols.';
+  if (input.credibilityTier === 'limited') {
+    return 'Off-chain credibility appears limited. Official links may exist, but documentation, utility evidence, or external validation remain incomplete.';
   }
   if (
     input.credibilityTier === 'institutional_grade' ||

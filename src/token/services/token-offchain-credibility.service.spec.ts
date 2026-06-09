@@ -1,10 +1,18 @@
 import { DashboardSummaryService } from './dashboard-summary.service';
 import {
   buildOffChainCredibilityReport,
+  TokenOffchainCredibilityService,
   type OffChainCredibilityCollectedData,
 } from './token-offchain-credibility.service';
 import type { OffchainDiscoveryResult } from './token-offchain-discovery.service';
 import type { TokenWebsiteCrawlResult } from './token-web-crawler.service';
+import type { TokenOffchainDiscoveryService } from './token-offchain-discovery.service';
+import type { TokenOffchainExternalEvidenceService } from './token-offchain-external-evidence.service';
+import {
+  TokenOffchainAiClassifierService,
+  type OffchainAiProjectClassification,
+} from './token-offchain-ai-classifier.service';
+import type { ConfigService } from '@nestjs/config';
 import { TokenTrustReportService } from './token-trust-report.service';
 import { TokenAnalysisEntity } from '../entities/token-analysis.entity';
 
@@ -203,6 +211,65 @@ function pepeLikeData(): OffChainCredibilityCollectedData {
       },
     }),
     fetchErrors: [],
+  };
+}
+
+function externalEvidenceFixture() {
+  return {
+    status: 'done' as const,
+    evidenceItems: [
+      {
+        id: 'ev_chainlink_docs',
+        sourceType: 'official_docs' as const,
+        trustLevel: 'high' as const,
+        relevance: 'high' as const,
+        url: 'https://docs.chain.link/',
+        title: 'Chainlink Documentation',
+        snippet: 'Developer docs for Chainlink data feeds, CCIP, automation, and smart contracts.',
+        matchedOfficialDomain: true,
+        reason: 'Search result matches the verified official documentation domain.',
+      },
+      {
+        id: 'ev_chainlink_github',
+        sourceType: 'developer_resource' as const,
+        trustLevel: 'medium' as const,
+        relevance: 'medium' as const,
+        url: 'https://github.com/smartcontractkit/chainlink',
+        title: 'smartcontractkit/chainlink',
+        snippet: 'Chainlink oracle network and smart contract infrastructure.',
+        matchedTokenName: true,
+        reason: 'Search result points to a developer resource.',
+      },
+    ],
+    summary: {
+      trustedDirectoryCount: 0,
+      officialSourceCount: 1,
+      externalValidationCount: 2,
+      riskWarningCount: 0,
+      scamWarningCount: 0,
+      unrelatedCount: 0,
+    },
+  };
+}
+
+function aiClassification(
+  overrides: Partial<OffchainAiProjectClassification> = {},
+): OffchainAiProjectClassification {
+  return {
+    source: 'ai',
+    categoryLabel: 'Oracle / smart contract infrastructure',
+    normalizedCategory: 'infrastructure',
+    categoryConfidence: 'high',
+    claimedUseCase: 'Oracle, data feeds, and smart contract infrastructure',
+    useCaseConfidence: 'high',
+    identityStatus: 'verified',
+    evidenceQuality: 'strong',
+    possibleNarrative: null,
+    hasClearUseCase: true,
+    reasoning: 'Official docs and developer resources describe Chainlink oracle infrastructure.',
+    evidenceRefs: ['ev_chainlink_docs', 'ev_chainlink_github'],
+    warnings: [],
+    ...overrides,
   };
 }
 
@@ -799,6 +866,112 @@ describe('buildOffChainCredibilityReport', () => {
     expect(report.projectProfile.category).toBe('infrastructure');
   });
 
+  it('keeps Chainlink infrastructure even with noisy meme metadata', () => {
+    const report = buildOffChainCredibilityReport({
+      ...linkLikeData(),
+      discovery: makeDiscovery({
+        ...linkLikeData().discovery,
+        metadataCategories: ['Meme', 'Ethereum Ecosystem'],
+        discoveredLinks: {
+          ...linkLikeData().discovery.discoveredLinks,
+          whitepaper: 'https://research.chain.link/whitepaper-v2.pdf',
+          blog: 'https://blog.chain.link/',
+        },
+        linkSources: {
+          ...linkLikeData().discovery.linkSources,
+          whitepaper: 'coingecko',
+          blog: 'coingecko',
+        },
+      }),
+      coinGeckoMetadata: { categories: ['Meme'] },
+      externalEvidence: externalEvidenceFixture(),
+    });
+
+    expect(report.pipelineVersion).toBe('offchain-v2-evidence');
+    expect(report.projectProfile.category).toBe('infrastructure');
+    expect(report.projectProfile.claimedUseCase?.toLowerCase()).toMatch(
+      /oracle|data feeds|infrastructure/,
+    );
+    expect(report.projectProfile.hasClearUseCase).toBe(true);
+    expect(report.riskFlags.some((flag) => flag.title === 'No Clear Use Case Found')).toBe(false);
+    expect(report.verdict.toLowerCase()).toContain('strong');
+    expect(report.verdict.toLowerCase()).not.toContain('community-driven');
+  });
+
+  it('does not classify Ethplorer or block explorers as docs', () => {
+    const report = buildOffChainCredibilityReport({
+      tokenName: 'Chainlink',
+      tokenSymbol: 'LINK',
+      contractAddress: '0x514910771af9ca656af840dff83e8264ecf986ca',
+      discovery: makeDiscovery({
+        discoveryMode: 'official_verified',
+        discoveredLinks: {
+          website: 'https://chain.link/',
+          docs: 'https://ethplorer.io/address/0x514910771af9ca656af840dff83e8264ecf986ca',
+          whitepaper: null,
+          github: null,
+          twitter: null,
+          telegram: null,
+          discord: null,
+          blog: null,
+        },
+        linkSources: { website: 'coingecko', docs: 'coingecko' },
+        hasTrustedOfficialWebsite: true,
+        officialLinkConfidence: { level: 'medium', reasons: ['Website found in trusted metadata'] },
+      }),
+      crawl: makeCrawl({
+        homepageUrl: 'https://chain.link/',
+        extractedText: 'Chainlink LINK oracle infrastructure',
+        mentions: { tokenName: true, tokenSymbol: true, contractAddress: false },
+      }),
+      fetchErrors: [],
+    });
+
+    expect(report.discoveredLinks.docs).toBeNull();
+    expect(report.projectProfile.hasDocs).toBe(false);
+  });
+
+  it('keeps unknown token category unknown with weak evidence', () => {
+    const report = buildOffChainCredibilityReport({
+      tokenName: 'Unknown Token',
+      tokenSymbol: 'UNK',
+      contractAddress: '0x0000000000000000000000000000000000000001',
+      discovery: makeDiscovery({
+        status: 'partial',
+        discoveryMode: 'not_found',
+        officialLinkConfidence: { level: 'low', reasons: ['No official website discovered'] },
+      }),
+      crawl: null,
+      externalEvidence: {
+        status: 'done',
+        evidenceItems: [
+          {
+            id: 'ev_unrelated',
+            sourceType: 'unrelated',
+            trustLevel: 'low',
+            relevance: 'low',
+            title: 'Unknown price prediction',
+            snippet: 'Generic token price prediction page.',
+            reason: 'Search result does not match contract, token name, symbol, or official domain.',
+          },
+        ],
+        summary: {
+          trustedDirectoryCount: 0,
+          officialSourceCount: 0,
+          externalValidationCount: 0,
+          riskWarningCount: 0,
+          scamWarningCount: 0,
+          unrelatedCount: 1,
+        },
+      },
+      fetchErrors: [],
+    });
+
+    expect(report.projectProfile.category).toBe('unknown');
+    expect(report.projectProfile.claimedUseCase).toBeNull();
+    expect(report.verdict.toLowerCase()).toContain('uncertain');
+  });
+
   it('misleading investment language applies severe penalty without scam wording', () => {
     const report = buildOffChainCredibilityReport({
       tokenName: 'Hype',
@@ -948,5 +1121,501 @@ describe('tokenTrust modules with offChainCredibility', () => {
         line.includes('Off-chain credibility is shown separately'),
       ),
     ).toBe(true);
+  });
+});
+
+describe('TokenOffchainCredibilityService pipeline orchestration', () => {
+  it('collects external evidence even when official website is already discovered', async () => {
+    const discovery = {
+      discoverOfficialLinks: jest.fn().mockResolvedValue(linkLikeData().discovery),
+    } as unknown as TokenOffchainDiscoveryService;
+    const webCrawler = {
+      crawlOfficialWebsite: jest.fn().mockResolvedValue(linkLikeData().crawl),
+    } as unknown as { crawlOfficialWebsite: jest.Mock };
+    const externalEvidence = {
+      collectEvidence: jest.fn().mockResolvedValue(externalEvidenceFixture()),
+    } as unknown as TokenOffchainExternalEvidenceService;
+    const aiClassifier = {
+      classifyWithDebug: jest.fn().mockResolvedValue({
+        classification: null,
+        debug: {
+          attempted: false,
+          enabled: false,
+          provider: 'anthropic',
+          hasApiKey: false,
+          evidenceItemCount: 0,
+          skippedReason: 'OFFCHAIN_AI_CLASSIFIER_ENABLED is false',
+          resultSource: 'deterministic',
+        },
+      }),
+    } as unknown as TokenOffchainAiClassifierService;
+    const config = {
+      get: jest.fn((key: string) => {
+        if (key === 'BRAVE_SEARCH_API_KEY') return 'test-key';
+        return '';
+      }),
+    } as unknown as ConfigService;
+
+    const service = new TokenOffchainCredibilityService(
+      config,
+      discovery,
+      webCrawler as unknown as any,
+      externalEvidence,
+      aiClassifier,
+    );
+
+    const report = await service.buildReport({
+      tokenName: 'Chainlink',
+      tokenSymbol: 'LINK',
+      contractAddress: '0x514910771af9ca656af840dff83e8264ecf986ca',
+      chain: 'ethereum',
+    });
+
+    expect(externalEvidence.collectEvidence).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenName: 'Chainlink',
+        tokenSymbol: 'LINK',
+        discoveredLinks: linkLikeData().discovery.discoveredLinks,
+      }),
+    );
+    expect(report.externalEvidence?.status).toBe('done');
+    expect(report.projectProfile.category).toBe('infrastructure');
+    expect(report.aiClassifierDebug?.resultSource).toBe('deterministic');
+  });
+
+  it('applies valid AI classifier result from the service call', async () => {
+    const discovery = {
+      discoverOfficialLinks: jest.fn().mockResolvedValue(linkLikeData().discovery),
+    } as unknown as TokenOffchainDiscoveryService;
+    const webCrawler = {
+      crawlOfficialWebsite: jest.fn().mockResolvedValue(linkLikeData().crawl),
+    } as unknown as { crawlOfficialWebsite: jest.Mock };
+    const externalEvidence = {
+      collectEvidence: jest.fn().mockResolvedValue(externalEvidenceFixture()),
+    } as unknown as TokenOffchainExternalEvidenceService;
+    const aiClassifier = {
+      classifyWithDebug: jest.fn().mockResolvedValue({
+        classification: aiClassification(),
+        debug: {
+          attempted: true,
+          enabled: true,
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-6',
+          hasApiKey: true,
+          evidenceItemCount: 2,
+          resultSource: 'ai',
+        },
+      }),
+    } as unknown as TokenOffchainAiClassifierService;
+    const config = { get: jest.fn(() => '') } as unknown as ConfigService;
+
+    const service = new TokenOffchainCredibilityService(
+      config,
+      discovery,
+      webCrawler as unknown as any,
+      externalEvidence,
+      aiClassifier,
+    );
+
+    const report = await service.buildReport({
+      tokenName: 'Chainlink',
+      tokenSymbol: 'LINK',
+      contractAddress: '0x514910771af9ca656af840dff83e8264ecf986ca',
+      chain: 'ethereum',
+    });
+
+    expect(report.projectUnderstanding?.source).toBe('ai');
+    expect(report.aiClassifierDebug?.resultSource).toBe('ai');
+    expect(report.projectProfile.category).toBe('infrastructure');
+  });
+});
+
+describe('TokenOffchainAiClassifierService', () => {
+  function makeAiConfig(): ConfigService {
+    return {
+      get: jest.fn((key: string) => {
+        if (key === 'OFFCHAIN_AI_CLASSIFIER_ENABLED') return 'true';
+        if (key === 'ANTHROPIC_API_KEY') return 'test-key';
+        return '';
+      }),
+    } as unknown as ConfigService;
+  }
+
+  function makeGeminiConfig(): ConfigService {
+    return {
+      get: jest.fn((key: string) => {
+        if (key === 'OFFCHAIN_AI_CLASSIFIER_ENABLED') return 'true';
+        if (key === 'OFFCHAIN_AI_CLASSIFIER_PROVIDER') return 'gemini';
+        if (key === 'GEMINI_API_KEY') return 'test-key';
+        return '';
+      }),
+    } as unknown as ConfigService;
+  }
+
+  it('uses valid AI classification in the off-chain report', () => {
+    const report = buildOffChainCredibilityReport({
+      tokenName: 'FLOYX',
+      tokenSymbol: 'FLOYX',
+      contractAddress: '0xf10yx00000000000000000000000000000000000',
+      discovery: makeDiscovery({
+        status: 'partial',
+        discoveryMode: 'search_only',
+        officialLinkConfidence: { level: 'low', reasons: ['No official website discovered'] },
+      }),
+      crawl: null,
+      externalEvidence: {
+        status: 'done',
+        evidenceItems: [
+          {
+            id: 'ev_floyx_social',
+            sourceType: 'news',
+            trustLevel: 'medium',
+            relevance: 'medium',
+            title: 'FLOYX Web3 social media platform',
+            snippet: 'Third-party snippet describes FLOYX as a possible Web3 social media platform.',
+            matchedTokenName: true,
+            reason: 'Search result matched token name.',
+          },
+        ],
+        summary: {
+          trustedDirectoryCount: 0,
+          officialSourceCount: 0,
+          externalValidationCount: 1,
+          riskWarningCount: 0,
+          scamWarningCount: 0,
+          unrelatedCount: 0,
+        },
+      },
+      aiClassification: aiClassification({
+        categoryLabel: 'Possible SocialFi / Web3 social platform',
+        normalizedCategory: 'socialfi',
+        categoryConfidence: 'low',
+        claimedUseCase: 'Possible Web3/SocialFi social media platform',
+        useCaseConfidence: 'low',
+        identityStatus: 'unverified',
+        evidenceQuality: 'limited',
+        possibleNarrative:
+          'Possible Web3/SocialFi social media platform based on third-party snippets',
+        hasClearUseCase: false,
+        evidenceRefs: ['ev_floyx_social'],
+      }),
+      fetchErrors: [],
+    });
+
+    expect(report.projectUnderstanding?.source).toBe('ai');
+    expect(report.projectUnderstanding?.category).toBe('socialfi');
+    expect(report.projectUnderstanding?.categoryConfidence).toBe('low');
+    expect(report.projectProfile.category).toBe('other');
+    expect(report.projectProfile.hasClearUseCase).toBe(false);
+  });
+
+  it('returns null so deterministic fallback can run when AI JSON is invalid', async () => {
+    const service = new TokenOffchainAiClassifierService(makeAiConfig());
+    jest.spyOn(service as any, 'callClaude').mockRejectedValue(new Error('Unexpected token'));
+
+    const result = await service.classifyWithDebug({
+      tokenName: 'Chainlink',
+      tokenSymbol: 'LINK',
+      contractAddress: '0x514910771af9ca656af840dff83e8264ecf986ca',
+      chain: 'ethereum',
+      discoveredLinks: linkLikeData().discovery.discoveredLinks,
+      discoveryMode: 'official_verified',
+      officialLinkConfidence: 'high',
+      crawl: linkLikeData().crawl,
+      externalEvidence: externalEvidenceFixture(),
+    });
+
+    expect(result.classification).toBeNull();
+    expect(result.debug.attempted).toBe(true);
+    expect(result.debug.resultSource).toBe('deterministic');
+    expect(result.debug.failureReason).toContain('Unexpected token');
+  });
+
+  it('skips cleanly when AI classifier is disabled', async () => {
+    const service = new TokenOffchainAiClassifierService({
+      get: jest.fn(() => ''),
+    } as unknown as ConfigService);
+
+    const result = await service.classifyWithDebug({
+      tokenName: 'Chainlink',
+      tokenSymbol: 'LINK',
+      contractAddress: '0x514910771af9ca656af840dff83e8264ecf986ca',
+      chain: 'ethereum',
+      discoveredLinks: linkLikeData().discovery.discoveredLinks,
+      discoveryMode: 'official_verified',
+      officialLinkConfidence: 'high',
+      crawl: linkLikeData().crawl,
+      externalEvidence: externalEvidenceFixture(),
+    });
+
+    expect(result.classification).toBeNull();
+    expect(result.debug.enabled).toBe(false);
+    expect(result.debug.attempted).toBe(false);
+    expect(result.debug.skippedReason).toContain('OFFCHAIN_AI_CLASSIFIER_ENABLED');
+  });
+
+  it('downgrades high-confidence AI output when website is missing and discovery is search-only', async () => {
+    const service = new TokenOffchainAiClassifierService(makeAiConfig());
+    jest.spyOn(service as any, 'callClaude').mockResolvedValue({
+      ...aiClassification(),
+      evidenceRefs: ['ev_floyx_social'],
+    });
+
+    const result = await service.classify({
+      tokenName: 'FLOYX',
+      tokenSymbol: 'FLOYX',
+      contractAddress: '0xf10yx00000000000000000000000000000000000',
+      chain: 'ethereum',
+      discoveredLinks: makeDiscovery().discoveredLinks,
+      discoveryMode: 'search_only',
+      officialLinkConfidence: 'low',
+      crawl: null,
+      externalEvidence: {
+        status: 'done',
+        evidenceItems: [
+          {
+            id: 'ev_floyx_social',
+            sourceType: 'news',
+            trustLevel: 'medium',
+            relevance: 'medium',
+            title: 'FLOYX Web3 social media platform',
+            snippet: 'FLOYX Web3 social media platform with token generation and smart contracts.',
+            matchedTokenName: true,
+            reason: 'Search result matched token name.',
+          },
+        ],
+        summary: {
+          trustedDirectoryCount: 0,
+          officialSourceCount: 0,
+          externalValidationCount: 1,
+          riskWarningCount: 0,
+          scamWarningCount: 0,
+          unrelatedCount: 0,
+        },
+      },
+    });
+
+    expect(result?.categoryConfidence).toBe('low');
+    expect(result?.normalizedCategory).toBe('unknown');
+    expect(result?.hasClearUseCase).toBe(false);
+  });
+
+  it('does not allow PEPE to become DeFi from trading/listing evidence only', async () => {
+    const service = new TokenOffchainAiClassifierService(makeAiConfig());
+    jest.spyOn(service as any, 'callClaude').mockResolvedValue({
+      ...aiClassification({
+        categoryLabel: 'DeFi token',
+        normalizedCategory: 'defi',
+        claimedUseCase: 'DeFi trading token',
+        evidenceRefs: ['ev_pepe_market'],
+      }),
+    });
+
+    const result = await service.classify({
+      tokenName: 'Pepe',
+      tokenSymbol: 'PEPE',
+      contractAddress: '0x6982508145454ce325ddbe47a25d4ec3d2311933',
+      chain: 'ethereum',
+      discoveredLinks: pepeLikeData().discovery.discoveredLinks,
+      discoveryMode: 'official_verified',
+      officialLinkConfidence: 'medium',
+      crawl: pepeLikeData().crawl,
+      externalEvidence: {
+        status: 'done',
+        evidenceItems: [
+          {
+            id: 'ev_pepe_market',
+            sourceType: 'trusted_directory',
+            trustLevel: 'medium',
+            relevance: 'high',
+            title: 'PEPE price and liquidity',
+            snippet: 'CoinGecko and Uniswap trading liquidity page for PEPE.',
+            matchedContractAddress: true,
+            reason: 'Trusted directory market listing.',
+          },
+        ],
+        summary: {
+          trustedDirectoryCount: 1,
+          officialSourceCount: 0,
+          externalValidationCount: 1,
+          riskWarningCount: 0,
+          scamWarningCount: 0,
+          unrelatedCount: 0,
+        },
+      },
+    });
+
+    expect(result?.normalizedCategory).not.toBe('defi');
+    expect(result?.categoryConfidence).toBe('low');
+  });
+
+  it('keeps Chainlink infrastructure from valid mocked Claude classification', async () => {
+    const service = new TokenOffchainAiClassifierService(makeAiConfig());
+    jest.spyOn(service as any, 'callClaude').mockResolvedValue(aiClassification());
+
+    const result = await service.classify({
+      tokenName: 'Chainlink',
+      tokenSymbol: 'LINK',
+      contractAddress: '0x514910771af9ca656af840dff83e8264ecf986ca',
+      chain: 'ethereum',
+      discoveredLinks: linkLikeData().discovery.discoveredLinks,
+      websiteSource: 'coingecko',
+      discoveryMode: 'official_verified',
+      officialLinkConfidence: 'high',
+      crawl: linkLikeData().crawl,
+      externalEvidence: externalEvidenceFixture(),
+    });
+
+    expect(result?.normalizedCategory).toBe('infrastructure');
+    expect(result?.categoryConfidence).toBe('high');
+    expect(result?.hasClearUseCase).toBe(true);
+  });
+
+  it('uses Gemini provider valid mocked JSON', async () => {
+    const service = new TokenOffchainAiClassifierService(makeGeminiConfig());
+    jest.spyOn(service as any, 'callGemini').mockResolvedValue(
+      aiClassification({
+        categoryLabel: 'Possible SocialFi / Web3 social platform',
+        normalizedCategory: 'socialfi',
+        categoryConfidence: 'low',
+        claimedUseCase: 'Possible Web3/SocialFi social media platform',
+        useCaseConfidence: 'low',
+        identityStatus: 'unverified',
+        evidenceQuality: 'limited',
+        possibleNarrative:
+          'Possible Web3/SocialFi social media platform based on third-party snippets',
+        hasClearUseCase: false,
+        evidenceRefs: ['ev_floyx_social'],
+      }),
+    );
+
+    const result = await service.classifyWithDebug({
+      tokenName: 'FLOYX',
+      tokenSymbol: 'FLOYX',
+      contractAddress: '0xf10yx00000000000000000000000000000000000',
+      chain: 'ethereum',
+      discoveredLinks: makeDiscovery().discoveredLinks,
+      discoveryMode: 'search_only',
+      officialLinkConfidence: 'low',
+      crawl: null,
+      externalEvidence: {
+        status: 'done',
+        evidenceItems: [
+          {
+            id: 'ev_floyx_social',
+            sourceType: 'news',
+            trustLevel: 'medium',
+            relevance: 'medium',
+            title: 'FLOYX Web3 social media platform',
+            snippet: 'Third-party snippet describes FLOYX as a Web3 social media platform.',
+            matchedTokenName: true,
+            reason: 'Search result matched token name.',
+          },
+        ],
+        summary: {
+          trustedDirectoryCount: 0,
+          officialSourceCount: 0,
+          externalValidationCount: 1,
+          riskWarningCount: 0,
+          scamWarningCount: 0,
+          unrelatedCount: 0,
+        },
+      },
+    });
+
+    expect(result.debug.provider).toBe('gemini');
+    expect(result.debug.model).toBe('gemini-2.5-flash-lite');
+    expect(result.debug.resultSource).toBe('ai');
+    expect(result.classification?.normalizedCategory).toBe('socialfi');
+    expect(result.classification?.categoryConfidence).toBe('low');
+  });
+
+  it('falls back when Gemini returns invalid JSON', async () => {
+    const service = new TokenOffchainAiClassifierService(makeGeminiConfig());
+    jest.spyOn(service as any, 'callGemini').mockRejectedValue(new Error('Unexpected token'));
+
+    const result = await service.classifyWithDebug({
+      tokenName: 'FLOYX',
+      tokenSymbol: 'FLOYX',
+      contractAddress: '0xf10yx00000000000000000000000000000000000',
+      chain: 'ethereum',
+      discoveredLinks: makeDiscovery().discoveredLinks,
+      discoveryMode: 'search_only',
+      officialLinkConfidence: 'low',
+      crawl: null,
+      externalEvidence: externalEvidenceFixture(),
+    });
+
+    expect(result.classification).toBeNull();
+    expect(result.debug.provider).toBe('gemini');
+    expect(result.debug.resultSource).toBe('deterministic');
+    expect(result.debug.failureReason).toContain('Unexpected token');
+  });
+
+  it('falls back when Gemini quota or rate limit fails', async () => {
+    const service = new TokenOffchainAiClassifierService(makeGeminiConfig());
+    jest
+      .spyOn(service as any, 'callGemini')
+      .mockRejectedValue(new Error('429 Too Many Requests: exceeded your current quota'));
+
+    const result = await service.classifyWithDebug({
+      tokenName: 'FLOYX',
+      tokenSymbol: 'FLOYX',
+      contractAddress: '0xf10yx00000000000000000000000000000000000',
+      chain: 'ethereum',
+      discoveredLinks: makeDiscovery().discoveredLinks,
+      discoveryMode: 'search_only',
+      officialLinkConfidence: 'low',
+      crawl: null,
+      externalEvidence: externalEvidenceFixture(),
+    });
+
+    expect(result.classification).toBeNull();
+    expect(result.debug.failureReason).toContain('quota');
+    expect(result.debug.resultSource).toBe('deterministic');
+  });
+
+  it('deterministic fallback is conservative for FLOYX-style search-only evidence', () => {
+    const report = buildOffChainCredibilityReport({
+      tokenName: 'FLOYX',
+      tokenSymbol: 'FLOYX',
+      contractAddress: '0xf10yx00000000000000000000000000000000000',
+      discovery: makeDiscovery({
+        status: 'partial',
+        discoveryMode: 'search_only',
+        officialLinkConfidence: { level: 'low', reasons: ['No official website discovered'] },
+      }),
+      crawl: null,
+      externalEvidence: {
+        status: 'done',
+        evidenceItems: [
+          {
+            id: 'ev_floyx_generic',
+            sourceType: 'news',
+            trustLevel: 'medium',
+            relevance: 'medium',
+            title: 'FLOYX Web3 social media platform',
+            snippet:
+              'Third-party snippet mentions Web3, smart contracts, platform, token generation, and decentralized social media.',
+            matchedTokenName: true,
+            reason: 'Search result matched token name.',
+          },
+        ],
+        summary: {
+          trustedDirectoryCount: 0,
+          officialSourceCount: 0,
+          externalValidationCount: 1,
+          riskWarningCount: 0,
+          scamWarningCount: 0,
+          unrelatedCount: 0,
+        },
+      },
+      fetchErrors: [],
+    });
+
+    expect(report.projectUnderstanding?.source).toBe('deterministic');
+    expect(report.projectProfile.category).not.toBe('infrastructure');
+    expect(report.projectProfile.category).toBe('unknown');
+    expect(report.projectProfile.hasClearUseCase).toBe(false);
   });
 });
