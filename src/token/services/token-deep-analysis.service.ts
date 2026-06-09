@@ -397,6 +397,21 @@ export class TokenDeepAnalysisService {
       );
     } catch (err: unknown) {
       const message = this.getErrorMessage(err);
+      if (this.isAnthropicBillingError(err)) {
+        this.logger.warn(
+          `[TokenDeepAnalysis] skipped ${normalized} ${chain}: Anthropic billing/credit limit`,
+        );
+        await this.deepAnalysisRepo.update(
+          { contractAddress: normalized, chain },
+          {
+            status: 'skipped',
+            errorMessage:
+              'Deep analysis skipped because Anthropic billing credits are unavailable.',
+            updatedAt: new Date(),
+          },
+        );
+        return;
+      }
       this.logger.error(
         `[TokenDeepAnalysis] run failed ${normalized} ${chain}: ${message}`,
         err instanceof Error ? err.stack : undefined,
@@ -913,5 +928,15 @@ Return exactly this JSON structure with all fields populated:
       return error.message;
     }
     return String(error);
+  }
+
+  private isAnthropicBillingError(error: unknown): boolean {
+    const message = this.getErrorMessage(error).toLowerCase();
+    return (
+      message.includes('credit balance is too low') ||
+      message.includes('billing') ||
+      message.includes('insufficient credits') ||
+      message.includes('payment required')
+    );
   }
 }

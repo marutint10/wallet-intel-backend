@@ -107,7 +107,13 @@ Rules:
 - Infrastructure requires evidence of infrastructure product functionality such as oracle, data feeds, bridge/interoperability, RPC, indexing, validator/node services, middleware, developer APIs, or protocol infrastructure.
 - SocialFi/Web3 social evidence should classify as socialfi or other, not infrastructure.
 - Meme/community evidence should classify as meme when project positioning is meme/community and no functional product evidence exists.
-- Return JSON only.`;
+- Return one valid JSON object only.
+- Do not return markdown.
+- Do not return code fences.
+- Do not include comments.
+- Do not include trailing commas.
+- All property names must use double quotes.
+- All string values must use double quotes.`;
 
 @Injectable()
 export class TokenOffchainAiClassifierService {
@@ -332,7 +338,9 @@ export class TokenOffchainAiClassifierService {
         text += block.text;
       }
     }
-    return JSON.parse(stripMarkdownCodeFence(text.trim())) as Record<string, unknown>;
+    return parseAiClassifierJsonResponse(text, (preview) =>
+      this.logger.warn(`Invalid AI classifier JSON preview: ${preview}`),
+    );
   }
 
   private async callGemini(
@@ -340,6 +348,17 @@ export class TokenOffchainAiClassifierService {
     apiKey: string,
     modelName: string,
   ): Promise<Record<string, unknown>> {
+    const text = await this.generateGeminiText(prompt, apiKey, modelName);
+    return parseAiClassifierJsonResponse(text, (preview) =>
+      this.logger.warn(`Invalid Gemini classifier JSON preview: ${preview}`),
+    );
+  }
+
+  private async generateGeminiText(
+    prompt: string,
+    apiKey: string,
+    modelName: string,
+  ): Promise<string> {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({ model: modelName });
     const result = await model.generateContent({
@@ -350,7 +369,8 @@ export class TokenOffchainAiClassifierService {
             {
               text:
                 `${SYSTEM_PROMPT}\n\n` +
-                'Classify this token project. Return strict JSON matching the requested schema only.\n\n' +
+                'Classify this token project. Return strict JSON matching the requested schema only. ' +
+                'Return one JSON object only, with no markdown, no code fences, no comments, and no trailing commas.\n\n' +
                 prompt,
             },
           ],
@@ -359,13 +379,11 @@ export class TokenOffchainAiClassifierService {
       generationConfig: {
         temperature: 0,
         maxOutputTokens: 1_200,
+        responseMimeType: 'application/json',
       },
     });
 
-    return JSON.parse(stripMarkdownCodeFence(result.response.text().trim())) as Record<
-      string,
-      unknown
-    >;
+    return result.response.text().trim();
   }
 
   private getApiKey(provider: 'anthropic' | 'gemini'): string {
@@ -592,8 +610,86 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[]): T {
   throw new Error(`AI classifier response invalid enum value: ${String(value)}`);
 }
 
+export function parseAiClassifierJsonResponse(
+  value: string,
+  onInvalidPreview?: (preview: string) => void,
+): Record<string, unknown> {
+  const attempts = buildJsonParseAttempts(value);
+  let lastError: unknown = null;
+
+  for (const attempt of attempts) {
+    try {
+      return JSON.parse(attempt) as Record<string, unknown>;
+    } catch (err: unknown) {
+      lastError = err;
+    }
+  }
+
+  onInvalidPreview?.(previewInvalidJson(value));
+  throw lastError instanceof Error ? lastError : new Error('Invalid JSON response');
+}
+
+function buildJsonParseAttempts(value: string): string[] {
+  const trimmed = stripMarkdownCodeFence(value.trim());
+  const extracted = extractFirstJsonObject(trimmed);
+  const candidates = [trimmed, extracted].filter((item): item is string => Boolean(item));
+  const repaired = candidates.map((candidate) => repairCommonJsonMistakes(candidate));
+  return [...new Set([...candidates, ...repaired])];
+}
+
 function stripMarkdownCodeFence(value: string): string {
-  return value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  return value
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+}
+
+function extractFirstJsonObject(value: string): string | null {
+  const start = value.indexOf('{');
+  if (start < 0) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && inString) {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(start, index + 1);
+      }
+    }
+  }
+
+  const end = value.lastIndexOf('}');
+  return end > start ? value.slice(start, end + 1) : null;
+}
+
+function repairCommonJsonMistakes(value: string): string {
+  return value.replace(/,\s*([}\]])/g, '$1');
+}
+
+function previewInvalidJson(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().slice(0, 500);
 }
 
 function truncate(value: string | null, max: number): string | null {
