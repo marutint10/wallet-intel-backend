@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'crypto';
 import { Repository } from 'typeorm';
@@ -276,6 +276,87 @@ export class TokenAnalysisService {
       : { offChainCredibility };
   }
 
+  async recomputeOffchainOnly(
+    contractAddress: string,
+    chain: string,
+    options?: { debug?: boolean },
+  ): Promise<{
+    entity: TokenAnalysisEntity;
+    offChainCredibility: Awaited<ReturnType<TokenOffchainCredibilityService['buildReport']>>;
+    debugTrace?: OffchainDiscoveryTrace;
+  }> {
+    const startedAt = Date.now();
+    const address = contractAddress.trim().toLowerCase();
+    this.logger.log(`[offchain-only] start chain=${chain} address=${address}`);
+
+    const existing = await this.tokenRepo.findOne({
+      where: { contractAddress: address, chain },
+    });
+    this.logger.log(`[offchain-only] loadedExistingAnalysis=${Boolean(existing)}`);
+
+    if (!existing) {
+      throw new NotFoundException(
+        'Full token analysis must be run once before off-chain-only recompute.',
+      );
+    }
+    if (existing.status !== 'done') {
+      throw new BadRequestException(
+        'Full token analysis must complete before off-chain-only recompute.',
+      );
+    }
+
+    this.logger.log('[offchain-only] running offchain pipeline only');
+    const offchainProfiles = await this.intelligence.getOffchainMetadataProfiles(address, chain);
+    const report = await this.offChainCredibility.buildReport({
+      tokenName: existing.tokenName ?? null,
+      tokenSymbol: existing.tokenSymbol ?? null,
+      contractAddress: address,
+      chain,
+      dexScreenerProfile: offchainProfiles.dexScreenerProfile,
+      coinGeckoMetadata: offchainProfiles.coinGeckoMetadata,
+      explorerMetadata: offchainProfiles.explorerMetadata,
+      existingMetadata: existing.qualityMetrics ?? null,
+      forceRefresh: true,
+      debug: options?.debug,
+    });
+
+    const quality = (existing.qualityMetrics ?? {}) as Record<string, unknown>;
+    const qualityMetrics = {
+      ...quality,
+      offChainCredibility: report,
+    } as unknown as QueryDeepPartialEntity<Record<string, unknown> | null>;
+
+    await this.tokenRepo.update(
+      { contractAddress: address, chain },
+      {
+        qualityMetrics,
+        updatedAt: new Date(),
+      },
+    );
+
+    const updated =
+      (await this.tokenRepo.findOne({
+        where: { contractAddress: address, chain },
+      })) ?? {
+        ...existing,
+        qualityMetrics: qualityMetrics as unknown as Record<string, unknown>,
+        updatedAt: new Date(),
+      };
+
+    const { debugTrace, ...offChainCredibility } = report as typeof report & {
+      debugTrace?: OffchainDiscoveryTrace;
+    };
+    this.logger.log(
+      `[offchain-only] updated offChainCredibility score=${offChainCredibility.score ?? 'n/a'} ` +
+        `source=${offChainCredibility.projectUnderstanding?.source ?? 'deterministic'}`,
+    );
+    this.logger.log(`[offchain-only] done elapsed_ms=${Date.now() - startedAt}`);
+
+    return options?.debug && debugTrace
+      ? { entity: updated, offChainCredibility, debugTrace }
+      : { entity: updated, offChainCredibility };
+  }
+
   async debugOffchainDiscovery(
     contractAddress: string,
     chain: string,
@@ -337,7 +418,7 @@ export class TokenAnalysisService {
           crawlCacheHit: false,
           persistedReportUsed: false,
           forceRecompute: true,
-          cacheVersion: 'v4',
+          cacheVersion: 'v5',
         },
       }
     );
@@ -378,6 +459,14 @@ export class TokenAnalysisService {
   }
 
   // --- CORE ANALYSIS PIPELINE ---
+  // TODO(holder-snapshot-cache): after fetching top holders, compute a stable
+  // top100HolderSnapshotHash from chain, token address, rank, lowercased holder
+  // address, and raw balance. If unchanged from the previous completed row, a
+  // future full-analysis path can reuse holder quality, distribution, holder
+  // table classifications, and holder-scoped tokenTrust modules while still
+  // refreshing contract, market, and off-chain modules independently. A second
+  // wallet-level cache can key wallet profiles by wallet, chain, balance
+  // snapshot hash, and a time bucket to avoid repeated portfolio fetches.
   private async runAnalysis(
     contractAddress: string,
     chain: string,

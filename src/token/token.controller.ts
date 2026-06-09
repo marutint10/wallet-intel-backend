@@ -368,6 +368,35 @@ export class TokenController {
     });
   }
 
+  // POST /token/:chain/:address/recompute-offchain?debug=true
+  // Fast developer path: refreshes only qualityMetrics.offChainCredibility
+  // from the saved analysis row. It intentionally skips holders, trust
+  // recomputation, charts, AI summary, and deep analysis.
+  @Post(':chain/:address/recompute-offchain')
+  async recomputeOffchainOnly(
+    @Param('chain') chain: string,
+    @Param('address') address: string,
+    @Query('debug') debug?: string,
+  ): Promise<SharedDashboardResponse & { offChainCredibility: unknown; debugTrace?: unknown }> {
+    if (!this.isEvmContractAddress(address)) {
+      throw new BadRequestException('Invalid contract address');
+    }
+
+    const result = await this.tokenAnalysis.recomputeOffchainOnly(address, chain, {
+      debug: debug === 'true',
+    });
+    const dashboard = this.dashboardSummary.buildDashboardSummary(result.entity);
+
+    return {
+      ...dashboard,
+      aiSummary: null,
+      shareId: result.entity.shareId,
+      shareUrl: this.buildShareUrl(result.entity.shareId),
+      offChainCredibility: dashboard.offChainCredibility ?? result.offChainCredibility,
+      ...(result.debugTrace ? { debugTrace: result.debugTrace } : {}),
+    };
+  }
+
   // GET /token/:address/offchain/debug?chain=ethereum
   @Get(':address/offchain/debug')
   async debugOffchainDiscovery(
