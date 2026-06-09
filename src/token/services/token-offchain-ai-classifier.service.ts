@@ -36,6 +36,7 @@ export interface OffchainAiClassifierInput {
     sourceType: string;
     trustLevel: string;
     relevance: string;
+    sourceName?: string;
     url?: string;
     title?: string;
     snippet?: string;
@@ -80,6 +81,19 @@ export interface OffchainAiProjectClassification {
   warnings: string[];
 }
 
+interface GeminiFlatOffchainClassificationOutput {
+  category: string;
+  categoryLabel: string;
+  categoryConfidence: 'high' | 'medium' | 'low';
+  claimedUseCase: string | null;
+  useCaseConfidence: 'high' | 'medium' | 'low' | 'unknown';
+  identityStatus: 'verified' | 'partially_verified' | 'unverified' | 'unknown';
+  evidenceQuality: 'strong' | 'moderate' | 'weak' | 'limited';
+  hasClearUseCase: boolean | null;
+  reasoning: string;
+  warningSummary: string;
+}
+
 export interface OffchainAiClassifierDebug {
   attempted: boolean;
   enabled: boolean;
@@ -114,6 +128,69 @@ Rules:
 - Do not include trailing commas.
 - All property names must use double quotes.
 - All string values must use double quotes.`;
+
+const GEMINI_FLAT_PROMPT = `Classify this crypto token project using only the evidence below.
+
+Return exactly one tiny flat JSON object with these keys only:
+category, categoryLabel, categoryConfidence, claimedUseCase, useCaseConfidence, identityStatus, evidenceQuality, hasClearUseCase, reasoning, warningSummary.
+
+Rules:
+- No token object.
+- No classification object.
+- No nested objects.
+- No arrays.
+- No evidenceRefs.
+- No markdown.
+- No code fences.
+- No comments.
+- No trailing commas.
+- category must be one of: meme, defi, infrastructure, socialfi, gaming, ai, rwa, stablecoin, utility, unknown, other.
+- categoryConfidence must be high, medium, or low.
+- useCaseConfidence must be high, medium, low, or unknown.
+- identityStatus must be verified, partially_verified, unverified, or unknown.
+- evidenceQuality must be strong, moderate, weak, or limited.
+- claimedUseCase may be null.
+- hasClearUseCase may be true, false, or null.
+- reasoning must be one string under 220 characters.
+- warningSummary must be one string under 160 characters. Use an empty string if there are no warnings.
+
+Definitions:
+- Infrastructure requires specific oracle, data feed, bridge, interoperability, RPC, indexing, validator, node, middleware, developer API, or protocol infrastructure evidence.
+- Generic Web3/blockchain/platform language is not infrastructure.
+- DEX trading, price pages, exchange pages, market cap pages, and liquidity pages do not make a token DeFi.
+- Use rwa for tokenized real-world assets, institutional on-chain finance, tokenized treasuries, or Ondo-style RWA evidence.
+- Use unknown when evidence is insufficient or identity is not verified.`;
+
+const GEMINI_FLAT_RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    category: { type: 'string' },
+    categoryLabel: { type: 'string' },
+    categoryConfidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    claimedUseCase: { type: 'string', nullable: true },
+    useCaseConfidence: { type: 'string', enum: ['high', 'medium', 'low', 'unknown'] },
+    identityStatus: {
+      type: 'string',
+      enum: ['verified', 'partially_verified', 'unverified', 'unknown'],
+    },
+    evidenceQuality: { type: 'string', enum: ['strong', 'moderate', 'weak', 'limited'] },
+    hasClearUseCase: { type: 'boolean', nullable: true },
+    reasoning: { type: 'string' },
+    warningSummary: { type: 'string' },
+  },
+  required: [
+    'category',
+    'categoryLabel',
+    'categoryConfidence',
+    'claimedUseCase',
+    'useCaseConfidence',
+    'identityStatus',
+    'evidenceQuality',
+    'hasClearUseCase',
+    'reasoning',
+    'warningSummary',
+  ],
+};
 
 @Injectable()
 export class TokenOffchainAiClassifierService {
@@ -208,7 +285,10 @@ export class TokenOffchainAiClassifierService {
     }
 
     const packet = this.buildInputPacket(input, runtime.aiClassifierMaxInputChars);
-    const prompt = JSON.stringify(packet, null, 2).slice(0, runtime.aiClassifierMaxInputChars);
+    const prompt =
+      provider === 'gemini'
+        ? this.buildGeminiFlatPrompt(packet, runtime.aiClassifierMaxInputChars)
+        : JSON.stringify(packet, null, 2).slice(0, runtime.aiClassifierMaxInputChars);
     const cacheKey = buildAiClassifierCacheKey({
       chain: input.chain,
       contractAddress: input.contractAddress,
@@ -239,7 +319,13 @@ export class TokenOffchainAiClassifierService {
           : this.callClaude(prompt, apiKey, runtime.aiClassifierModel),
         runtime.aiClassifierTimeoutMs,
       );
-      const validated = validateClassification(parsed, packet.externalEvidence.map((item) => item.id));
+      const normalized =
+        provider === 'gemini' ? normalizeGeminiClassificationOutput(parsed) : parsed;
+      const validated = validateClassification(
+        normalized,
+        packet.externalEvidence.map((item) => item.id),
+        { allowImplicitEvidenceRefs: provider === 'gemini' },
+      );
       const guarded = applyAiSafetyGuards(validated, packet);
       this.logger.log(
         `Off-chain AI classifier succeeded category=${guarded.normalizedCategory} ` +
@@ -269,9 +355,10 @@ export class TokenOffchainAiClassifierService {
       sourceType: item.sourceType,
       trustLevel: item.trustLevel,
       relevance: item.relevance,
+      sourceName: item.sourceName,
       url: item.url,
       title: item.title,
-      snippet: item.snippet,
+      snippet: truncate(item.snippet ?? null, 220) ?? undefined,
       matchedContractAddress: item.matchedContractAddress,
       matchedTokenName: item.matchedTokenName,
       matchedTokenSymbol: item.matchedTokenSymbol,
@@ -307,6 +394,53 @@ export class TokenOffchainAiClassifierService {
         unknowns: input.unknowns ?? [],
       },
     };
+  }
+
+  private buildGeminiFlatPrompt(input: OffchainAiClassifierInput, maxChars: number): string {
+    const officialText = truncate(
+      input.officialSourceText?.homepageText ?? null,
+      Math.min(2_000, Math.max(500, Math.floor(maxChars / 4))),
+    );
+    const signals = input.officialSourceText?.extractedUseCaseSignals ?? [];
+    const evidenceLines = input.externalEvidence
+      .map((item) =>
+        [
+          `id=${item.id}`,
+          `sourceType=${item.sourceType}`,
+          `trustLevel=${item.trustLevel}`,
+          `relevance=${item.relevance}`,
+          `sourceName=${item.sourceName ?? ''}`,
+          `url=${item.url ?? ''}`,
+          `title=${truncate(item.title ?? '', 180) ?? ''}`,
+          `snippet=${truncate(item.snippet ?? '', 220) ?? ''}`,
+        ].join(' | '),
+      )
+      .slice(0, 8)
+      .join('\n');
+
+    return [
+      GEMINI_FLAT_PROMPT,
+      '',
+      `Token name: ${input.token.name}`,
+      `Token symbol: ${input.token.symbol}`,
+      `Chain: ${input.token.chain}`,
+      `Contract address: ${input.token.contractAddress}`,
+      `Official website: ${input.identity.website ?? 'none'}`,
+      `Website source: ${input.identity.websiteSource ?? 'none'}`,
+      `Discovery mode: ${input.identity.discoveryMode}`,
+      `Official link confidence: ${input.identity.officialLinkConfidence}`,
+      `Discovered links: ${compactDiscoveredLinks(input.identity.discoveredLinks)}`,
+      `Metadata categories: ${input.deterministicHints.metadataCategories?.join(', ') || 'none'}`,
+      `Deterministic previous category: ${input.deterministicHints.previousCategory ?? 'none'}`,
+      `Crawler signals: ${signals.join(', ') || 'none'}`,
+      `Official source excerpt: ${officialText ?? 'none'}`,
+      'External evidence lines:',
+      evidenceLines || 'none',
+      '',
+      'Return only the flat JSON object now.',
+    ]
+      .join('\n')
+      .slice(0, maxChars);
   }
 
   private async callClaude(
@@ -378,9 +512,10 @@ export class TokenOffchainAiClassifierService {
       ],
       generationConfig: {
         temperature: 0,
-        maxOutputTokens: 1_200,
+        maxOutputTokens: 700,
         responseMimeType: 'application/json',
-      },
+        responseSchema: GEMINI_FLAT_RESPONSE_SCHEMA,
+      } as never,
     });
 
     return result.response.text().trim();
@@ -413,6 +548,9 @@ export function selectClassifierEvidence(
     if (['unrelated', 'spam_or_seo'].includes(item.sourceType)) {
       return false;
     }
+    if (isKnownUnrelatedClassifierEvidence(item)) {
+      return false;
+    }
     if (item.matchedContractAddress || item.matchedOfficialDomain) {
       return true;
     }
@@ -440,12 +578,33 @@ export function selectClassifierEvidence(
     return false;
   });
 
-  return selected.slice(0, 24);
+  return selected.slice(0, 8);
+}
+
+function isKnownUnrelatedClassifierEvidence(item: OffchainEvidenceItem): boolean {
+  const text = `${item.url ?? ''} ${item.title ?? ''} ${item.snippet ?? ''}`.toLowerCase();
+  if (
+    text.includes('ondo.com') ||
+    text.includes('ondostate.gov.ng') ||
+    text.includes('ondo.neocities.org') ||
+    text.includes('ondo-official.com')
+  ) {
+    return !(item.matchedContractAddress || item.matchedOfficialDomain);
+  }
+  if (
+    String(item.sourceType) === 'dex_pair' &&
+    !item.matchedContractAddress &&
+    !item.matchedOfficialDomain
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function validateClassification(
   raw: Record<string, unknown>,
   validEvidenceIds: string[],
+  options?: { allowImplicitEvidenceRefs?: boolean },
 ): OffchainAiProjectClassification {
   const normalizedCategory = oneOf(raw.normalizedCategory, [
     'meme',
@@ -478,9 +637,122 @@ function validateClassification(
     possibleNarrative: nullableString(raw.possibleNarrative),
     hasClearUseCase: nullableBoolean(raw.hasClearUseCase),
     reasoning: requiredString(raw.reasoning, 'reasoning'),
-    evidenceRefs: arrayOfStrings(raw.evidenceRefs).filter((id) => validEvidenceIds.includes(id)),
+    evidenceRefs: resolveEvidenceRefs(raw.evidenceRefs, validEvidenceIds, options),
     warnings: arrayOfStrings(raw.warnings),
   };
+}
+
+function normalizeGeminiClassificationOutput(raw: Record<string, unknown>): Record<string, unknown> {
+  if (typeof raw.normalizedCategory === 'string' && typeof raw.categoryLabel === 'string') {
+    return raw;
+  }
+  const normalized = hasOldNestedGeminiShape(raw)
+    ? normalizeOldNestedGeminiClassificationOutput(raw)
+    : raw;
+  const flat = normalized as Partial<GeminiFlatOffchainClassificationOutput> &
+    Record<string, unknown>;
+
+  return {
+    source: 'ai',
+    categoryLabel:
+      typeof flat.categoryLabel === 'string' && flat.categoryLabel.trim().length > 0
+        ? flat.categoryLabel
+        : categoryLabelFromCategory(flat.category),
+    normalizedCategory: normalizeCategoryValue(flat.category),
+    categoryConfidence: flat.categoryConfidence,
+    claimedUseCase: flat.claimedUseCase,
+    useCaseConfidence: flat.useCaseConfidence,
+    identityStatus: flat.identityStatus,
+    evidenceQuality: flat.evidenceQuality,
+    possibleNarrative: null,
+    hasClearUseCase: flat.hasClearUseCase,
+    reasoning: truncate(typeof flat.reasoning === 'string' ? flat.reasoning : null, 220),
+    evidenceRefs: [],
+    warnings:
+      typeof flat.warningSummary === 'string' && flat.warningSummary.trim().length > 0
+        ? [truncate(flat.warningSummary.trim(), 160)]
+        : [],
+  };
+}
+
+function hasOldNestedGeminiShape(raw: Record<string, unknown>): boolean {
+  return isRecord(raw.token) || isRecord(raw.classification);
+}
+
+function normalizeOldNestedGeminiClassificationOutput(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  const classification = isRecord(raw.classification) ? raw.classification : {};
+  return {
+    category: classification.category,
+    categoryLabel:
+      typeof classification.category === 'string'
+        ? categoryLabelFromCategory(classification.category)
+        : undefined,
+    categoryConfidence: classification.confidence,
+    claimedUseCase: null,
+    useCaseConfidence: classification.confidence ?? 'unknown',
+    identityStatus: 'unknown',
+    evidenceQuality: 'limited',
+    hasClearUseCase: null,
+    reasoning: classification.reasoning,
+    warningSummary: 'Gemini returned old nested schema; normalized safely.',
+  };
+}
+
+function resolveEvidenceRefs(
+  value: unknown,
+  validEvidenceIds: string[],
+  options?: { allowImplicitEvidenceRefs?: boolean },
+): string[] {
+  const explicit = arrayOfStrings(value).filter((id) => validEvidenceIds.includes(id));
+  if (explicit.length > 0 || !options?.allowImplicitEvidenceRefs) {
+    return explicit;
+  }
+  return validEvidenceIds.slice(0, 3);
+}
+
+function normalizeCategoryValue(value: unknown): OffchainAiProjectClassification['normalizedCategory'] {
+  if (typeof value !== 'string') {
+    return 'unknown';
+  }
+  const normalized = value.toLowerCase().trim();
+  if (/\brwa\b|real world asset|tokenized asset|tokenized treasury|institutional/.test(normalized)) {
+    return 'rwa';
+  }
+  if (/socialfi|social/.test(normalized)) return 'socialfi';
+  if (/infrastructure|oracle|data feed|interoperability|rpc|indexing/.test(normalized)) {
+    return 'infrastructure';
+  }
+  if (/defi|decentralized finance|lending|borrowing|yield/.test(normalized)) return 'defi';
+  if (/meme|community/.test(normalized)) return 'meme';
+  if (/gaming|gamefi/.test(normalized)) return 'gaming';
+  if (/stablecoin|stable coin/.test(normalized)) return 'stablecoin';
+  if (/utility/.test(normalized)) return 'utility';
+  if (/^ai$|artificial intelligence/.test(normalized)) return 'ai';
+  if (/unknown|insufficient/.test(normalized)) return 'unknown';
+  if (/other/.test(normalized)) return 'other';
+  return 'unknown';
+}
+
+function categoryLabelFromCategory(value: unknown): string {
+  const category = normalizeCategoryValue(value);
+  switch (category) {
+    case 'rwa':
+      return 'Tokenized real-world assets / institutional on-chain finance';
+    case 'socialfi':
+      return 'SocialFi or Web3 social project';
+    case 'infrastructure':
+      return 'Crypto infrastructure project';
+    case 'defi':
+      return 'DeFi protocol or finance application';
+    case 'meme':
+      return 'Meme or community token';
+    case 'unknown':
+      return 'Unknown or weakly supported project category';
+    default:
+      return category;
+  }
 }
 
 function applyAiSafetyGuards(
@@ -570,6 +842,14 @@ function evidenceText(input: OffchainAiClassifierInput): string {
   ].join('\n');
 }
 
+function compactDiscoveredLinks(links: Partial<DiscoveredLinks>): string {
+  return Object.entries(links)
+    .filter(([, value]) => typeof value === 'string' && value.trim().length > 0)
+    .map(([key, value]) => `${key}=${value}`)
+    .slice(0, 10)
+    .join(' | ') || 'none';
+}
+
 function extractUseCaseSignals(crawl: TokenWebsiteCrawlResult | null): string[] {
   if (!crawl) {
     return [];
@@ -608,6 +888,10 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[]): T {
     return value as T;
   }
   throw new Error(`AI classifier response invalid enum value: ${String(value)}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function parseAiClassifierJsonResponse(
