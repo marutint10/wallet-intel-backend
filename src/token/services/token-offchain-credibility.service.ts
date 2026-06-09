@@ -271,8 +271,15 @@ const CATEGORY_RULES: Array<{
     category: 'rwa',
     patterns: [
       /real-world asset/i,
+      /real world asset/i,
       /\brwa\b/i,
       /tokenized treasury/i,
+      /tokenized real[- ]world assets?/i,
+      /tokenized funds?/i,
+      /institutional[- ]grade finance/i,
+      /institutional on-chain finance/i,
+      /on-chain finance/i,
+      /\bondo\b/i,
       /tokenization/i,
       /real estate/i,
       /commodities/i,
@@ -719,8 +726,15 @@ export function detectProjectCategory(
   if (/docs\.chain\.link|smartcontractkit|chainlink|ccip|data feeds?|oracle|automation|proof of reserve/i.test(haystack)) {
     addScore('infrastructure', 4);
   }
-  if (/docs?|github|whitepaper|security|developer/i.test(linkText)) {
+  if (/github|developer api|rpc|middleware|node service|validator|indexing/i.test(linkText)) {
     addScore('infrastructure', 2);
+  }
+  if (
+    /ondo\.foundation|docs\.ondo\.foundation|tokenized real[- ]world assets?|institutional[- ]grade finance|institutional on-chain finance|ondao|ondo dao|flux finance|governance token/i.test(
+      haystack,
+    )
+  ) {
+    addScore('rwa', 6);
   }
 
   const memeMetadataHints = /\bmeme|memecoin|frog|pepe|doge|shib/i.test(metadataText) ? 1 : 0;
@@ -822,14 +836,14 @@ function hasInfrastructureLinkEvidence(
   links: OffChainCredibilityReport['discoveredLinks'],
   externalEvidence?: OffchainExternalEvidenceResult,
 ): boolean {
-  if (links.docs || links.github || links.whitepaper) {
+  if (links.github || /chain\.link|smartcontractkit/i.test(Object.values(links).filter(Boolean).join(' '))) {
     return true;
   }
   return Boolean(
     externalEvidence?.evidenceItems.some(
       (item) =>
         item.relevance !== 'low' &&
-        ['developer_resource', 'official_docs', 'official_github', 'official_security', 'official_whitepaper'].includes(
+        ['developer_resource', 'official_github'].includes(
           item.sourceType,
         ),
     ),
@@ -860,6 +874,12 @@ function resolveClaimedUseCase(category: ProjectCategory, text: string): string 
       return 'Developer and protocol infrastructure services';
     }
     return 'Decentralized infrastructure or data services';
+  }
+  if (category === 'rwa') {
+    if (/ondo|tokenized real[- ]world assets?|institutional[- ]grade finance|institutional on-chain finance|flux finance/i.test(text)) {
+      return 'Tokenized real-world assets and institutional-grade on-chain finance';
+    }
+    return 'Real-world asset tokenization';
   }
   return CATEGORY_RULES.find((rule) => rule.category === category)?.useCase ?? null;
 }

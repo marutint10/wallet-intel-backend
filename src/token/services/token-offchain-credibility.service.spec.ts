@@ -9,6 +9,7 @@ import type { TokenWebsiteCrawlResult } from './token-web-crawler.service';
 import type { TokenOffchainDiscoveryService } from './token-offchain-discovery.service';
 import type { TokenOffchainExternalEvidenceService } from './token-offchain-external-evidence.service';
 import {
+  parseAiClassifierJsonResponse,
   TokenOffchainAiClassifierService,
   type OffchainAiProjectClassification,
 } from './token-offchain-ai-classifier.service';
@@ -239,6 +240,46 @@ function externalEvidenceFixture() {
         snippet: 'Chainlink oracle network and smart contract infrastructure.',
         matchedTokenName: true,
         reason: 'Search result points to a developer resource.',
+      },
+    ],
+    summary: {
+      trustedDirectoryCount: 0,
+      officialSourceCount: 1,
+      externalValidationCount: 2,
+      riskWarningCount: 0,
+      scamWarningCount: 0,
+      unrelatedCount: 0,
+    },
+  };
+}
+
+function ondoEvidenceFixture() {
+  return {
+    status: 'done' as const,
+    evidenceItems: [
+      {
+        id: 'ev_ondo_docs',
+        sourceType: 'official_docs' as const,
+        trustLevel: 'high' as const,
+        relevance: 'high' as const,
+        url: 'https://docs.ondo.foundation/ondo-token',
+        title: 'ONDO Token Documentation',
+        snippet:
+          'Official docs describe ONDO as governance token for Ondo DAO and Flux Finance.',
+        matchedOfficialDomain: true,
+        reason: 'Search result matches the verified official documentation domain.',
+      },
+      {
+        id: 'ev_ondo_rwa',
+        sourceType: 'news' as const,
+        trustLevel: 'medium' as const,
+        relevance: 'medium' as const,
+        url: 'https://example.com/ondo-rwa',
+        title: 'Ondo institutional-grade finance and tokenized real-world assets',
+        snippet:
+          'Open-web evidence mentions tokenized real-world assets and institutional-grade on-chain finance.',
+        matchedTokenName: true,
+        reason: 'Search result matched token name and project narrative.',
       },
     ],
     summary: {
@@ -1530,6 +1571,72 @@ describe('TokenOffchainAiClassifierService', () => {
     expect(result.classification?.categoryConfidence).toBe('low');
   });
 
+  it('parses Gemini JSON wrapped in markdown code fence', async () => {
+    const service = new TokenOffchainAiClassifierService(makeGeminiConfig());
+    jest.spyOn(service as any, 'generateGeminiText').mockResolvedValue(
+      `\`\`\`json
+{
+  "source": "ai",
+  "categoryLabel": "Tokenized real-world assets / institutional on-chain finance",
+  "normalizedCategory": "rwa",
+  "categoryConfidence": "high",
+  "claimedUseCase": "Tokenized real-world assets and institutional-grade on-chain finance",
+  "useCaseConfidence": "high",
+  "identityStatus": "verified",
+  "evidenceQuality": "strong",
+  "possibleNarrative": null,
+  "hasClearUseCase": true,
+  "reasoning": "Official docs and third-party evidence describe RWA finance.",
+  "evidenceRefs": ["ev_ondo_docs"],
+  "warnings": []
+}
+\`\`\``,
+    );
+
+    const result = await service.classifyWithDebug({
+      tokenName: 'Ondo',
+      tokenSymbol: 'ONDO',
+      contractAddress: '0xondo',
+      chain: 'ethereum',
+      discoveredLinks: {
+        ...makeDiscovery().discoveredLinks,
+        website: 'https://ondo.foundation/',
+        docs: 'https://docs.ondo.foundation/ondo-token',
+      },
+      discoveryMode: 'official_verified',
+      officialLinkConfidence: 'high',
+      crawl: null,
+      externalEvidence: ondoEvidenceFixture(),
+    });
+
+    expect(result.classification?.normalizedCategory).toBe('rwa');
+    expect(result.debug.resultSource).toBe('ai');
+  });
+
+  it('parses Gemini JSON with extra text around the object', async () => {
+    const parsed = parseAiClassifierJsonResponse(
+      `Here is the classification:
+      {
+        "source": "ai",
+        "categoryLabel": "Meme/community token",
+        "normalizedCategory": "meme",
+        "categoryConfidence": "medium",
+        "claimedUseCase": null,
+        "useCaseConfidence": "low",
+        "identityStatus": "verified",
+        "evidenceQuality": "moderate",
+        "possibleNarrative": null,
+        "hasClearUseCase": false,
+        "reasoning": "Provided evidence positions the project as meme/community.",
+        "evidenceRefs": ["ev_pepe"],
+        "warnings": [],
+      }
+      Done.`,
+    );
+
+    expect(parsed.normalizedCategory).toBe('meme');
+  });
+
   it('falls back when Gemini returns invalid JSON', async () => {
     const service = new TokenOffchainAiClassifierService(makeGeminiConfig());
     jest.spyOn(service as any, 'callGemini').mockRejectedValue(new Error('Unexpected token'));
@@ -1617,5 +1724,57 @@ describe('TokenOffchainAiClassifierService', () => {
     expect(report.projectProfile.category).not.toBe('infrastructure');
     expect(report.projectProfile.category).toBe('unknown');
     expect(report.projectProfile.hasClearUseCase).toBe(false);
+  });
+
+  it('ONDO deterministic fallback classifies RWA/institutional finance instead of infrastructure', () => {
+    const report = buildOffChainCredibilityReport({
+      tokenName: 'Ondo',
+      tokenSymbol: 'ONDO',
+      contractAddress: '0xfab86f8a2d1d0d04',
+      discovery: makeDiscovery({
+        discoveryMode: 'official_verified',
+        discoveredLinks: {
+          website: 'https://ondo.foundation/',
+          docs: 'https://docs.ondo.foundation/ondo-token',
+          whitepaper: null,
+          github: null,
+          twitter: null,
+          telegram: null,
+          discord: null,
+          blog: null,
+        },
+        linkSources: { website: 'coingecko', docs: 'coingecko' },
+        hasTrustedOfficialWebsite: true,
+        officialLinkConfidence: { level: 'high', reasons: ['Website found in trusted metadata'] },
+      }),
+      crawl: makeCrawl({
+        homepageUrl: 'https://ondo.foundation/',
+        finalUrl: 'https://ondo.foundation/',
+        extractedText:
+          'Ondo ONDO is the governance token for Ondo DAO and Flux Finance. ' +
+          'Ondo focuses on tokenized real-world assets and institutional-grade on-chain finance.',
+        mentions: { tokenName: true, tokenSymbol: true, contractAddress: false },
+        signals: {
+          hasDocs: true,
+          hasWhitepaper: false,
+          hasGithub: false,
+          hasAuditsMentioned: false,
+          hasTeamInfo: false,
+          hasClearUseCase: true,
+          suspiciousPhrases: [],
+          adoptionClaims: [],
+        },
+      }),
+      externalEvidence: ondoEvidenceFixture(),
+      fetchErrors: [],
+    });
+
+    expect(report.projectProfile.category).toBe('rwa');
+    expect(report.projectUnderstanding?.category).toBe('rwa');
+    expect(report.projectProfile.claimedUseCase).toBe(
+      'Tokenized real-world assets and institutional-grade on-chain finance',
+    );
+    expect(report.projectProfile.hasClearUseCase).toBe(true);
+    expect(report.projectProfile.category).not.toBe('infrastructure');
   });
 });
