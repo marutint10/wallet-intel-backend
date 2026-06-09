@@ -48,6 +48,32 @@ describe('offchain-directory-extraction', () => {
     expect(result.links.docs).toBeNull();
     expect(result.links.github).toBeNull();
   });
+
+  it('rejects CoinMarketCap global announcement Telegram as token official social', () => {
+    const html = `
+      <html><body>
+        <h1>Ondo (ONDO)</h1>
+        <p>Contract: 0xfab86f8a2d1d0d04</p>
+        <a href="https://ondo.foundation/">Website</a>
+        <a href="https://t.me/CoinMarketCapAnnouncements">Telegram</a>
+      </body></html>
+    `;
+
+    const result = extractOutboundLinksFromDirectoryHtml(
+      html,
+      'https://coinmarketcap.com/currencies/ondo-finance/',
+      {
+        tokenName: 'Ondo',
+        tokenSymbol: 'ONDO',
+        contractAddress: '0xfab86f8a2d1d0d04',
+        chain: 'ethereum',
+      },
+    );
+
+    expect(result.identityVerified).toBe(true);
+    expect(result.links.website).toContain('ondo.foundation');
+    expect(result.links.telegram).toBeNull();
+  });
 });
 
 describe('PEPE metadata enrichment', () => {

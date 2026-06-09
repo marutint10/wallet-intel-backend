@@ -157,6 +157,19 @@ export function isBlockedOfficialLink(url: string): boolean {
   return isAggregatorUrl(url) || isThirdPartyAnalyticsUrl(url);
 }
 
+export function isPlatformDirectorySocialUrl(url: string): boolean {
+  const lower = url.toLowerCase();
+  return (
+    /t\.me\/coinmarketcapannouncements\b/i.test(lower) ||
+    /t\.me\/coingecko\b/i.test(lower) ||
+    /twitter\.com\/coinmarketcap\b/i.test(lower) ||
+    /x\.com\/coinmarketcap\b/i.test(lower) ||
+    /twitter\.com\/coingecko\b/i.test(lower) ||
+    /x\.com\/coingecko\b/i.test(lower) ||
+    /discord\.(gg|com)\/(coinmarketcap|coingecko)\b/i.test(lower)
+  );
+}
+
 export function isAggregatorUrl(url: string): boolean {
   const hostname = extractHostname(url);
   if (!hostname) {
@@ -244,6 +257,13 @@ export function isVerifiedSecondaryLink(
   field: LinkField,
   context: LinkValidationContext,
 ): boolean {
+  if (
+    (field === 'telegram' || field === 'twitter' || field === 'discord') &&
+    isPlatformDirectorySocialUrl(url)
+  ) {
+    return false;
+  }
+
   if (field === 'docs' && isExplorerUrl(url)) {
     return false;
   }

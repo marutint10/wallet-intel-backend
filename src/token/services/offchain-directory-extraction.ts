@@ -6,6 +6,7 @@ import {
   hasCrossProjectMismatch,
   isAggregatorUrl,
   isBlockedOfficialLink,
+  isPlatformDirectorySocialUrl,
 } from './offchain-link-validation';
 
 export interface DirectoryIdentityContext {
@@ -205,6 +206,9 @@ export function extractOutboundLinksFromDirectoryHtml(
     const combined = `${label} ${href}`.toLowerCase();
 
     if (isSocialHost(href)) {
+      if (isPlatformDirectorySocialUrl(href)) {
+        return;
+      }
       assignSocialLink(links, href, combined);
       return;
     }
