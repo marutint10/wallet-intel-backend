@@ -66,6 +66,27 @@ Re-run `POST /token/analyze` after code or registry changes; cached `token_analy
 
 **Known follow-up (not implemented):** portfolio-concentration Degen boost when `swapCount < 10` and `tradesPerDay < 0.05` (e.g. rank-36 edge case after staked-weight fix).
 
+### Off-chain credibility post-processing pass (June 2026)
+
+| Area | Change |
+|------|--------|
+| **Post-processing layer** | `applyOffchainReportPostProcessing()` runs after AI/deterministic classification, before scoring — final alignment only, no pipeline rewrite |
+| **Identity vs team** | `projectUnderstanding.identityStatus` upgraded from `unverified` → `verified` / `partially_verified` when `official_verified` + high/medium official-link confidence + website; anonymous team warnings are separate from project identity |
+| **Meme tokens** | Force `hasClearUseCase: false`; normalize use-case wording; risk flag `Limited Functional Utility Evidence` instead of `No Clear Use Case Found`; cap `evidenceQuality` at `moderate` when utility docs are thin |
+| **RWA use-case** | `normalizeRwaUseCase()` broadens narrow governance-only wording (e.g. ONDO) to full RWA / institutional on-chain finance context |
+| **Claim sources** | DEX/trading/price pages stripped from adoption/backer/security claim `sourceUrls`; official website/docs preferred |
+| **Evidence refs** | Official website/docs ranked above OKX/DEX/explorer refs in `projectUnderstanding.evidenceRefs` |
+
+**Source files:**
+
+- `src/token/services/token-offchain-credibility.service.ts` — report builder, scoring, post-processing
+- `src/token/services/token-offchain-ai-classifier.service.ts` — Gemini/Claude classifier + safety guards
+- `src/token/services/token-offchain-discovery.service.ts` — official link discovery
+- `src/token/services/token-offchain-external-evidence.service.ts` — open-web evidence
+- `src/token/services/offchain-link-validation.ts` — aggregator rejection, score caps
+
+**Live calibration targets (June 2026):** Chainlink ~96, ONDO ~92, PEPE ~69 (meme-capped).
+
 ### Retail-scoped distribution & quality (May 2026)
 
 | Area | Change |
@@ -572,7 +593,7 @@ Here `dormant: 45` means **45%** of EOAs (35/78), not 45 wallets. Frontend and A
 
 Output families:
 
-- qualityMetrics (includes `breakdown`, `pnlAggregation`, `categoryConcentration`, `circulatingSupply`, `teamDetection`, …)
+- qualityMetrics (includes `breakdown`, `pnlAggregation`, `categoryConcentration`, `circulatingSupply`, `teamDetection`, `contractSafety`, `marketContext`, `offChainCredibility`, …)
 - distribution
 - riskCallouts
 
@@ -611,6 +632,10 @@ DashboardSummaryResponse shape (high level):
 - `distribution` - flattened distribution summary (decentralizationScore, giniCoefficient, top10Pct, top50Pct, top100Pct)
 - `holderTable` - `{ total, rows }` with ALL analyzed holders sorted by rank ascending. No 100-holder cap. Frontend pagination, filtering, and sorting are expected to run client-side
 - `riskCallouts` - the existing `RiskCallout[]` from analytics, surfaced as-is
+- `tokenTrust` - retail trust report (see section 12)
+- `contractSafety` - persisted contract safety report (`qualityMetrics.contractSafety`), or `null`
+- `marketContext` - persisted market/liquidity context (`qualityMetrics.marketContext`), or `null`
+- `offChainCredibility` - persisted off-chain credibility report (`qualityMetrics.offChainCredibility`), or `null` (see section 13)
 
 Sentiment rules (summary cards):
 
@@ -910,6 +935,29 @@ Pagination / filtering / sorting:
 
 - not implemented server-side. `holderTable` always returns every analyzed holder. Client-side handles pagination, sorting, and filtering.
 
+### POST /token/:address/offchain/recompute?chain=ethereum&debug=true
+
+Purpose:
+
+- rebuild off-chain credibility report from discovery → crawl → external evidence → AI classifier
+- persists to `qualityMetrics.offChainCredibility` when a `token_analyses` row exists
+- does **not** re-run holder analysis
+
+### POST /token/:chain/:address/recompute-offchain?debug=true
+
+Purpose:
+
+- fast developer path: refreshes **only** `qualityMetrics.offChainCredibility` from the saved analysis row
+- requires prior full `POST /token/analyze` with `status === 'done'`
+- skips holders, trust recomputation, charts, AI summary, and deep analysis
+- returns dashboard-shaped payload with updated `offChainCredibility`
+
+### GET /token/:address/offchain/debug?chain=ethereum
+
+Purpose:
+
+- discovery trace only (no full credibility report), gated by `OFFCHAIN_DEBUG_ENABLED` or non-production
+
 ### GET /api/export-pdf/:tokenId?chain=ethereum
 
 Purpose:
@@ -1013,9 +1061,21 @@ Current required keys for token pipeline:
 
 Optional keys (feature-gated):
 
-- `GEMINI_API_KEY` (or `gemini.apiKey`) — short dashboard `aiSummary` via `TokenAiSummaryService` (fallback text when absent)
+- `GEMINI_API_KEY` (or `gemini.apiKey`) — short dashboard `aiSummary` via `TokenAiSummaryService`; also used when `OFFCHAIN_AI_CLASSIFIER_PROVIDER=gemini`
+- `ANTHROPIC_API_KEY` (or `anthropic.apiKey`) — token deep analysis Claude call; optional off-chain AI classifier when `OFFCHAIN_AI_CLASSIFIER_PROVIDER=anthropic`
 - `TAVILY_API_KEY` (or `tavily.apiKey`) — web snippets for token deep analysis (degraded on-chain-only prompt when absent)
-- `ANTHROPIC_API_KEY` (or `anthropic.apiKey`) — required for deep analysis Claude call; missing key yields `token_deep_analyses.status=error` with message `ANTHROPIC_API_KEY not configured`
+- `BRAVE_API_KEY` — Brave search fallback for off-chain official-link discovery (`OFFCHAIN_BRAVE_ENABLED`)
+
+Off-chain credibility toggles (all default on unless noted):
+
+- `OFFCHAIN_CREDIBILITY_ENABLED` — master switch for off-chain module
+- `OFFCHAIN_CRAWL_ENABLED` — official website crawl
+- `OFFCHAIN_BRAVE_ENABLED` — Brave search fallback
+- `OFFCHAIN_EXTERNAL_EVIDENCE_ENABLED` — open-web evidence collection
+- `OFFCHAIN_AI_CLASSIFIER_ENABLED` — AI project understanding (Gemini flat JSON or Claude)
+- `OFFCHAIN_AI_CLASSIFIER_PROVIDER` — `gemini` (default) or `anthropic`
+- `OFFCHAIN_AI_CLASSIFIER_MODEL` — model slug (default `gemini-2.5-flash-lite`)
+- `OFFCHAIN_MAX_PAGES`, `OFFCHAIN_FETCH_TIMEOUT_MS`, `OFFCHAIN_BRAVE_TIMEOUT_MS` — crawl/search limits
 
 Optional tuning keys:
 
@@ -1032,7 +1092,7 @@ Current .env.example already includes:
 Manual note:
 
 - add ALCHEMY_API_KEY to your local env; without it ERC-20 balances and native balances both fall back to safe-empty results, and base/bsc transfer ingestion is disabled
-- add GEMINI_API_KEY for live Gemini summaries on the dashboard; add ANTHROPIC_API_KEY + TAVILY_API_KEY for full deep analysis quality
+- add GEMINI_API_KEY for live Gemini summaries on the dashboard and off-chain AI classification; add BRAVE_API_KEY for off-chain discovery fallback; add ANTHROPIC_API_KEY + TAVILY_API_KEY for full deep analysis quality
 
 ## 7. How analysis persistence works
 
@@ -1041,7 +1101,7 @@ The orchestrator saves output into token_analyses JSONB and scalar columns:
 - token_name / token_symbol: nullable scalar columns, written defensively (`tokenMetadata?.name ?? null` / `tokenMetadata?.symbol ?? null`) so partial metadata responses never block status=done
 - total_holders: count of holders that were enriched
 - holders_data: per-holder analyzed rows (classification + score)
-- quality_metrics: aggregated holder quality metrics plus tokenPriceUsd, priceSource, PnL aggregation (`smartMoneyCount`, `portfolioSmartMoneyCount`), `breakdown` (behavioral % + `breakdown.counts`), `circulatingSupply`, `teamDetection`, `categoryConcentration`
+- quality_metrics: aggregated holder quality metrics plus tokenPriceUsd, priceSource, PnL aggregation (`smartMoneyCount`, `portfolioSmartMoneyCount`), `breakdown` (behavioral % + `breakdown.counts`), `circulatingSupply`, `teamDetection`, `categoryConcentration`, `contractSafety`, `marketContext`, `offChainCredibility`
 - distribution: concentration/distribution metrics
 - risk_callouts: generated token-level insights
 
@@ -1400,7 +1460,8 @@ The Token Trust Report is an additive deterministic layer that reinterprets exis
 - evidence/limitations for confidence context
 
 It does **not** change core holder fetching, classification, scoring, or aggregation.
-It does **not** add off-chain crawling or chat behavior.
+
+Off-chain credibility (section 13) is a **separate** persisted module surfaced on the dashboard; it is not merged into `tokenTrust.trustScore` yet.
 
 ### Contract Safety Engine (Step 2)
 
@@ -1448,7 +1509,7 @@ It is **not merged** into `tokenTrust.trustScore` yet; when present, `tokenTrust
 
 ### Trust score formula (deterministic, recalibrated)
 
-**Baseline:** start at `70` (not 100). Contract safety and off-chain credibility are not yet in scope, so scores are capped at **82** until those layers ship.
+**Baseline:** start at `70` (not 100). Contract safety and off-chain credibility are shown separately on the dashboard and are **not merged** into `tokenTrust.trustScore`; the on-chain trust score remains capped at **82** until an explicit merge ships.
 
 **Derived concentration metrics:**
 
@@ -1538,8 +1599,7 @@ Examples:
 
 The Token Trust Report includes explicit limitations such as:
 
-- contract safety analysis not included yet
-- off-chain credibility analysis not included yet
+- contract safety and off-chain credibility are separate modules (not merged into trust score)
 - holder classifications depend on available on-chain data
 - exchange custody is liquidity context, not direct sell pressure
 - FAST_MODE warning when recent-history analysis is used (no long-horizon PnL)
@@ -1548,3 +1608,78 @@ The Token Trust Report includes explicit limitations such as:
 
 The legacy holder score and holder-quality blocks remain in the API for compatibility.
 Retail UI should prefer `tokenTrust` + retail holder labels as the primary interpretation path.
+
+## 13. Off-Chain Credibility Engine
+
+### Why this layer exists
+
+Retail and B2B users need project-context signals beyond on-chain holder concentration: official website/docs, claimed use case, meme vs infrastructure positioning, and open-web corroboration.
+
+The off-chain credibility engine is an additive module that produces a separate **Off-Chain Credibility Report** (0–100 score, tier, verdict, risk flags) from public metadata, website crawl, external evidence, and optional AI classification.
+
+It does **not** change holder analysis, `tokenTrust.trustScore`, or on-chain scoring.
+
+### Implementation
+
+- Orchestrator: `src/token/services/token-offchain-credibility.service.ts` (`pipelineVersion: offchain-v2-evidence`)
+- Discovery: `token-offchain-discovery.service.ts`
+- Website crawl: `token-web-crawler.service.ts`
+- External evidence: `token-offchain-external-evidence.service.ts`
+- AI classifier: `token-offchain-ai-classifier.service.ts` (Gemini flat JSON default; Claude optional)
+- Link validation / score caps: `offchain-link-validation.ts`
+- Persisted at: `qualityMetrics.offChainCredibility` (JSONB, no migration)
+- Dashboard field: `DashboardSummaryResponse.offChainCredibility`
+- Runs in full analyze: `TokenAnalysisService.runAnalysis()` after market context (when `OFFCHAIN_CREDIBILITY_ENABLED`)
+- `TokenAiSummaryService` reads persisted off-chain fields for dashboard summary context when present
+
+### Pipeline flow
+
+1. **Discovery** — resolve official website, docs, GitHub, social from CoinGecko/DexScreener/explorer/Brave; reject aggregator pages as official website
+2. **Crawl** — fetch verified official homepage (Cheerio; optional Playwright fallback)
+3. **External evidence** — Brave/Tavily-style open-web items with trust/relevance/sourceType
+4. **Deterministic category** — pattern rules for infrastructure, defi, meme, rwa, etc.
+5. **AI classifier** (optional) — `projectUnderstanding` from evidence packet; falls back to deterministic on failure/quota
+6. **Post-processing** — `applyOffchainReportPostProcessing()` final alignment (identity, meme/RWA wording, claim sources, evidence-ref priority)
+7. **Scoring** — additive score with category-specific caps (meme ≤ 69 without deep docs; infrastructure high-trust floor ~92–96; RWA ~88–92)
+
+### OffChainCredibilityReport shape (high level)
+
+- `status`, `score`, `riskLevel`, `credibilityTier`, `verdict`, `confidence`
+- `discoveryMode`, `websiteSource`, `discoveredLinks`, `officialLinkConfidence`
+- `projectProfile` — category, `claimedUseCase`, `hasClearUseCase`, docs/github/whitepaper flags
+- `projectUnderstanding` — AI or deterministic understanding with `identityStatus`, `evidenceQuality`, `evidenceRefs`, `warnings`
+- `credibilitySignals[]`, `riskFlags[]`, `claimChecks[]`
+- `unknowns[]`, `limitations[]`, `checkedAt`
+- optional `externalEvidence`, `aiClassifierDebug`
+
+### Post-processing rules (June 2026)
+
+Applied after AI/deterministic classification, before scoring:
+
+| Rule | Behavior |
+|------|----------|
+| **Project identity vs team** | High official-link confidence + `official_verified` + website → upgrade AI `unverified` identity to `verified` (or `partially_verified` at medium confidence). Team anonymity warnings do not imply unverified project identity. |
+| **Meme tokens** | `hasClearUseCase` forced `false`; use-case normalized to community/meme wording; `evidenceQuality` capped at `moderate` when utility docs are thin; risk flag title `Limited Functional Utility Evidence`. |
+| **RWA tokens** | `normalizeRwaUseCase()` preserves docs-derived facts but broadens narrow governance-only text to full RWA / institutional on-chain finance ecosystem wording. |
+| **Claim source cleanup** | DEX Screener, GeckoTerminal, Uniswap, OKX/Coinbase/Robinhood/MetaMask price pages removed from adoption/backer claim `sourceUrls`; official website/docs used instead. |
+| **Evidence ref priority** | Official website → official docs → contract-matched social → trusted directories → explorer → trading pages last. |
+
+### Category score calibration (representative)
+
+| Category | Typical live range | Notes |
+|----------|-------------------|-------|
+| Infrastructure (Chainlink) | 92–96 | High official confidence + docs + GitHub; strong oracle/infrastructure signals |
+| RWA (ONDO) | 88–92 | Official docs promoted; RWA use-case normalization |
+| Meme (PEPE) | ≤ 69 | Verified official site allowed; utility/docs capped; meme positioning preserved |
+
+### Separation from other modules
+
+- **Not merged** into `tokenTrust.trustScore` (same pattern as contract safety)
+- **Not** on-chain contract analysis
+- Score caps in `applyOffchainScoreCaps()` are off-chain-specific; changing them does not affect holder or trust scores
+
+### Limitations (always surfaced in report)
+
+- Off-chain credibility is shown separately and is not yet merged into the visible on-chain score
+- Based on publicly available metadata and website signals; crawlers may miss JS-heavy or blocked pages
+- Does not prove investment safety; AI classification uses only provided evidence

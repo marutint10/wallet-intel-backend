@@ -37,6 +37,7 @@ import { TokenOffchainDiscoveryService } from './services/token-offchain-discove
 import { TokenOffchainCredibilityService } from './services/token-offchain-credibility.service';
 import { TokenOffchainExternalEvidenceService } from './services/token-offchain-external-evidence.service';
 import { TokenOffchainAiClassifierService } from './services/token-offchain-ai-classifier.service';
+import { TokenFinalReportService } from './services/token-final-report.service';
 
 @Module({
   imports: [
@@ -78,6 +79,7 @@ import { TokenOffchainAiClassifierService } from './services/token-offchain-ai-c
     TokenOffchainExternalEvidenceService,
     TokenOffchainAiClassifierService,
     TokenOffchainCredibilityService,
+    TokenFinalReportService,
   ],
 })
 export class TokenModule {}

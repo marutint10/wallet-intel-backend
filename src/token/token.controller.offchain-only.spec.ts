@@ -56,6 +56,7 @@ describe('TokenController recomputeOffchainOnly', () => {
     const tokenAiSummary = { generateSummary: jest.fn() };
     const tokenDeepAnalysis = { getDeepAnalysis: jest.fn() };
     const tokenChart = { getChart: jest.fn() };
+    const finalReportService = { buildFinalReport: jest.fn() };
 
     const controller = new TokenController(
       {} as never,
@@ -69,6 +70,7 @@ describe('TokenController recomputeOffchainOnly', () => {
       tokenAiSummary as never,
       tokenDeepAnalysis as never,
       tokenChart as never,
+      finalReportService as never,
     );
 
     const response = await controller.recomputeOffchainOnly(
@@ -85,6 +87,7 @@ describe('TokenController recomputeOffchainOnly', () => {
     expect(tokenAiSummary.generateSummary).not.toHaveBeenCalled();
     expect(tokenDeepAnalysis.getDeepAnalysis).not.toHaveBeenCalled();
     expect(tokenChart.getChart).not.toHaveBeenCalled();
+    expect(finalReportService.buildFinalReport).not.toHaveBeenCalled();
     expect(response.aiSummary).toBeNull();
     expect(response.offChainCredibility).toEqual(entity.qualityMetrics?.offChainCredibility);
     expect(response.shareId).toBe('share123');

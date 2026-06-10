@@ -32,6 +32,11 @@ import {
 } from './services/token-chart.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
 import { TokenDeepAnalysisService } from './services/token-deep-analysis.service';
+import {
+  TokenFinalReportService,
+  type TokenFinalReport,
+} from './services/token-final-report.service';
+import type { TokenAnalysisEntity } from './entities/token-analysis.entity';
 
 // Lightweight response shape returned by GET /token/:address/dashboard when the
 // analysis row exists but has not yet completed. Frontend should keep polling
@@ -50,6 +55,7 @@ interface DashboardProcessingResponse {
 type SharedDashboardResponse = DashboardSummaryResponse & {
   shareId: string | null;
   shareUrl: string | null;
+  finalReport?: TokenFinalReport | null;
 };
 
 @Controller('token')
@@ -81,7 +87,18 @@ export class TokenController {
     private readonly tokenAiSummary: TokenAiSummaryService,
     private readonly tokenDeepAnalysis: TokenDeepAnalysisService,
     private readonly tokenChart: TokenChartService,
+    private readonly finalReportService: TokenFinalReportService,
   ) {}
+
+  private withFinalReport(
+    analysis: TokenAnalysisEntity,
+    dashboard: DashboardSummaryResponse,
+  ): DashboardSummaryResponse & { finalReport: TokenFinalReport } {
+    return {
+      ...dashboard,
+      finalReport: this.finalReportService.buildFinalReport({ analysis, dashboard }),
+    };
+  }
 
   // GET /token/:address/holders?chain=ethereum
   // Tests that Chainbase returns top holders for any token contract
@@ -326,8 +343,9 @@ export class TokenController {
       return res.json({ status: entity.status });
     }
 
+    const dashboardBase = this.dashboardSummary.buildDashboardSummary(entity);
     const [dashboard, aiSummary, deepAnalysis] = await Promise.all([
-      Promise.resolve(this.dashboardSummary.buildDashboardSummary(entity)),
+      Promise.resolve(this.withFinalReport(entity, dashboardBase)),
       this.tokenAiSummary.generateSummary(entity),
       this.tokenDeepAnalysis.getDeepAnalysis(
         entity.contractAddress,
@@ -489,8 +507,9 @@ export class TokenController {
     );
 
     try {
+      const dashboardBase = this.dashboardSummary.buildDashboardSummary(result);
       const [dashboard, aiSummary] = await Promise.all([
-        Promise.resolve(this.dashboardSummary.buildDashboardSummary(result)),
+        Promise.resolve(this.withFinalReport(result, dashboardBase)),
         this.tokenAiSummary.generateSummary(result),
       ]);
       return {
