@@ -835,10 +835,26 @@ function applyAiSafetyGuards(
     guarded.warnings.push('Category confidence downgraded because official identity is weak.');
   }
 
-  if (guarded.identityStatus === 'unverified' && guarded.hasClearUseCase === true && strongContractEvidence < 2) {
+  const officialIdentityStrong =
+    Boolean(input.identity.website) &&
+    input.identity.officialLinkConfidence !== 'low' &&
+    input.identity.discoveryMode === 'official_verified';
+
+  if (
+    !officialIdentityStrong &&
+    guarded.identityStatus === 'unverified' &&
+    guarded.hasClearUseCase === true &&
+    strongContractEvidence < 2
+  ) {
     guarded.hasClearUseCase = false;
     guarded.useCaseConfidence = 'low';
-    guarded.warnings.push('Clear use case downgraded because identity is unverified.');
+    if (guarded.normalizedCategory === 'meme') {
+      guarded.warnings.push(
+        'Functional utility evidence is limited because this is primarily a meme/community token.',
+      );
+    } else {
+      guarded.warnings.push('Clear use case downgraded because identity is unverified.');
+    }
   }
 
   if (guarded.normalizedCategory === 'infrastructure' && hasOnlyGenericInfrastructureLanguage(input)) {

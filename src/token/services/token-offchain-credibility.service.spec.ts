@@ -1,6 +1,8 @@
 import { DashboardSummaryService } from './dashboard-summary.service';
 import {
   buildOffChainCredibilityReport,
+  isTradingOrMarketEvidenceUrl,
+  normalizeRwaUseCase,
   TokenOffchainCredibilityService,
   type OffChainCredibilityCollectedData,
 } from './token-offchain-credibility.service';
@@ -426,7 +428,9 @@ describe('buildOffChainCredibilityReport', () => {
 
     expect(report.projectUnderstanding?.source).toBe('deterministic');
     expect(report.projectUnderstanding?.category).toBe('meme');
-    expect(report.projectUnderstanding?.claimedUseCase).toBe('Community-driven meme token');
+    expect(report.projectUnderstanding?.claimedUseCase).toBe(
+      'Community-driven meme token / meme positioning',
+    );
     expect(report.projectUnderstanding?.hasClearUseCase).toBe(false);
     expect(report.score).toBeLessThanOrEqual(75);
     expect(report.verdict.toLowerCase()).toContain('community/meme');
@@ -2122,6 +2126,215 @@ describe('TokenOffchainAiClassifierService', () => {
     expect(report.projectProfile.category).not.toBe('infrastructure');
     expect(report.projectProfile.category).toBe('unknown');
     expect(report.projectProfile.hasClearUseCase).toBe(false);
+  });
+
+  it('upgrades PEPE identity when official links are verified but AI says unverified', () => {
+    const report = buildOffChainCredibilityReport({
+      ...pepeLikeData(),
+      discovery: makeDiscovery({
+        ...pepeLikeData().discovery,
+        officialLinkConfidence: {
+          level: 'high',
+          reasons: ['Trusted metadata and homepage verification'],
+        },
+      }),
+      aiClassification: {
+        source: 'ai',
+        categoryLabel: 'Meme or community token',
+        normalizedCategory: 'meme',
+        categoryConfidence: 'high',
+        claimedUseCase: 'Community-driven meme token',
+        useCaseConfidence: 'low',
+        identityStatus: 'unverified',
+        evidenceQuality: 'strong',
+        possibleNarrative: null,
+        hasClearUseCase: false,
+        reasoning: 'Meme positioning from official website.',
+        evidenceRefs: ['ev_pepe_directory'],
+        warnings: ['Clear use case downgraded because identity is unverified.'],
+      },
+      externalEvidence: {
+        status: 'done',
+        evidenceItems: [
+          {
+            id: 'ev_pepe_directory',
+            sourceType: 'trusted_directory',
+            trustLevel: 'medium',
+            relevance: 'high',
+            url: 'https://www.coingecko.com/en/coins/pepe',
+            title: 'Pepe PEPE meme coin',
+            snippet: 'PEPE is a community-driven meme coin with Pepe the Frog positioning.',
+            matchedContractAddress: true,
+            matchedTokenName: true,
+            reason: 'Trusted directory matched contract and meme positioning.',
+          },
+        ],
+        summary: {
+          trustedDirectoryCount: 1,
+          officialSourceCount: 0,
+          externalValidationCount: 1,
+          riskWarningCount: 0,
+          scamWarningCount: 0,
+          unrelatedCount: 0,
+        },
+      },
+    });
+
+    expect(report.projectUnderstanding?.identityStatus).not.toBe('unverified');
+    expect(['verified', 'partially_verified']).toContain(report.projectUnderstanding?.identityStatus);
+    expect(report.projectUnderstanding?.hasClearUseCase).toBe(false);
+    expect(report.projectUnderstanding?.evidenceQuality).toBe('moderate');
+    expect(
+      report.projectUnderstanding?.warnings?.some((warning) => /identity is unverified/i.test(warning)),
+    ).toBe(false);
+    expect(
+      report.projectUnderstanding?.warnings?.some((warning) => /team identity is limited|anonymous/i.test(warning)),
+    ).toBe(true);
+    expect(
+      report.riskFlags.some((flag) => flag.title === 'Limited Functional Utility Evidence'),
+    ).toBe(true);
+    expect(
+      report.riskFlags.some((flag) => flag.title === 'No Clear Use Case Found'),
+    ).toBe(false);
+  });
+
+  it('normalizes narrow ONDO governance use case to RWA ecosystem wording', () => {
+    const report = buildOffChainCredibilityReport({
+      tokenName: 'Ondo',
+      tokenSymbol: 'ONDO',
+      contractAddress: '0xfaba6f8e4a5e8ab82f62fe7c39859fa577269be3',
+      discovery: makeDiscovery({
+        discoveryMode: 'official_verified',
+        discoveredLinks: {
+          website: 'https://ondo.foundation/',
+          docs: 'https://docs.ondo.foundation/ondo-token',
+          whitepaper: null,
+          github: null,
+          twitter: null,
+          telegram: null,
+          discord: null,
+          blog: null,
+        },
+        linkSources: { website: 'coingecko', docs: 'coingecko' },
+        hasTrustedOfficialWebsite: true,
+        officialLinkConfidence: { level: 'high', reasons: ['Trusted metadata'] },
+      }),
+      crawl: makeCrawl({
+        homepageUrl: 'https://ondo.foundation/',
+        extractedText:
+          'ONDO is the governance token for the Ondo DAO and Flux Finance within tokenized real-world assets.',
+        mentions: { tokenName: true, tokenSymbol: true, contractAddress: false },
+        signals: {
+          hasDocs: true,
+          hasWhitepaper: false,
+          hasGithub: false,
+          hasAuditsMentioned: false,
+          hasTeamInfo: false,
+          hasClearUseCase: true,
+          suspiciousPhrases: [],
+          adoptionClaims: [],
+        },
+      }),
+      externalEvidence: ondoEvidenceFixture(),
+      aiClassification: {
+        source: 'ai',
+        categoryLabel: 'Tokenized real-world assets / institutional on-chain finance',
+        normalizedCategory: 'rwa',
+        categoryConfidence: 'high',
+        claimedUseCase: 'governance token for the Ondo DAO and Flux Finance',
+        useCaseConfidence: 'high',
+        identityStatus: 'verified',
+        evidenceQuality: 'strong',
+        possibleNarrative: null,
+        hasClearUseCase: true,
+        reasoning: 'Official docs describe ONDO governance role.',
+        evidenceRefs: ['ev_ondo_docs'],
+        warnings: [],
+      },
+      fetchErrors: [],
+    });
+
+    expect(report.discoveredLinks.docs).toBe('https://docs.ondo.foundation/ondo-token');
+    expect(report.projectUnderstanding?.category).toBe('rwa');
+    expect(report.projectUnderstanding?.claimedUseCase).toMatch(/RWA|institutional on-chain finance/i);
+    expect(report.projectProfile.claimedUseCase).toMatch(/RWA|institutional on-chain finance/i);
+  });
+
+  it('removes DEX Screener as institutional adoption claim source for Chainlink', () => {
+    const data = linkLikeData();
+    const report = buildOffChainCredibilityReport({
+      ...data,
+      crawl: makeCrawl({
+        ...data.crawl!,
+        extractedText:
+          `${data.crawl?.extractedText ?? ''} Chainlink institutional adoption across major ecosystems.`,
+        signals: {
+          ...data.crawl!.signals,
+          adoptionClaims: ['institutional adoption'],
+        },
+      }),
+      externalEvidence: {
+        ...externalEvidenceFixture(),
+        evidenceItems: [
+          ...externalEvidenceFixture().evidenceItems,
+          {
+            id: 'ev_chainlink_dex',
+            sourceType: 'trusted_directory',
+            trustLevel: 'medium',
+            relevance: 'high',
+            url: 'https://dexscreener.com/ethereum/0x5149',
+            title: 'Chainlink institutional adoption trading',
+            snippet: 'Institutional adoption and enterprise integration trading page.',
+            matchedContractAddress: true,
+            reason: 'Market directory matched contract.',
+          },
+        ],
+      },
+    });
+
+    const adoption = report.claimChecks.find((check) => check.claim === 'institutional adoption');
+    expect(adoption).toBeDefined();
+    expect(adoption?.sourceUrls.some((url) => /dexscreener/i.test(url))).toBe(false);
+    expect(
+      adoption?.sourceUrls.some((url) => /chain\.link/i.test(url)),
+    ).toBe(true);
+    expect(report.score).toBeGreaterThanOrEqual(90);
+    expect(report.riskFlags).toEqual([]);
+  });
+
+  it('prioritizes official docs over trading refs in projectUnderstanding evidenceRefs', () => {
+    const report = buildOffChainCredibilityReport({
+      ...linkLikeData(),
+      aiClassification: aiClassification({
+        evidenceRefs: ['ev_chainlink_dex', 'ev_chainlink_docs', 'ev_chainlink_github'],
+      }),
+      externalEvidence: {
+        ...externalEvidenceFixture(),
+        evidenceItems: [
+          ...externalEvidenceFixture().evidenceItems,
+          {
+            id: 'ev_chainlink_dex',
+            sourceType: 'trusted_directory',
+            trustLevel: 'medium',
+            relevance: 'high',
+            url: 'https://www.okx.com/price/chainlink-link',
+            title: 'Chainlink price',
+            snippet: 'OKX price and trading page.',
+            matchedContractAddress: true,
+            reason: 'Market directory matched contract.',
+          },
+        ],
+      },
+    });
+
+    expect(report.projectUnderstanding?.evidenceRefs[0]).toBe('ev_chainlink_docs');
+    expect(
+      report.projectUnderstanding?.evidenceRefs.some((ref) => ref === 'ev_chainlink_dex'),
+    ).toBe(true);
+    expect(isTradingOrMarketEvidenceUrl('https://dexscreener.com/ethereum/pepe')).toBe(true);
+    expect(normalizeRwaUseCase('governance token for the Ondo DAO and Flux Finance', {
+      discoveredLinks: { docs: 'https://docs.ondo.foundation/ondo-token' } as never,
+    })).toMatch(/RWA|institutional on-chain finance/i);
   });
 
   it('ONDO deterministic fallback classifies RWA/institutional finance instead of infrastructure', () => {
