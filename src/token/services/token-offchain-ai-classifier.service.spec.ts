@@ -233,11 +233,63 @@ describe('TokenOffchainAiClassifierService Gemini flat output', () => {
     expect(result.debug.failureReason).toBeDefined();
   });
 
+  it('reuses cached Gemini classification when evidence hash is unchanged', async () => {
+    const service = new TokenOffchainAiClassifierService(makeGeminiConfig());
+    const geminiSpy = jest.spyOn(service as any, 'generateGeminiText').mockResolvedValue(
+      JSON.stringify({
+        category: 'rwa',
+        categoryLabel: 'Tokenized real-world assets / institutional on-chain finance',
+        categoryConfidence: 'high',
+        claimedUseCase: 'Tokenized real-world assets and institutional-grade on-chain finance',
+        useCaseConfidence: 'high',
+        identityStatus: 'verified',
+        evidenceQuality: 'strong',
+        hasClearUseCase: true,
+        reasoning: 'Official docs support ONDO as an RWA project.',
+        warningSummary: '',
+      }),
+    );
+    const input = {
+      tokenName: 'Ondo',
+      tokenSymbol: 'ONDO',
+      contractAddress: '0xfaba6f8e4a5e8ab82f62fe7c39859fa577269be3',
+      chain: 'ethereum',
+      discoveredLinks: links({ website: 'https://ondo.foundation/' }),
+      discoveryMode: 'official_verified' as const,
+      officialLinkConfidence: 'high' as const,
+      crawl: null,
+      externalEvidence: evidence([
+        {
+          id: 'ev_ondo_docs',
+          sourceType: 'official_docs',
+          trustLevel: 'high',
+          relevance: 'high',
+          url: 'https://docs.ondo.foundation/ondo-token',
+          title: 'ONDO Docs',
+          snippet: 'Tokenized real-world assets.',
+          matchedOfficialDomain: true,
+          reason: 'Official docs matched.',
+        },
+      ]),
+      forceRefresh: true,
+    };
+
+    const first = await service.classifyWithDebug(input);
+    const second = await service.classifyWithDebug(input);
+
+    expect(first.debug.resultSource).toBe('ai');
+    expect(second.debug.resultSource).toBe('ai');
+    expect(second.debug.attempted).toBe(false);
+    expect(geminiSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('backs off Gemini after quota errors in the same session', async () => {
     const service = new TokenOffchainAiClassifierService(makeGeminiConfig());
+    const secondService = new TokenOffchainAiClassifierService(makeGeminiConfig());
     const geminiSpy = jest
       .spyOn(service as any, 'generateGeminiText')
       .mockRejectedValueOnce(new Error('429 Too Many Requests: quotaValue: 20 retryDelay: 30s'));
+    const secondGeminiSpy = jest.spyOn(secondService as any, 'generateGeminiText');
 
     const input = {
       tokenName: 'PEPE',
@@ -253,7 +305,12 @@ describe('TokenOffchainAiClassifierService Gemini flat output', () => {
     };
 
     const first = await service.classifyWithDebug(input);
-    const second = await service.classifyWithDebug(input);
+    const second = await secondService.classifyWithDebug({
+      ...input,
+      tokenName: 'FLOYX',
+      tokenSymbol: 'FLOYX',
+      contractAddress: '0xf10yx00000000000000000000000000000000000',
+    });
 
     expect(first.debug.attempted).toBe(true);
     expect(first.debug.failureReason).toContain('429');
@@ -261,6 +318,7 @@ describe('TokenOffchainAiClassifierService Gemini flat output', () => {
     expect(second.debug.skippedReason).toBe('gemini_quota_backoff');
     expect(second.debug.resultSource).toBe('deterministic');
     expect(geminiSpy).toHaveBeenCalledTimes(1);
+    expect(secondGeminiSpy).not.toHaveBeenCalled();
   });
 
   it('prefers official evidence over explorer and trading evidence refs', async () => {

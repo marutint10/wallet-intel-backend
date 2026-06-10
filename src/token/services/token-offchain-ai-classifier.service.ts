@@ -195,9 +195,9 @@ const GEMINI_FLAT_RESPONSE_SCHEMA = {
 
 @Injectable()
 export class TokenOffchainAiClassifierService {
+  private static readonly geminiBackoffUntilByModel = new Map<string, Date>();
   private readonly logger = new Logger(TokenOffchainAiClassifierService.name);
   private anthropicClient: Anthropic | null = null;
-  private geminiBackoffUntil: Date | null = null;
   private readonly classifierCache = new OffchainMemoryCache<OffchainAiProjectClassification>(
     200,
     24 * 60 * 60 * 1000,
@@ -313,9 +313,14 @@ export class TokenOffchainAiClassifierService {
       };
     }
 
-    if (provider === 'gemini' && this.geminiBackoffUntil && Date.now() < this.geminiBackoffUntil.getTime()) {
+    const geminiBackoffKey = buildGeminiBackoffKey(runtime.aiClassifierModel);
+    const geminiBackoffUntil =
+      provider === 'gemini'
+        ? TokenOffchainAiClassifierService.geminiBackoffUntilByModel.get(geminiBackoffKey)
+        : undefined;
+    if (provider === 'gemini' && geminiBackoffUntil && Date.now() < geminiBackoffUntil.getTime()) {
       this.logger.warn(
-        `Off-chain AI classifier skipped: gemini_quota_backoff until=${this.geminiBackoffUntil.toISOString()}`,
+        `Off-chain AI classifier skipped: gemini_quota_backoff key=${geminiBackoffKey} until=${geminiBackoffUntil.toISOString()}`,
       );
       return {
         classification: null,
@@ -351,7 +356,10 @@ export class TokenOffchainAiClassifierService {
     } catch (err: unknown) {
       const failureReason = getErrorMessage(err);
       if (provider === 'gemini' && isGeminiQuotaError(failureReason)) {
-        this.geminiBackoffUntil = new Date(Date.now() + resolveGeminiRetryDelayMs(failureReason));
+        TokenOffchainAiClassifierService.geminiBackoffUntilByModel.set(
+          geminiBackoffKey,
+          new Date(Date.now() + resolveGeminiRetryDelayMs(failureReason)),
+        );
       }
       this.logger.warn(`Off-chain AI classifier failed: ${failureReason}`);
       return {
@@ -1062,7 +1070,11 @@ function resolveGeminiRetryDelayMs(message: string): number {
       return Math.min(seconds * 1_000, 60 * 60 * 1_000);
     }
   }
-  return 10 * 60 * 1_000;
+  return 60 * 1_000;
+}
+
+function buildGeminiBackoffKey(model: string): string {
+  return `offchain-ai-backoff:gemini:${model}`;
 }
 
 function buildEvidenceHash(input: OffchainAiClassifierInput): string {

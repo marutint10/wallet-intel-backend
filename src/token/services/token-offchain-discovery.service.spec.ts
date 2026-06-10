@@ -503,6 +503,14 @@ describe('TokenOffchainDiscoveryService', () => {
       errors: [],
     });
     jest.spyOn(service['webCrawler'], 'fetchPageContent').mockResolvedValue(null);
+    jest.spyOn(service['webCrawler'], 'crawlOfficialWebsite').mockResolvedValue(
+      makeCrawlResult({
+        status: 'error',
+        brokenWebsite: true,
+        extractedText: '',
+        mentions: { tokenName: false, tokenSymbol: false, contractAddress: false },
+      }),
+    );
 
     const result = await service.discoverOfficialLinks({
       tokenName: 'Pepe',
