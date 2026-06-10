@@ -381,6 +381,14 @@ function isLikelyCloneOrWrongToken(
   ) {
     return true;
   }
+  if (
+    (context.tokenSymbol?.toUpperCase() === 'ONDO' || context.tokenName?.toLowerCase() === 'ondo') &&
+    /ondo\.com|ondostate\.gov\.ng|ondo\.neocities\.org|ondo-official\.com|vocaloid|music|socks|apparel|clothing/i.test(
+      `${url} ${text}`,
+    )
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -396,6 +404,10 @@ function isWalletOrMarketDirectoryUrl(url: string): boolean {
   return (
     /(^|\.)phantom\.app$/i.test(hostname) ||
     /(^|\.)wallet\.phantom\.app$/i.test(hostname) ||
+    /(^|\.)okx\.com$/i.test(hostname) ||
+    /(^|\.)metamask\.io$/i.test(hostname) ||
+    /(^|\.)coinbase\.com$/i.test(hostname) ||
+    /(^|\.)dropstab\.com$/i.test(hostname) ||
     /(^|\.)geckoterminal\.com$/i.test(hostname) ||
     /(^|\.)dexscreener\.com$/i.test(hostname) ||
     /(^|\.)dextools\.io$/i.test(hostname)

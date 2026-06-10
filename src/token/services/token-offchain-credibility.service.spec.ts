@@ -476,6 +476,78 @@ describe('buildOffChainCredibilityReport', () => {
     expect(backedBy?.status).toBe('unsupported');
     expect(backedBy?.sourceUrls).not.toContain('https://chain.link/security');
     expect(report.projectProfile.category).toBe('infrastructure');
+    expect(
+      report.riskFlags.some(
+        (flag) => flag.title === 'Unsupported Major Claim' && flag.description.includes('backed by'),
+      ),
+    ).toBe(false);
+  });
+
+  it('Chainlink strong official evidence keeps score above 90 despite unsupported backed-by wording', () => {
+    const data = linkLikeData();
+    const report = buildOffChainCredibilityReport({
+      ...data,
+      discovery: makeDiscovery({
+        ...data.discovery,
+        discoveredLinks: {
+          ...data.discovery.discoveredLinks,
+          whitepaper: 'https://chain.link/whitepaper',
+        },
+        linkSources: {
+          ...data.discovery.linkSources,
+          whitepaper: 'coingecko',
+        },
+      }),
+      crawl: makeCrawl({
+        ...data.crawl!,
+        extractedText:
+          `${data.crawl?.extractedText ?? ''} Chainlink is backed by robust oracle infrastructure.`,
+        links: {
+          ...data.crawl!.links,
+          whitepaper: 'https://chain.link/whitepaper',
+        },
+      }),
+      externalEvidence: {
+        ...externalEvidenceFixture(),
+        evidenceItems: [
+          ...externalEvidenceFixture().evidenceItems,
+          {
+            id: 'ev_chainlink_security',
+            sourceType: 'official_security' as const,
+            trustLevel: 'high' as const,
+            relevance: 'high' as const,
+            url: 'https://chain.link/security',
+            title: 'Chainlink Security',
+            snippet: 'Official security resources for Chainlink.',
+            matchedOfficialDomain: true,
+            reason: 'Official security page.',
+          },
+          {
+            id: 'ev_chainlink_whitepaper',
+            sourceType: 'official_whitepaper' as const,
+            trustLevel: 'high' as const,
+            relevance: 'high' as const,
+            url: 'https://chain.link/whitepaper',
+            title: 'Chainlink Whitepaper',
+            snippet: 'Official whitepaper for oracle infrastructure.',
+            matchedOfficialDomain: true,
+            reason: 'Official whitepaper.',
+          },
+        ],
+      },
+    });
+
+    expect(report.projectProfile.hasDocs).toBe(true);
+    expect(report.projectProfile.hasGithub).toBe(true);
+    expect(report.projectProfile.hasWhitepaper).toBe(true);
+    expect(report.projectProfile.hasAuditsMentioned).toBe(true);
+    expect(report.score).toBeGreaterThanOrEqual(90);
+    expect(report.score).toBeLessThanOrEqual(97);
+    expect(
+      report.riskFlags.some(
+        (flag) => flag.title === 'Unsupported Major Claim' && flag.severity === 'high',
+      ),
+    ).toBe(false);
   });
 
   it('Chainlink score is capped below perfect while remaining strong', () => {
@@ -554,9 +626,128 @@ describe('buildOffChainCredibilityReport', () => {
     expect(report.discoveryMode).toBe('search_only');
     expect(report.discoveredLinks.website).toBeNull();
     expect(report.projectUnderstanding?.category).toBe('unknown');
+    expect(report.projectUnderstanding?.identityStatus).toBe('unverified');
+    expect(report.projectUnderstanding?.externalValidation).toBe('limited');
     expect(report.projectUnderstanding?.hasClearUseCase).toBe(false);
     expect(report.score).toBeLessThanOrEqual(45);
+    expect(
+      report.credibilitySignals.some(
+        (signal) => signal.title === 'External Evidence Corroboration' && signal.strength === 'high',
+      ),
+    ).toBe(false);
     expect(report.verdict.toLowerCase()).toContain('official identity could not be verified');
+  });
+
+  it('promotes ONDO official docs evidence and removes documentation risk flag', () => {
+    const report = buildOffChainCredibilityReport({
+      tokenName: 'Ondo',
+      tokenSymbol: 'ONDO',
+      contractAddress: '0xfaba6f8e4a5e8ab82f62fe7c39859fa577269be3',
+      discovery: makeDiscovery({
+        status: 'partial',
+        discoveryMode: 'official_verified',
+        discoveredLinks: {
+          website: 'https://ondo.foundation/',
+          docs: null,
+          whitepaper: null,
+          github: null,
+          twitter: null,
+          telegram: null,
+          discord: null,
+          blog: null,
+        },
+        linkSources: { website: 'coingecko' },
+        hasTrustedOfficialWebsite: true,
+        officialLinkConfidence: { level: 'high', reasons: ['Trusted metadata'] },
+      }),
+      crawl: makeCrawl({
+        homepageUrl: 'https://ondo.foundation/',
+        finalUrl: 'https://ondo.foundation/',
+        extractedText:
+          'Ondo provides tokenized real-world assets and institutional-grade on-chain finance.',
+        mentions: { tokenName: true, tokenSymbol: true, contractAddress: false },
+        signals: {
+          hasDocs: false,
+          hasWhitepaper: false,
+          hasGithub: false,
+          hasAuditsMentioned: false,
+          hasTeamInfo: false,
+          hasClearUseCase: true,
+          suspiciousPhrases: [],
+          adoptionClaims: [],
+        },
+      }),
+      externalEvidence: {
+        status: 'done',
+        evidenceItems: [
+          {
+            id: 'ev_ondo_docs',
+            sourceType: 'official_docs',
+            trustLevel: 'high',
+            relevance: 'high',
+            url: 'https://docs.ondo.foundation/ondo-token',
+            title: 'ONDO Token Documentation',
+            snippet: 'Official docs describe tokenized real-world assets.',
+            matchedOfficialDomain: true,
+            reason: 'Official docs subdomain matched.',
+          },
+          {
+            id: 'ev_ondo_github',
+            sourceType: 'official_github',
+            trustLevel: 'high',
+            relevance: 'high',
+            url: 'https://github.com/ondoprotocol',
+            title: 'Ondo GitHub',
+            snippet: 'Official GitHub organization.',
+            matchedTokenName: true,
+            reason: 'Official GitHub evidence.',
+          },
+          {
+            id: 'ev_ondo_whitepaper',
+            sourceType: 'official_whitepaper',
+            trustLevel: 'high',
+            relevance: 'high',
+            url: 'https://docs.ondo.foundation/whitepaper',
+            title: 'Ondo Whitepaper',
+            snippet: 'Official RWA whitepaper.',
+            matchedOfficialDomain: true,
+            reason: 'Official whitepaper evidence.',
+          },
+          {
+            id: 'ev_ondo_socks',
+            sourceType: 'trusted_directory',
+            trustLevel: 'medium',
+            relevance: 'high',
+            url: 'https://ondo.com/socks',
+            title: 'Ondo socks and apparel',
+            snippet: 'Unrelated commercial apparel page.',
+            matchedTokenName: true,
+            reason: 'Should be ignored as unrelated noise.',
+          },
+        ],
+        summary: {
+          trustedDirectoryCount: 1,
+          officialSourceCount: 3,
+          externalValidationCount: 3,
+          riskWarningCount: 0,
+          scamWarningCount: 0,
+          unrelatedCount: 1,
+        },
+      },
+      fetchErrors: [],
+    });
+
+    expect(report.discoveredLinks.docs).toBe('https://docs.ondo.foundation/ondo-token');
+    expect(report.projectProfile.category).toBe('rwa');
+    expect(report.projectProfile.hasDocs).toBe(true);
+    expect(report.projectProfile.hasGithub).toBe(true);
+    expect(report.projectProfile.hasWhitepaper).toBe(true);
+    expect(report.status).toBe('done');
+    expect(report.confidence).toBe('high');
+    expect(report.score).toBeGreaterThanOrEqual(85);
+    expect(report.score).toBeLessThanOrEqual(97);
+    expect(report.riskFlags.some((flag) => flag.title === 'Limited Project Documentation')).toBe(false);
+    expect(report.verdict.toLowerCase()).toMatch(/rwa|institutional on-chain finance/);
   });
 
   it('ONDO verdict mentions RWA institutional finance', () => {

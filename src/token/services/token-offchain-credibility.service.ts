@@ -8,6 +8,7 @@ import {
   capCredibilityTier,
   isAggregatorUrl,
   isLikelyMemeToken,
+  isSameOfficialDomain,
   isTrustedMetadataSource,
   isVerifiedSecondaryLink,
   sanitizeDiscoveredLinks,
@@ -58,6 +59,8 @@ export type ProjectCategory =
   | 'stablecoin'
   | 'other'
   | 'unknown';
+
+type ExternalValidationStrength = 'strong' | 'moderate' | 'limited' | 'weak' | 'none';
 
 export interface OffChainCredibilityReport {
   pipelineVersion?: string;
@@ -135,7 +138,7 @@ export interface OffChainCredibilityReport {
     identityStatus?: 'verified' | 'partially_verified' | 'unverified' | 'unknown';
     evidenceQuality?: 'strong' | 'moderate' | 'weak' | 'limited';
     possibleNarrative?: string | null;
-    externalValidation: 'strong' | 'moderate' | 'weak' | 'none';
+    externalValidation: ExternalValidationStrength;
     communitySignal: 'strong' | 'moderate' | 'weak' | 'unknown';
     negativeRiskEvidence: 'none_found' | 'low' | 'medium' | 'high';
     evidenceRefs: string[];
@@ -164,7 +167,7 @@ interface CategoryMatch {
   score: number;
   claimedUseCase: string | null;
   evidenceRefs?: string[];
-  externalValidation?: 'strong' | 'moderate' | 'weak' | 'none';
+  externalValidation?: ExternalValidationStrength;
   communitySignal?: 'strong' | 'moderate' | 'weak' | 'unknown';
   negativeRiskEvidence?: 'none_found' | 'low' | 'medium' | 'high';
 }
@@ -499,8 +502,14 @@ export function buildOffChainCredibilityReport(
     },
   });
 
-  const discoveredLinks = sanitized.links;
-  const linkSources = sanitized.provenance;
+  const promoted = promoteOfficialEvidenceLinks({
+    links: sanitized.links,
+    provenance: sanitized.provenance,
+    externalEvidence: data.externalEvidence,
+    officialWebsite: sanitized.links.website,
+  });
+  const discoveredLinks = promoted.links;
+  const linkSources = promoted.provenance;
   const officialLinkConfidence = data.discovery.officialLinkConfidence;
   const crawl = sanitizeCrawlForVerifiedWebsite(data.crawl, discoveredLinks.website, linkSources);
   const verifiedCategoryText = buildVerifiedCategoryText({
@@ -538,11 +547,17 @@ export function buildOffChainCredibilityReport(
     data.externalEvidence,
   );
   const finalProjectProfile = applyAiProjectProfile(projectProfile, data.aiClassification);
+  const discoveryMode = data.discovery.discoveryMode ?? 'not_found';
   const projectUnderstanding = buildProjectUnderstanding(
     categoryMatch,
     finalProjectProfile,
     data.externalEvidence,
     data.aiClassification,
+    {
+      officialLinkConfidence: officialLinkConfidence.level,
+      discoveryMode,
+      hasWebsite: Boolean(discoveredLinks.website),
+    },
   );
   const claimChecks = buildClaimChecks(
     combinedText,
@@ -551,7 +566,6 @@ export function buildOffChainCredibilityReport(
     linkSources,
     data.externalEvidence,
   );
-  const discoveryMode = data.discovery.discoveryMode ?? 'not_found';
   const scoring = scoreOffChainCredibility({
     data: { ...data, discovery: { ...data.discovery, discoveredLinks, linkSources } },
     projectProfile: finalProjectProfile,
@@ -568,6 +582,7 @@ export function buildOffChainCredibilityReport(
       hasTrustedDirectoryPresence: data.discovery.trustedDirectoryUrls.length > 0,
     },
     externalEvidence: data.externalEvidence,
+    projectUnderstanding,
   });
 
   const credibilitySignals = buildCredibilitySignals(
@@ -576,6 +591,7 @@ export function buildOffChainCredibilityReport(
     categoryMatch,
     combinedText,
     data.externalEvidence,
+    projectUnderstanding,
   );
   const riskFlags = buildRiskFlags(
     { ...data, discovery: { ...data.discovery, discoveredLinks } },
@@ -627,12 +643,28 @@ export function buildOffChainCredibilityReport(
     status = 'partial';
   }
 
-  const confidence = resolveConfidence(data, officialLinkConfidence.level, crawl);
+  const confidence = resolveConfidence(
+    { ...data, discovery: { ...data.discovery, discoveredLinks, linkSources } },
+    officialLinkConfidence.level,
+    crawl,
+    finalProjectProfile,
+  );
+  if (officialLinkConfidence.level === 'low') {
+    status = status === 'unknown' ? 'unknown' : 'partial';
+  } else if (
+    officialLinkConfidence.level === 'high' &&
+    finalProjectProfile.hasDocs === true &&
+    (finalProjectProfile.hasGithub === true || finalProjectProfile.hasWhitepaper === true)
+  ) {
+    status = 'done';
+  }
   const riskLevel =
     scoring.score === null && status === 'unknown' ? 'unknown' : scoring.riskLevel;
   const credibilityTier =
     scoring.score === null && status === 'unknown' ? 'unknown' : scoring.credibilityTier;
   const verdict = resolveOffChainVerdict({
+    status,
+    confidence,
     riskLevel,
     credibilityTier,
     category: finalProjectProfile.category,
@@ -881,6 +913,81 @@ function collectEvidenceRefs(
   );
 }
 
+function promoteOfficialEvidenceLinks(input: {
+  links: OffChainCredibilityReport['discoveredLinks'];
+  provenance: LinkProvenanceMap;
+  externalEvidence?: OffchainExternalEvidenceResult;
+  officialWebsite: string | null;
+}): {
+  links: OffChainCredibilityReport['discoveredLinks'];
+  provenance: LinkProvenanceMap;
+} {
+  const links = { ...input.links };
+  const provenance = { ...input.provenance };
+  const officialWebsite = input.officialWebsite;
+  if (!officialWebsite || !input.externalEvidence) {
+    return { links, provenance };
+  }
+
+  for (const item of input.externalEvidence.evidenceItems) {
+    if (!item.url || item.trustLevel !== 'high' || item.relevance === 'low') {
+      continue;
+    }
+    if (isUnrelatedOndoNoise(item.url, `${item.title ?? ''} ${item.snippet ?? ''}`)) {
+      continue;
+    }
+    if (
+      !links.docs &&
+      (item.sourceType === 'official_docs' || item.sourceType === 'official_website') &&
+      isOfficialDocsSubdomain(item.url, officialWebsite)
+    ) {
+      links.docs = item.url;
+      provenance.docs = 'search_evidence';
+    }
+    if (
+      !links.whitepaper &&
+      item.sourceType === 'official_whitepaper' &&
+      isSameOfficialDomain(item.url, officialWebsite)
+    ) {
+      links.whitepaper = item.url;
+      provenance.whitepaper = 'search_evidence';
+    }
+    if (!links.github && item.sourceType === 'official_github' && /^https?:\/\/(www\.)?github\.com\//i.test(item.url)) {
+      links.github = item.url;
+      provenance.github = 'search_evidence';
+    }
+  }
+
+  return { links, provenance };
+}
+
+function isOfficialDocsSubdomain(candidateUrl: string, officialWebsite: string): boolean {
+  try {
+    const candidate = new URL(candidateUrl);
+    const official = new URL(officialWebsite);
+    const candidateHost = candidate.hostname.replace(/^www\./i, '').toLowerCase();
+    const officialHost = official.hostname.replace(/^www\./i, '').toLowerCase();
+    return (
+      candidateHost === officialHost ||
+      candidateHost === `docs.${officialHost}` ||
+      (candidateHost.endsWith(`.${officialHost}`) && /(^|\.)docs?\./i.test(`${candidateHost}.`))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isUnrelatedOndoNoise(url: string, text: string): boolean {
+  const combined = `${url} ${text}`.toLowerCase();
+  return (
+    /ondo\.com/.test(combined) ||
+    /ondostate\.gov\.ng/.test(combined) ||
+    /ondo\.neocities\.org/.test(combined) ||
+    /ondo-official\.com/.test(combined) ||
+    /vocaloid|music|socks|apparel|clothing/.test(combined)
+  );
+}
+
 function resolveClaimedUseCase(category: ProjectCategory, text: string): string | null {
   if (category === 'infrastructure') {
     if (/oracle|data feeds?/i.test(text)) {
@@ -905,31 +1012,84 @@ function resolveClaimedUseCase(category: ProjectCategory, text: string): string 
 
 function resolveExternalValidation(
   externalEvidence?: OffchainExternalEvidenceResult,
-): 'strong' | 'moderate' | 'weak' | 'none' {
+  context?: {
+    officialLinkConfidence?: 'low' | 'medium' | 'high';
+    identityStatus?: 'verified' | 'partially_verified' | 'unverified' | 'unknown';
+    evidenceQuality?: 'strong' | 'moderate' | 'weak' | 'limited';
+    discoveryMode?: DiscoveryMode;
+    hasWebsite?: boolean;
+  },
+): ExternalValidationStrength {
   if (!externalEvidence || externalEvidence.status === 'skipped') {
     return 'none';
   }
-  const highValue = externalEvidence.evidenceItems.filter(
+  const officialSourceCount = externalEvidence.evidenceItems.filter(
     (item) =>
       item.relevance === 'high' &&
-      ['official_website', 'official_docs', 'developer_resource', 'trusted_directory', 'news', 'audit_report'].includes(
-        item.sourceType,
-      ),
+      item.trustLevel === 'high' &&
+      item.sourceType.startsWith('official_') &&
+      !isUnrelatedOndoNoise(item.url ?? '', `${item.title ?? ''} ${item.snippet ?? ''}`),
   ).length;
-  const mediumValue = externalEvidence.evidenceItems.filter(
+  const matchedOfficialDomainCount = externalEvidence.evidenceItems.filter(
+    (item) =>
+      item.relevance === 'high' &&
+      item.trustLevel !== 'low' &&
+      item.matchedOfficialDomain &&
+      !isUnrelatedOndoNoise(item.url ?? '', `${item.title ?? ''} ${item.snippet ?? ''}`),
+  ).length;
+  const trustedDirectoryCount = externalEvidence.evidenceItems.filter(
     (item) =>
       item.relevance !== 'low' &&
-      ['trusted_directory', 'developer_resource', 'news', 'security_report', 'audit_report'].includes(
-        item.sourceType,
-      ),
+      item.trustLevel !== 'low' &&
+      item.sourceType === 'trusted_directory' &&
+      (item.matchedContractAddress || item.matchedTokenName || item.matchedTokenSymbol),
   ).length;
-  if (highValue >= 2 || externalEvidence.summary.externalValidationCount >= 4) {
-    return 'strong';
+  return deriveExternalValidationStrength({
+    officialLinkConfidence: context?.officialLinkConfidence ?? 'medium',
+    identityStatus: context?.identityStatus ?? 'partially_verified',
+    evidenceQuality: context?.evidenceQuality ?? (officialSourceCount > 0 ? 'moderate' : 'limited'),
+    trustedDirectoryCount,
+    officialSourceCount,
+    matchedOfficialDomainCount,
+    discoveryMode: context?.discoveryMode,
+    hasWebsite: context?.hasWebsite,
+  });
+}
+
+function deriveExternalValidationStrength(input: {
+  officialLinkConfidence: 'low' | 'medium' | 'high';
+  identityStatus: 'verified' | 'partially_verified' | 'unverified' | 'unknown';
+  evidenceQuality: 'strong' | 'moderate' | 'weak' | 'limited';
+  trustedDirectoryCount: number;
+  officialSourceCount: number;
+  matchedOfficialDomainCount: number;
+  discoveryMode?: DiscoveryMode;
+  hasWebsite?: boolean;
+}): ExternalValidationStrength {
+  if (
+    input.officialLinkConfidence === 'low' ||
+    input.identityStatus === 'unverified' ||
+    input.evidenceQuality === 'weak' ||
+    input.evidenceQuality === 'limited' ||
+    input.discoveryMode === 'search_only' ||
+    input.hasWebsite === false
+  ) {
+    return input.trustedDirectoryCount > 0 ? 'limited' : 'none';
   }
-  if (highValue >= 1 || mediumValue >= 2) {
+  if (
+    input.officialLinkConfidence === 'high' &&
+    (input.identityStatus === 'verified' || input.identityStatus === 'partially_verified') &&
+    (input.evidenceQuality === 'strong' || input.evidenceQuality === 'moderate') &&
+    (input.officialSourceCount >= 1 || input.matchedOfficialDomainCount >= 1)
+  ) {
+    return input.officialSourceCount >= 2 || input.matchedOfficialDomainCount >= 2
+      ? 'strong'
+      : 'moderate';
+  }
+  if (input.trustedDirectoryCount > 0 || input.officialSourceCount > 0) {
     return 'moderate';
   }
-  return mediumValue > 0 ? 'weak' : 'none';
+  return 'none';
 }
 
 function resolveCommunitySignal(
@@ -976,7 +1136,31 @@ function buildProjectUnderstanding(
   projectProfile: OffChainCredibilityReport['projectProfile'],
   externalEvidence?: OffchainExternalEvidenceResult,
   aiClassification?: OffchainAiProjectClassification | null,
+  context?: {
+    officialLinkConfidence: 'low' | 'medium' | 'high';
+    discoveryMode: DiscoveryMode;
+    hasWebsite: boolean;
+  },
 ): NonNullable<OffChainCredibilityReport['projectUnderstanding']> {
+  const identityStatus =
+    aiClassification?.identityStatus ??
+    (context?.officialLinkConfidence === 'high'
+      ? 'verified'
+      : context?.officialLinkConfidence === 'medium'
+        ? 'partially_verified'
+        : 'unverified');
+  const evidenceQuality =
+    aiClassification?.evidenceQuality ??
+    (projectProfile.hasDocs || projectProfile.hasGithub || projectProfile.hasWhitepaper
+      ? 'moderate'
+      : 'limited');
+  const externalValidation = resolveExternalValidation(externalEvidence, {
+    officialLinkConfidence: context?.officialLinkConfidence,
+    identityStatus,
+    evidenceQuality,
+    discoveryMode: context?.discoveryMode,
+    hasWebsite: context?.hasWebsite,
+  });
   if (aiClassification) {
     return {
       source: 'ai',
@@ -989,7 +1173,7 @@ function buildProjectUnderstanding(
       identityStatus: aiClassification.identityStatus,
       evidenceQuality: aiClassification.evidenceQuality,
       possibleNarrative: aiClassification.possibleNarrative,
-      externalValidation: categoryMatch.externalValidation ?? resolveExternalValidation(externalEvidence),
+      externalValidation,
       communitySignal: categoryMatch.communitySignal ?? resolveCommunitySignal(externalEvidence, ''),
       negativeRiskEvidence:
         categoryMatch.negativeRiskEvidence ?? resolveNegativeRiskEvidence(externalEvidence),
@@ -1003,7 +1187,9 @@ function buildProjectUnderstanding(
     category: projectProfile.category,
     claimedUseCase: projectProfile.claimedUseCase,
     hasClearUseCase: projectProfile.hasClearUseCase,
-    externalValidation: categoryMatch.externalValidation ?? resolveExternalValidation(externalEvidence),
+    identityStatus,
+    evidenceQuality,
+    externalValidation,
     communitySignal: categoryMatch.communitySignal ?? resolveCommunitySignal(externalEvidence, ''),
     negativeRiskEvidence:
       categoryMatch.negativeRiskEvidence ?? resolveNegativeRiskEvidence(externalEvidence),
@@ -1228,6 +1414,18 @@ function isAdoptionClaim(claim: string): boolean {
   );
 }
 
+function isPunitiveUnsupportedClaim(
+  check: OffChainCredibilityReport['claimChecks'][number],
+): boolean {
+  if (/backed by/i.test(check.claim)) {
+    return false;
+  }
+  if (/institutional adoption|enterprise adoption|real-world adoption|used by major banks|official partner/i.test(check.claim)) {
+    return true;
+  }
+  return true;
+}
+
 function findExternalEvidenceForClaim(
   claim: string,
   externalEvidence?: OffchainExternalEvidenceResult,
@@ -1282,6 +1480,7 @@ export function scoreOffChainCredibility(input: {
     hasTrustedDirectoryPresence: boolean;
   };
   externalEvidence?: OffchainExternalEvidenceResult;
+  projectUnderstanding?: NonNullable<OffChainCredibilityReport['projectUnderstanding']>;
 }): {
   score: number | null;
   riskLevel: OffChainCredibilityRiskLevel;
@@ -1345,12 +1544,13 @@ export function scoreOffChainCredibility(input: {
     score += 5;
   }
 
-  const externalValidation = resolveExternalValidation(externalEvidence);
+  const externalValidation =
+    input.projectUnderstanding?.externalValidation ?? resolveExternalValidation(externalEvidence);
   if (externalValidation === 'strong') {
     score += 10;
   } else if (externalValidation === 'moderate') {
     score += 6;
-  } else if (externalValidation === 'weak') {
+  } else if (externalValidation === 'weak' || externalValidation === 'limited') {
     score += 2;
   }
 
@@ -1419,7 +1619,8 @@ export function scoreOffChainCredibility(input: {
   }
 
   const unsupportedClaims = claimChecks.filter((check) => check.status === 'unsupported');
-  score -= Math.min(25, unsupportedClaims.length * 10);
+  const punitiveUnsupportedClaims = unsupportedClaims.filter(isPunitiveUnsupportedClaim);
+  score -= Math.min(25, punitiveUnsupportedClaims.length * 10);
 
   const misleadingPhrases = crawl?.signals.suspiciousPhrases ?? [];
   if (misleadingPhrases.length > 0) {
@@ -1460,16 +1661,18 @@ export function scoreOffChainCredibility(input: {
   const hasGithub = projectProfile.hasGithub === true;
   const hasWhitepaper = projectProfile.hasWhitepaper === true;
   const noDeepProjectMaterials = !hasDocs && !hasGithub && !hasWhitepaper;
+  const hasStrongOfficialMaterials =
+    confidence === 'high' && hasDocs && (hasGithub || hasWhitepaper);
   if (score >= 100) {
     score = 97;
   }
   if (confidence === 'low') {
     score = Math.min(score, 55);
   }
-  if (data.discovery.status === 'partial') {
+  if (data.discovery.status === 'partial' && !hasStrongOfficialMaterials) {
     score = Math.min(score, 85);
   }
-  if (unsupportedClaims.length > 0) {
+  if (punitiveUnsupportedClaims.length > 0) {
     score = Math.min(score, 90);
   }
   if (noDeepProjectMaterials) {
@@ -1484,9 +1687,27 @@ export function scoreOffChainCredibility(input: {
   if (
     data.aiClassifierDebug?.enabled &&
     data.aiClassifierDebug.provider === 'gemini' &&
-    data.aiClassifierDebug.resultSource === 'deterministic'
+    data.aiClassifierDebug.resultSource === 'deterministic' &&
+    !hasStrongOfficialMaterials
   ) {
     score = Math.min(score, categoryMatch.category === 'meme' ? 75 : 85);
+  }
+  if (
+    categoryMatch.category === 'infrastructure' &&
+    confidence === 'high' &&
+    hasDocs &&
+    (hasGithub || hasWhitepaper)
+  ) {
+    score = Math.min(Math.max(score, 92), 96);
+  }
+  if (
+    categoryMatch.category === 'rwa' &&
+    confidence === 'high' &&
+    hasDocs &&
+    (hasGithub || hasWhitepaper) &&
+    discoveryMeta.discoveryMode !== 'search_only'
+  ) {
+    score = Math.min(Math.max(score, 88), 92);
   }
 
   let credibilityTier = resolveCredibilityTier(score, projectProfile, adoptionEvidence);
@@ -1525,32 +1746,36 @@ function buildProjectProfile(
   const hasDocs = Boolean(
     (links.docs && isVerifiedSecondaryLink(links.docs, 'docs', validationContext)) ||
       (crawl?.links.docs &&
-        isVerifiedSecondaryLink(crawl.links.docs, 'docs', validationContext)),
+        isVerifiedSecondaryLink(crawl.links.docs, 'docs', validationContext)) ||
+      hasHighTrustOfficialEvidence(externalEvidence, 'official_docs'),
   );
   const hasWhitepaper = Boolean(
     (links.whitepaper &&
       isVerifiedSecondaryLink(links.whitepaper, 'whitepaper', validationContext)) ||
       (crawl?.links.whitepaper &&
-        isVerifiedSecondaryLink(crawl.links.whitepaper, 'whitepaper', validationContext)),
+        isVerifiedSecondaryLink(crawl.links.whitepaper, 'whitepaper', validationContext)) ||
+      hasHighTrustOfficialEvidence(externalEvidence, 'official_whitepaper'),
   );
   const hasGithub = Boolean(
     (links.github && isVerifiedSecondaryLink(links.github, 'github', validationContext)) ||
       (crawl?.links.github &&
-        isVerifiedSecondaryLink(crawl.links.github, 'github', validationContext)),
+        isVerifiedSecondaryLink(crawl.links.github, 'github', validationContext)) ||
+      hasHighTrustOfficialEvidence(externalEvidence, 'official_github'),
   );
   const hasAuditsMentioned = Boolean(
     crawl?.signals.hasAuditsMentioned &&
       ((crawl.links.audit &&
         isVerifiedSecondaryLink(crawl.links.audit, 'docs', validationContext)) ||
         (crawl.links.security &&
-          isVerifiedSecondaryLink(crawl.links.security, 'docs', validationContext))),
+          isVerifiedSecondaryLink(crawl.links.security, 'docs', validationContext))) ||
+      hasHighTrustOfficialEvidence(externalEvidence, 'official_security'),
   );
   const hasTeamInfo = Boolean(crawl?.signals.hasTeamInfo);
   const hasExternalUseCase = Boolean(
     externalEvidence?.evidenceItems.some(
       (item) =>
         item.relevance !== 'low' &&
-        ['developer_resource', 'official_docs', 'official_security', 'official_whitepaper', 'news'].includes(
+        ['official_docs', 'official_security', 'official_whitepaper', 'official_github', 'news'].includes(
           item.sourceType,
         ) &&
         /oracle|data feeds?|infrastructure|protocol|interoperability|ccip|automation|smart contracts?|developer|docs?|defi|security|bridge/i.test(
@@ -1580,12 +1805,32 @@ function buildProjectProfile(
   };
 }
 
+function hasHighTrustOfficialEvidence(
+  externalEvidence: OffchainExternalEvidenceResult | undefined,
+  sourceType: string,
+): boolean {
+  return Boolean(
+    externalEvidence?.evidenceItems.some(
+      (item) =>
+        (item.sourceType === sourceType ||
+          (sourceType === 'official_docs' &&
+            item.sourceType === 'official_website' &&
+            item.url &&
+            /(^https?:\/\/)?docs\./i.test(item.url))) &&
+        item.trustLevel === 'high' &&
+        item.relevance !== 'low' &&
+        !isUnrelatedOndoNoise(item.url ?? '', `${item.title ?? ''} ${item.snippet ?? ''}`),
+    ),
+  );
+}
+
 function buildCredibilitySignals(
   data: OffChainCredibilityCollectedData,
   projectProfile: OffChainCredibilityReport['projectProfile'],
   categoryMatch: CategoryMatch,
   combinedText: string,
   externalEvidence?: OffchainExternalEvidenceResult,
+  projectUnderstanding?: NonNullable<OffChainCredibilityReport['projectUnderstanding']>,
 ): OffChainCredibilityReport['credibilitySignals'] {
   const signals: OffChainCredibilityReport['credibilitySignals'] = [];
 
@@ -1642,7 +1887,8 @@ function buildCredibilitySignals(
       sourceUrl: data.discovery.discoveredLinks.website ?? undefined,
     });
   }
-  const externalValidation = resolveExternalValidation(externalEvidence);
+  const externalValidation =
+    projectUnderstanding?.externalValidation ?? resolveExternalValidation(externalEvidence);
   if (externalValidation === 'strong' || externalValidation === 'moderate') {
     signals.push({
       strength: externalValidation === 'strong' ? 'high' : 'medium',
@@ -1733,7 +1979,9 @@ function buildRiskFlags(
     });
   }
 
-  for (const check of claimChecks.filter((item) => item.status === 'unsupported')) {
+  for (const check of claimChecks.filter(
+    (item) => item.status === 'unsupported' && isPunitiveUnsupportedClaim(item),
+  )) {
     flags.push({
       severity: /guaranteed|1000x|risk[- ]free|fixed apy/i.test(check.claim) ? 'severe' : 'high',
       title: 'Unsupported Major Claim',
@@ -1788,6 +2036,8 @@ function buildRiskFlags(
 }
 
 function resolveOffChainVerdict(input: {
+  status: OffChainCredibilityStatus;
+  confidence: OffChainCredibilityConfidence;
   riskLevel: OffChainCredibilityRiskLevel;
   credibilityTier: CredibilityTier;
   category: ProjectCategory;
@@ -1798,9 +2048,21 @@ function resolveOffChainVerdict(input: {
   hasClearUseCase: boolean | null;
   hasDocs: boolean | null;
   hasGithub: boolean | null;
-  externalValidation: 'strong' | 'moderate' | 'weak' | 'none';
+  externalValidation: ExternalValidationStrength;
   negativeRiskEvidence: 'none_found' | 'low' | 'medium' | 'high';
 }): string {
+  if (input.linkMismatch) {
+    return 'Off-chain credibility requires review because the discovered website or project links could not be confidently matched to the token.';
+  }
+  if (input.confidence === 'low' || input.status === 'partial') {
+    if (!input.hasWebsite) {
+      return 'Official identity could not be verified. Evidence is limited to weak third-party/search results, so off-chain credibility remains uncertain.';
+    }
+    if (input.category === 'meme') {
+      return 'Official identity appears verified, but this is primarily a community/meme token with limited documentation, developer resources, or functional utility evidence.';
+    }
+    return 'Off-chain credibility is partial. Official identity or supporting project evidence is incomplete, so strong verification is not yet established.';
+  }
   if (!input.hasWebsite && input.riskLevel === 'unknown') {
     return 'Off-chain credibility could not be assessed because official project links were unavailable.';
   }
@@ -1809,9 +2071,6 @@ function resolveOffChainVerdict(input: {
   }
   if (!input.hasWebsite && input.externalValidation !== 'strong') {
     return 'Official identity could not be verified. Evidence is limited to weak third-party/search results, so off-chain credibility remains uncertain.';
-  }
-  if (input.linkMismatch || input.officialLinkConfidence.level === 'low') {
-    return 'Off-chain credibility requires review because the discovered website or project links could not be confidently matched to the token.';
   }
   if (
     input.category === 'infrastructure' &&
@@ -1900,7 +2159,18 @@ function resolveConfidence(
   data: OffChainCredibilityCollectedData,
   linkConfidence: 'low' | 'medium' | 'high',
   crawl: TokenWebsiteCrawlResult | null,
+  projectProfile?: OffChainCredibilityReport['projectProfile'],
 ): OffChainCredibilityConfidence {
+  if (linkConfidence === 'low') {
+    return 'low';
+  }
+  if (
+    linkConfidence === 'high' &&
+    projectProfile?.hasDocs === true &&
+    (projectProfile.hasGithub === true || projectProfile.hasWhitepaper === true)
+  ) {
+    return 'high';
+  }
   if (!data.discovery.discoveredLinks.website && !crawl) {
     return 'low';
   }
