@@ -54,7 +54,6 @@ describe('TokenController recomputeOffchainOnly', () => {
       }),
     };
     const tokenAiSummary = { generateSummary: jest.fn() };
-    const tokenDeepAnalysis = { getDeepAnalysis: jest.fn() };
     const tokenChart = { getChart: jest.fn() };
     const finalReportService = { buildFinalReport: jest.fn() };
 
@@ -68,7 +67,6 @@ describe('TokenController recomputeOffchainOnly', () => {
       tokenAnalysis as never,
       dashboardSummary as never,
       tokenAiSummary as never,
-      tokenDeepAnalysis as never,
       tokenChart as never,
       finalReportService as never,
     );
@@ -85,7 +83,6 @@ describe('TokenController recomputeOffchainOnly', () => {
     );
     expect(dashboardSummary.buildDashboardSummary).toHaveBeenCalledWith(entity);
     expect(tokenAiSummary.generateSummary).not.toHaveBeenCalled();
-    expect(tokenDeepAnalysis.getDeepAnalysis).not.toHaveBeenCalled();
     expect(tokenChart.getChart).not.toHaveBeenCalled();
     expect(finalReportService.buildFinalReport).not.toHaveBeenCalled();
     expect(response.aiSummary).toBeNull();

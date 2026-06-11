@@ -153,6 +153,25 @@ export interface DeepAnalysisStatusResponse {
   generatedAt?: string;
 }
 
+/** Returned by deprecated deep-analysis HTTP routes (replaced by finalReport). */
+export interface LegacyDeepAnalysisDisabledResponse {
+  status: 'disabled';
+  message: string;
+  replacement: 'finalReport';
+}
+
+export const LEGACY_DEEP_ANALYSIS_DISABLED_RESPONSE: LegacyDeepAnalysisDisabledResponse =
+  {
+    status: 'disabled',
+    message: 'Legacy deep analysis has been replaced by finalReport.',
+    replacement: 'finalReport',
+  };
+
+/**
+ * @deprecated Legacy Tavily + Claude deep analysis.
+ * Replaced by deterministic finalReport.
+ * Kept temporarily for backward compatibility and existing stored rows.
+ */
 @Injectable()
 export class TokenDeepAnalysisService {
   private static readonly TAVILY_API_URL = 'https://api.tavily.com/search';
@@ -179,6 +198,11 @@ export class TokenDeepAnalysisService {
     private readonly tokenAnalysisRepo: Repository<TokenAnalysisEntity>,
   ) {}
 
+  /**
+   * @deprecated Legacy Tavily + Claude deep analysis.
+   * Replaced by deterministic finalReport.
+   * Kept temporarily for backward compatibility.
+   */
   async triggerDeepAnalysis(
     contractAddress: string,
     chain: string,
@@ -228,6 +252,11 @@ export class TokenDeepAnalysisService {
     }
   }
 
+  /**
+   * @deprecated Legacy Tavily + Claude deep analysis.
+   * Replaced by deterministic finalReport.
+   * Kept temporarily for backward compatibility.
+   */
   async getDeepAnalysis(
     contractAddress: string,
     chain: string,

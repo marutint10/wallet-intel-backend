@@ -31,7 +31,7 @@ import {
   TokenChartService,
 } from './services/token-chart.service';
 import { TokenAnalysisService } from './services/token-analysis.service';
-import { TokenDeepAnalysisService } from './services/token-deep-analysis.service';
+import { LEGACY_DEEP_ANALYSIS_DISABLED_RESPONSE } from './services/token-deep-analysis.service';
 import {
   TokenFinalReportService,
   type TokenFinalReport,
@@ -85,7 +85,6 @@ export class TokenController {
     private readonly tokenAnalysis: TokenAnalysisService,
     private readonly dashboardSummary: DashboardSummaryService,
     private readonly tokenAiSummary: TokenAiSummaryService,
-    private readonly tokenDeepAnalysis: TokenDeepAnalysisService,
     private readonly tokenChart: TokenChartService,
     private readonly finalReportService: TokenFinalReportService,
   ) {}
@@ -282,11 +281,15 @@ export class TokenController {
     };
   }
 
-  // POST /token/:address/deep-analysis/trigger?chain=ethereum
+  /**
+   * @deprecated Legacy Tavily + Claude deep analysis.
+   * Replaced by deterministic finalReport.
+   * Kept temporarily for backward compatibility.
+   */
   @Post(':address/deep-analysis/trigger')
   async triggerTokenDeepAnalysis(
     @Param('address') address: string,
-    @Query('chain') chain: string = 'ethereum',
+    @Query('chain') _chain: string = 'ethereum',
   ) {
     if (!this.isEvmContractAddress(address)) {
       throw new HttpException(
@@ -294,14 +297,18 @@ export class TokenController {
         HttpStatus.BAD_REQUEST,
       );
     }
-    return this.tokenDeepAnalysis.triggerDeepAnalysis(address, chain);
+    return LEGACY_DEEP_ANALYSIS_DISABLED_RESPONSE;
   }
 
-  // GET /token/:address/deep-analysis?chain=ethereum
+  /**
+   * @deprecated Legacy Tavily + Claude deep analysis.
+   * Replaced by deterministic finalReport.
+   * Kept temporarily for backward compatibility.
+   */
   @Get(':address/deep-analysis')
   async getTokenDeepAnalysis(
     @Param('address') address: string,
-    @Query('chain') chain: string = 'ethereum',
+    @Query('chain') _chain: string = 'ethereum',
   ) {
     if (!this.isEvmContractAddress(address)) {
       throw new HttpException(
@@ -309,7 +316,7 @@ export class TokenController {
         HttpStatus.BAD_REQUEST,
       );
     }
-    return this.tokenDeepAnalysis.getDeepAnalysis(address, chain);
+    return LEGACY_DEEP_ANALYSIS_DISABLED_RESPONSE;
   }
 
   // GET /token/:address/chart?chain=ethereum&timeframe=7d
@@ -344,19 +351,15 @@ export class TokenController {
     }
 
     const dashboardBase = this.dashboardSummary.buildDashboardSummary(entity);
-    const [dashboard, aiSummary, deepAnalysis] = await Promise.all([
+    const [dashboard, aiSummary] = await Promise.all([
       Promise.resolve(this.withFinalReport(entity, dashboardBase)),
       this.tokenAiSummary.generateSummary(entity),
-      this.tokenDeepAnalysis.getDeepAnalysis(
-        entity.contractAddress,
-        entity.chain,
-      ),
     ]);
 
     return res.json({
       ...dashboard,
       aiSummary,
-      deepAnalysis,
+      deepAnalysis: null,
       shareId: entity.shareId,
       contractAddress: entity.contractAddress,
       chain: entity.chain,
